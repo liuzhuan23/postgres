@@ -3,6 +3,7 @@
  *
  *	Definitions for the PostgreSQL statistics collector daemon.
  *
+ *	Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  *	Copyright (c) 2001-2019, PostgreSQL Global Development Group
  *
  *	src/include/pgstat.h
@@ -912,8 +913,6 @@ typedef enum
 	WAIT_EVENT_RELATION_MAP_READ,
 	WAIT_EVENT_RELATION_MAP_SYNC,
 	WAIT_EVENT_RELATION_MAP_WRITE,
-	WAIT_EVENT_REORDER_BUFFER_READ,
-	WAIT_EVENT_REORDER_BUFFER_WRITE,
 	WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ,
 	WAIT_EVENT_REPLICATION_SLOT_READ,
 	WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC,

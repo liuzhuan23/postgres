@@ -4,6 +4,7 @@
  *	  POSTGRES free space map for quickly finding free space in relations
  *
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -110,7 +111,7 @@ static int	fsm_set_and_search(Relation rel, FSMAddress addr, uint16 slot,
 static BlockNumber fsm_search(Relation rel, uint8 min_cat);
 static uint8 fsm_vacuum_page(Relation rel, FSMAddress addr,
 							 BlockNumber start, BlockNumber end,
-							 bool *eof);
+							 bool *eof, XLogRecPtr recptr);
 
 
 /******** Public API ********/
@@ -196,7 +197,7 @@ RecordPageWithFreeSpace(Relation rel, BlockNumber heapBlk, Size spaceAvail)
  */
 void
 XLogRecordPageWithFreeSpace(RelFileNode rnode, BlockNumber heapBlk,
-							Size spaceAvail)
+							Size spaceAvail, XLogRecPtr recptr)
 {
 	int			new_cat = fsm_space_avail_to_cat(spaceAvail);
 	FSMAddress	addr;
@@ -218,7 +219,20 @@ XLogRecordPageWithFreeSpace(RelFileNode rnode, BlockNumber heapBlk,
 		PageInit(page, BLCKSZ, 0);
 
 	if (fsm_set_avail(page, slot, new_cat))
+	{
+		/*
+		 * During recovery, MarkBufferDirtyHint() cannot set the LSN even in
+		 * the encryption case because it cannot insert WAL. Therefore we set
+		 * the LSN explicitly.
+		 */
+		if (data_encrypted)
+		{
+			Assert(!XLogRecPtrIsInvalid(recptr));
+			PageSetLSN(page, recptr);
+		}
+
 		MarkBufferDirtyHint(buf, false);
+	}
 	UnlockReleaseBuffer(buf);
 }
 
@@ -254,14 +268,20 @@ GetRecordedFreeSpace(Relation rel, BlockNumber heapBlk)
  * before they access the FSM again.
  *
  * nblocks is the new size of the heap.
+ *
+ * Valid recptr is passed iff called during WAL replay, see
+ * visibilitymap_set() for details.
  */
 void
-FreeSpaceMapTruncateRel(Relation rel, BlockNumber nblocks)
+FreeSpaceMapTruncateRel(Relation rel, BlockNumber nblocks,
+						XLogRecPtr recptr)
 {
 	BlockNumber new_nfsmblocks;
 	FSMAddress	first_removed_address;
 	uint16		first_removed_slot;
 	Buffer		buf;
+
+	Assert(InRecovery || XLogRecPtrIsInvalid(recptr));
 
 	RelationOpenSmgr(rel);
 
@@ -304,6 +324,19 @@ FreeSpaceMapTruncateRel(Relation rel, BlockNumber nblocks)
 		MarkBufferDirty(buf);
 		if (!InRecovery && RelationNeedsWAL(rel) && XLogHintBitIsNeeded())
 			log_newpage_buffer(buf, false);
+		else if (data_encrypted)
+		{
+			if (XLogRecPtrIsInvalid(recptr))
+				set_page_lsn_for_encryption(BufferGetPage(buf));
+			else
+			{
+				/*
+				 * Once the page is dirty, the LSN must be set even during
+				 * recovery because it's used as the encryption IV.
+				 */
+				PageSetLSN(BufferGetPage(buf), recptr);
+			}
+		}
 
 		END_CRIT_SECTION();
 
@@ -336,7 +369,7 @@ FreeSpaceMapTruncateRel(Relation rel, BlockNumber nblocks)
 	 * important because the just-truncated pages were likely marked as
 	 * all-free, and would be preferentially selected.
 	 */
-	FreeSpaceMapVacuumRange(rel, nblocks, InvalidBlockNumber);
+	FreeSpaceMapVacuumRange(rel, nblocks, InvalidBlockNumber, recptr);
 }
 
 /*
@@ -353,7 +386,7 @@ FreeSpaceMapVacuum(Relation rel)
 	/* Recursively scan the tree, starting at the root */
 	(void) fsm_vacuum_page(rel, FSM_ROOT_ADDRESS,
 						   (BlockNumber) 0, InvalidBlockNumber,
-						   &dummy);
+						   &dummy, InvalidXLogRecPtr);
 }
 
 /*
@@ -363,15 +396,20 @@ FreeSpaceMapVacuum(Relation rel)
  * have new free-space information, so update only the upper-level slots
  * covering that block range.  end == InvalidBlockNumber is equivalent to
  * "all the rest of the relation".
+ *
+ * Valid recptr is passed when the function is called during WAL replay, see
+ * visibilitymap_set() for explanation.
  */
 void
-FreeSpaceMapVacuumRange(Relation rel, BlockNumber start, BlockNumber end)
+FreeSpaceMapVacuumRange(Relation rel, BlockNumber start, BlockNumber end,
+						XLogRecPtr recptr)
 {
 	bool		dummy;
 
 	/* Recursively scan the tree, starting at the root */
 	if (end > start)
-		(void) fsm_vacuum_page(rel, FSM_ROOT_ADDRESS, start, end, &dummy);
+		(void) fsm_vacuum_page(rel, FSM_ROOT_ADDRESS, start, end, &dummy,
+							   recptr);
 }
 
 /******** Internal routines ********/
@@ -647,6 +685,12 @@ fsm_extend(Relation rel, BlockNumber fsm_nblocks)
 
 	while (fsm_nblocks_now < fsm_nblocks)
 	{
+		/*
+		 * Encryption: invalid LSN means that the page should not be
+		 * encrypted. This is o.k. as the page is still empty.
+		 */
+		Assert(XLogRecPtrIsInvalid(PageGetLSN(pg.data)));
+
 		PageSetChecksumInplace((Page) pg.data, fsm_nblocks_now);
 
 		smgrextend(rel->rd_smgr, FSM_FORKNUM, fsm_nblocks_now,
@@ -679,6 +723,12 @@ fsm_set_and_search(Relation rel, FSMAddress addr, uint16 slot,
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
 	page = BufferGetPage(buf);
+
+	/*
+	 * No need to care about enforcing LSN for encryption IV -
+	 * MarkBufferDirtyHint() will take care.
+	 */
+	Assert(!InRecovery);
 
 	if (fsm_set_avail(page, slot, newValue))
 		MarkBufferDirtyHint(buf, false);
@@ -800,7 +850,7 @@ fsm_search(Relation rel, uint8 min_cat)
 static uint8
 fsm_vacuum_page(Relation rel, FSMAddress addr,
 				BlockNumber start, BlockNumber end,
-				bool *eof_p)
+				bool *eof_p, XLogRecPtr recptr)
 {
 	Buffer		buf;
 	Page		page;
@@ -832,6 +882,7 @@ fsm_vacuum_page(Relation rel, FSMAddress addr,
 					start_slot,
 					end_slot;
 		bool		eof = false;
+		bool		set_encr_iv = false;
 
 		/*
 		 * Compute the range of slots we need to update on this page, given
@@ -874,7 +925,7 @@ fsm_vacuum_page(Relation rel, FSMAddress addr,
 			if (!eof)
 				child_avail = fsm_vacuum_page(rel, fsm_get_child(addr, slot),
 											  start, end,
-											  &eof);
+											  &eof, recptr);
 			else
 				child_avail = 0;
 
@@ -883,9 +934,33 @@ fsm_vacuum_page(Relation rel, FSMAddress addr,
 			{
 				LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 				fsm_set_avail(page, slot, child_avail);
-				MarkBufferDirtyHint(buf, false);
+				if (!data_encrypted)
+					MarkBufferDirtyHint(buf, false);
+				else
+					set_encr_iv = true;
 				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 			}
+		}
+
+		/*
+		 * If using the LSN as the encryption IV, make sure the same IV is
+		 * used only once. Otherwise there's a chance that different data will
+		 * be encrypted with the same IV.
+		 */
+		if (set_encr_iv)
+		{
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+			/*
+			 * During recovery, MarkBufferDirtyHint() cannot set the LSN even
+			 * in the encryption case because it cannot insert WAL. Therefore
+			 * we set the LSN explicitly.
+			 */
+			if (!XLogRecPtrIsInvalid(recptr))
+				PageSetLSN(page, recptr);
+
+			MarkBufferDirtyHint(buf, false);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 		}
 	}
 

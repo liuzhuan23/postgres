@@ -129,6 +129,8 @@ writeListPage(Relation index, Buffer buffer,
 		recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_INSERT_LISTPAGE);
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	/* get free space before releasing buffer */
 	freesize = PageGetExactFreeSpace(page);
@@ -431,6 +433,17 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
 			PageSetLSN(page, recptr);
 		}
 	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
+
+		PageSetLSN(metapage, recptr);
+
+		if (buffer != InvalidBuffer)
+		{
+			PageSetLSN(page, recptr);
+		}
+	}
 
 	if (buffer != InvalidBuffer)
 		UnlockReleaseBuffer(buffer);
@@ -647,6 +660,18 @@ shiftList(Relation index, Buffer metabuffer, BlockNumber newHead,
 							 sizeof(ginxlogDeleteListPages));
 
 			recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_DELETE_LISTPAGE);
+			PageSetLSN(metapage, recptr);
+
+			for (i = 0; i < data.ndeleted; i++)
+			{
+				page = BufferGetPage(buffers[i]);
+				PageSetLSN(page, recptr);
+			}
+		}
+		else if (data_encrypted)
+		{
+			XLogRecPtr	recptr = get_lsn_for_encryption();
+
 			PageSetLSN(metapage, recptr);
 
 			for (i = 0; i < data.ndeleted; i++)

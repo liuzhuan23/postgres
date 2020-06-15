@@ -6,6 +6,7 @@
  * See src/backend/utils/misc/README for more information.
  *
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Copyright (c) 2000-2019, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
@@ -70,8 +71,10 @@
 #include "replication/syncrep.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
+#include "storage/buffile.h"
 #include "storage/bufmgr.h"
 #include "storage/dsm_impl.h"
+#include "storage/encryption.h"
 #include "storage/standby.h"
 #include "storage/fd.h"
 #include "storage/large_object.h"
@@ -187,6 +190,8 @@ static const char *show_tcp_keepalives_idle(void);
 static const char *show_tcp_keepalives_interval(void);
 static const char *show_tcp_keepalives_count(void);
 static const char *show_tcp_user_timeout(void);
+static bool check_buffile_max_filesize(int *newval, void **extra, GucSource source);
+static void assign_buffile_max_filesize(int newval, void *extra);
 static bool check_maxconnections(int *newval, void **extra, GucSource source);
 static bool check_max_worker_processes(int *newval, void **extra, GucSource source);
 static bool check_autovacuum_max_workers(int *newval, void **extra, GucSource source);
@@ -215,6 +220,10 @@ static bool check_recovery_target_lsn(char **newval, void **extra, GucSource sou
 static void assign_recovery_target_lsn(const char *newval, void *extra);
 static bool check_primary_slot_name(char **newval, void **extra, GucSource source);
 static bool check_default_with_oids(bool *newval, void **extra, GucSource source);
+
+#ifdef USE_ENCRYPTION
+static const char *show_encryption_key_command(void);
+#endif
 
 /* Private functions in guc-file.l that need to be called from guc.c */
 static ConfigVariable *ProcessConfigFileInternal(GucContext context,
@@ -1835,6 +1844,17 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"data_encryption", PGC_INTERNAL, PRESET_OPTIONS,
+			gettext_noop("Shows whether data encryption is turned on for this cluster."),
+			NULL,
+			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
+		},
+		&data_encrypted,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"syslog_sequence_numbers", PGC_SIGHUP, LOGGING_WHERE,
 			gettext_noop("Add sequence number to syslog messages to avoid duplicate suppression."),
 			NULL
@@ -3194,6 +3214,18 @@ static struct config_int ConfigureNamesInt[] =
 		NULL, assign_tcp_user_timeout, show_tcp_user_timeout
 	},
 
+	{
+		/* Not for general use */
+		{"buffile_max_filesize", PGC_SUSET, DEVELOPER_OPTIONS,
+			gettext_noop("Maximum size of BufFile segment."),
+			gettext_noop("This makes testing of some corner cases easier, especially when read or write crosses segment boundary."),
+			GUC_NOT_IN_SAMPLE | GUC_UNIT_BYTE
+		},
+		&buffile_max_filesize,
+		MAX_PHYSICAL_FILESIZE, BLCKSZ, MAX_PHYSICAL_FILESIZE,
+		check_buffile_max_filesize, assign_buffile_max_filesize, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
@@ -4198,6 +4230,19 @@ static struct config_string ConfigureNamesString[] =
 		"llvmjit",
 		NULL, NULL, NULL
 	},
+
+#ifdef USE_ENCRYPTION
+	{
+		{"encryption_key_command", PGC_POSTMASTER, 0,
+			gettext_noop("Sets the shell command that will be called to fetch database encryption key."),
+			NULL,
+			GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY
+		},
+		&encryption_key_command,
+		NULL,
+		NULL, NULL, show_encryption_key_command
+	},
+#endif
 
 	/* End-of-list marker */
 	{
@@ -11264,6 +11309,23 @@ show_tcp_user_timeout(void)
 }
 
 static bool
+check_buffile_max_filesize(int *newval, void **extra, GucSource source)
+{
+	if (*newval % BLCKSZ != 0)
+	{
+		GUC_check_errdetail("The value must be whole multiple of BLCKSZ.");
+		return false;
+	}
+	return true;
+}
+
+static void
+assign_buffile_max_filesize(int newval, void *extra)
+{
+	buffile_seg_blocks = BUFFILE_SEG_BLOCKS(newval);
+}
+
+static bool
 check_maxconnections(int *newval, void **extra, GucSource source)
 {
 	if (*newval + autovacuum_max_workers + 1 +
@@ -11719,5 +11781,16 @@ check_default_with_oids(bool *newval, void **extra, GucSource source)
 
 	return true;
 }
+
+#ifdef USE_ENCRYPTION
+static const char *
+show_encryption_key_command(void)
+{
+	if (encryption_key_command)
+		return encryption_key_command;
+	else
+		return "(disabled)";
+}
+#endif
 
 #include "guc-file.c"

@@ -4,6 +4,7 @@
  *	  local buffer manager. Fast buffer manager for temporary tables,
  *	  which never need to be WAL-logged or checkpointed, etc.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
@@ -16,10 +17,12 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "executor/instrument.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/encryption.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner_private.h"
@@ -211,9 +214,23 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		/* Find smgr relation for buffer */
 		oreln = smgropen(bufHdr->tag.rnode, MyBackendId);
 
-		PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
-
 		/* And write... */
+		if (data_encrypted)
+		{
+			XLogRecPtr	lsn;
+
+			/* Generate fake LSN to become the encryption IV. */
+			lsn = get_lsn_for_encryption();
+
+			encrypt_page((char *) localpage,
+						 encrypt_buf.data,
+						 lsn,
+						 bufHdr->tag.blockNum,
+						 RELPERSISTENCE_TEMP);
+
+			localpage = encrypt_buf.data;
+		}
+		PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 		smgrwrite(oreln,
 				  bufHdr->tag.forkNum,
 				  bufHdr->tag.blockNum,
@@ -277,7 +294,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
  *	  mark a local buffer dirty
  */
 void
-MarkLocalBufferDirty(Buffer buffer)
+MarkLocalBufferDirty(Buffer buffer, bool set_lsn)
 {
 	int			bufid;
 	BufferDesc *bufHdr;
@@ -294,6 +311,14 @@ MarkLocalBufferDirty(Buffer buffer)
 	Assert(LocalRefCount[bufid] > 0);
 
 	bufHdr = GetLocalBufferDescriptor(bufid);
+
+	if (set_lsn)
+	{
+		Block	bufBlock = LocalBufHdrGetBlock(bufHdr);
+		XLogRecPtr	lsn = get_lsn_for_encryption();
+
+		PageSetLSN(bufBlock, lsn);
+	}
 
 	buf_state = pg_atomic_read_u32(&bufHdr->state);
 

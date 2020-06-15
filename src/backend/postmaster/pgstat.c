@@ -11,6 +11,7 @@
  *			- Add a pgstat config column to pg_database, so this
  *			  entire thing can be enabled/disabled on a per db basis.
  *
+ *	Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  *	Copyright (c) 2001-2019, PostgreSQL Global Development Group
  *
  *	src/backend/postmaster/pgstat.c
@@ -53,6 +54,7 @@
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/backendid.h"
+#include "storage/buffile.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -292,10 +294,16 @@ static void pgstat_sighup_handler(SIGNAL_ARGS);
 static PgStat_StatDBEntry *pgstat_get_db_entry(Oid databaseid, bool create);
 static PgStat_StatTabEntry *pgstat_get_tab_entry(PgStat_StatDBEntry *dbentry,
 												 Oid tableoid, bool create);
+static void pgstat_tweak_base(bool permanent, bool global, Oid database,
+							  char tweak_base[TWEAK_BASE_SIZE]);
 static void pgstat_write_statsfiles(bool permanent, bool allDbs);
 static void pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent);
+static void pgstat_write_bytes(TransientBufFile *file, void *ptr, size_t size,
+							   bool *failed);
 static HTAB *pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep);
 static void pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash, bool permanent);
+static void pgstat_read_bytes(TransientBufFile *file, void *ptr, size_t size,
+							  bool *failed);
 static void backend_read_statsfile(void);
 static void pgstat_read_current_status(void);
 
@@ -4004,12 +4012,6 @@ pgstat_get_wait_io(WaitEventIO w)
 		case WAIT_EVENT_RELATION_MAP_WRITE:
 			event_name = "RelationMapWrite";
 			break;
-		case WAIT_EVENT_REORDER_BUFFER_READ:
-			event_name = "ReorderBufferRead";
-			break;
-		case WAIT_EVENT_REORDER_BUFFER_WRITE:
-			event_name = "ReorderBufferWrite";
-			break;
 		case WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ:
 			event_name = "ReorderLogicalMappingRead";
 			break;
@@ -4453,6 +4455,9 @@ PgstatCollectorMain(int argc, char *argv[])
 	 */
 	init_ps_display("stats collector", "", "", "");
 
+	/* BufFileOpenTransient() and friends do use VFD. */
+	InitFileAccess();
+
 	/*
 	 * Read in existing stats files or initialize the stats to zero.
 	 */
@@ -4836,6 +4841,26 @@ pgstat_get_tab_entry(PgStat_StatDBEntry *dbentry, Oid tableoid, bool create)
 	return result;
 }
 
+/*
+ * Initialize the common part of the encryption tweak.
+ */
+static void
+pgstat_tweak_base(bool permanent, bool global, Oid database,
+				  char tweak_base[TWEAK_BASE_SIZE])
+{
+	char	*c = tweak_base;
+
+	StaticAssertStmt(3 + sizeof(Oid) <= TWEAK_BASE_SIZE,
+					 "tweak components do not fit into TWEAK_BASE_SIZE");
+	memset(tweak_base, 0, TWEAK_BASE_SIZE);
+	*c = TRANS_BUF_FILE_PGSTATS;
+	c++;
+	*c = permanent;
+	c++;
+	*c = global;
+	c++;
+	memcpy(c, &database, sizeof(Oid));
+}
 
 /* ----------
  * pgstat_write_statsfiles() -
@@ -4856,18 +4881,24 @@ pgstat_write_statsfiles(bool permanent, bool allDbs)
 {
 	HASH_SEQ_STATUS hstat;
 	PgStat_StatDBEntry *dbentry;
-	FILE	   *fpout;
+	TransientBufFile	   *fpout;
+	File	vfd;
 	int32		format_id;
 	const char *tmpfile = permanent ? PGSTAT_STAT_PERMANENT_TMPFILE : pgstat_stat_tmpname;
 	const char *statfile = permanent ? PGSTAT_STAT_PERMANENT_FILENAME : pgstat_stat_filename;
-	int			rc;
+	bool	failed = false;
+	char tweak_base[TWEAK_BASE_SIZE];
 
 	elog(DEBUG2, "writing stats file \"%s\"", statfile);
 
 	/*
 	 * Open the statistics temp file to write out the current values.
 	 */
-	fpout = AllocateFile(tmpfile, PG_BINARY_W);
+	if (data_encrypted)
+		pgstat_tweak_base(permanent, true, InvalidOid, tweak_base);
+	fpout = BufFileOpenTransient(tmpfile,
+								 O_CREAT | O_WRONLY | O_APPEND | PG_BINARY,
+								 tweak_base);
 	if (fpout == NULL)
 	{
 		ereport(LOG,
@@ -4886,20 +4917,17 @@ pgstat_write_statsfiles(bool permanent, bool allDbs)
 	 * Write the file header --- currently just a format ID.
 	 */
 	format_id = PGSTAT_FILE_FORMAT_ID;
-	rc = fwrite(&format_id, sizeof(format_id), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
+	pgstat_write_bytes(fpout, &format_id, sizeof(format_id), &failed);
 
 	/*
 	 * Write global stats struct
 	 */
-	rc = fwrite(&globalStats, sizeof(globalStats), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
+	pgstat_write_bytes(fpout, &globalStats, sizeof(globalStats), &failed);
 
 	/*
 	 * Write archiver stats struct
 	 */
-	rc = fwrite(&archiverStats, sizeof(archiverStats), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
+	pgstat_write_bytes(fpout, &archiverStats, sizeof(archiverStats), &failed);
 
 	/*
 	 * Walk through the database table.
@@ -4923,28 +4951,37 @@ pgstat_write_statsfiles(bool permanent, bool allDbs)
 		 * Write out the DB entry. We don't write the tables or functions
 		 * pointers, since they're of no use to any other process.
 		 */
-		fputc('D', fpout);
-		rc = fwrite(dbentry, offsetof(PgStat_StatDBEntry, tables), 1, fpout);
-		(void) rc;				/* we'll check for error with ferror */
+		pgstat_write_bytes(fpout, "D", 1, &failed);
+		pgstat_write_bytes(fpout,
+						   dbentry,
+						   offsetof(PgStat_StatDBEntry, tables),
+						   &failed);
 	}
 
 	/*
 	 * No more output to be done. Close the temp file and replace the old
-	 * pgstat.stat with it.  The ferror() check replaces testing for error
-	 * after each individual fputc or fwrite above.
+	 * pgstat.stat with it.
 	 */
-	fputc('E', fpout);
+	pgstat_write_bytes(fpout, "E", 1, &failed);
 
-	if (ferror(fpout))
+	if (failed)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write temporary statistics file \"%s\": %m",
 						tmpfile)));
-		FreeFile(fpout);
+		BufFileCloseTransient(fpout);
 		unlink(tmpfile);
+		return;
 	}
-	else if (FreeFile(fpout) < 0)
+
+	/*
+	 * XXX This might PANIC, see FileClose(). Don't we need special behaviour
+	 * for statistics?
+	 */
+	vfd = BufFileTransientGetVfd(fpout);
+	BufFileCloseTransient(fpout);
+	if (!FileIsClosed(vfd))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5009,12 +5046,14 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	HASH_SEQ_STATUS fstat;
 	PgStat_StatTabEntry *tabentry;
 	PgStat_StatFuncEntry *funcentry;
-	FILE	   *fpout;
+	TransientBufFile	   *fpout;
+	File	vfd;
 	int32		format_id;
 	Oid			dbid = dbentry->databaseid;
-	int			rc;
 	char		tmpfile[MAXPGPATH];
 	char		statfile[MAXPGPATH];
+	bool	failed = false;
+	char tweak_base[TWEAK_BASE_SIZE];
 
 	get_dbstat_filename(permanent, true, dbid, tmpfile, MAXPGPATH);
 	get_dbstat_filename(permanent, false, dbid, statfile, MAXPGPATH);
@@ -5024,7 +5063,11 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	/*
 	 * Open the statistics temp file to write out the current values.
 	 */
-	fpout = AllocateFile(tmpfile, PG_BINARY_W);
+	if (data_encrypted)
+		pgstat_tweak_base(permanent, false, dbid, tweak_base);
+	fpout = BufFileOpenTransient(tmpfile,
+								 O_CREAT | O_WRONLY | O_APPEND | PG_BINARY,
+								 tweak_base);
 	if (fpout == NULL)
 	{
 		ereport(LOG,
@@ -5038,8 +5081,7 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	 * Write the file header --- currently just a format ID.
 	 */
 	format_id = PGSTAT_FILE_FORMAT_ID;
-	rc = fwrite(&format_id, sizeof(format_id), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
+	pgstat_write_bytes(fpout, &format_id, sizeof(format_id), &failed);
 
 	/*
 	 * Walk through the database's access stats per table.
@@ -5047,9 +5089,14 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	hash_seq_init(&tstat, dbentry->tables);
 	while ((tabentry = (PgStat_StatTabEntry *) hash_seq_search(&tstat)) != NULL)
 	{
-		fputc('T', fpout);
-		rc = fwrite(tabentry, sizeof(PgStat_StatTabEntry), 1, fpout);
-		(void) rc;				/* we'll check for error with ferror */
+		pgstat_write_bytes(fpout, "T", 1, &failed);
+		if (failed)
+			break;
+
+		pgstat_write_bytes(fpout, tabentry, sizeof(PgStat_StatTabEntry),
+						   &failed);
+		if (failed)
+			break;
 	}
 
 	/*
@@ -5058,28 +5105,42 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	hash_seq_init(&fstat, dbentry->functions);
 	while ((funcentry = (PgStat_StatFuncEntry *) hash_seq_search(&fstat)) != NULL)
 	{
-		fputc('F', fpout);
-		rc = fwrite(funcentry, sizeof(PgStat_StatFuncEntry), 1, fpout);
-		(void) rc;				/* we'll check for error with ferror */
+		pgstat_write_bytes(fpout, "F", 1, &failed);
+		if (failed)
+			break;
+
+		pgstat_write_bytes(fpout,
+						   funcentry,
+						   sizeof(PgStat_StatFuncEntry),
+						   &failed);
+		if (failed)
+			break;
 	}
 
 	/*
 	 * No more output to be done. Close the temp file and replace the old
-	 * pgstat.stat with it.  The ferror() check replaces testing for error
-	 * after each individual fputc or fwrite above.
+	 * pgstat.stat with it.
 	 */
-	fputc('E', fpout);
+	pgstat_write_bytes(fpout, "E", 1, &failed);
 
-	if (ferror(fpout))
+	if (failed)
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not write temporary statistics file \"%s\": %m",
 						tmpfile)));
-		FreeFile(fpout);
+		BufFileCloseTransient(fpout);
 		unlink(tmpfile);
+		return;
 	}
-	else if (FreeFile(fpout) < 0)
+
+	/*
+	 * XXX This might PANIC, see FileClose(). Don't we need special behaviour
+	 * for statistics?
+	 */
+	vfd = BufFileTransientGetVfd(fpout);
+	BufFileCloseTransient(fpout);
+	if (!FileIsClosed(vfd))
 	{
 		ereport(LOG,
 				(errcode_for_file_access(),
@@ -5103,6 +5164,25 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 		elog(DEBUG2, "removing temporary stats file \"%s\"", statfile);
 		unlink(statfile);
 	}
+}
+
+/*
+ * Convenience routine to write data to file and check for errors.
+ */
+static void
+pgstat_write_bytes(TransientBufFile *file, void *ptr, size_t size,
+	bool *failed)
+{
+	/* Do nothing if any previous write failed. */
+	if (*failed)
+		return;
+
+	/*
+	 * Use BufFileWriteTransient() because it handles encryption
+	 * transparently.
+	 */
+	if (BufFileWriteTransient(file, ptr, size) != size)
+		*failed = true;
 }
 
 /* ----------
@@ -5132,10 +5212,12 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	PgStat_StatDBEntry dbbuf;
 	HASHCTL		hash_ctl;
 	HTAB	   *dbhash;
-	FILE	   *fpin;
+	TransientBufFile *fpin;
 	int32		format_id;
 	bool		found;
 	const char *statfile = permanent ? PGSTAT_STAT_PERMANENT_FILENAME : pgstat_stat_filename;
+	bool	failed = false;
+	char tweak_base[TWEAK_BASE_SIZE];
 
 	/*
 	 * The tables will live in pgStatLocalContext.
@@ -5175,7 +5257,11 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	 * not yet written the stats file the first time.  Any other failure
 	 * condition is suspicious.
 	 */
-	if ((fpin = AllocateFile(statfile, PG_BINARY_R)) == NULL)
+	if (data_encrypted)
+		pgstat_tweak_base(permanent, true, InvalidOid, tweak_base);
+	if ((fpin = BufFileOpenTransient(statfile,
+									 O_RDONLY | PG_BINARY,
+									 tweak_base)) == NULL)
 	{
 		if (errno != ENOENT)
 			ereport(pgStatRunningInCollector ? LOG : WARNING,
@@ -5188,8 +5274,8 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	/*
 	 * Verify it's of the expected format.
 	 */
-	if (fread(&format_id, 1, sizeof(format_id), fpin) != sizeof(format_id) ||
-		format_id != PGSTAT_FILE_FORMAT_ID)
+	pgstat_read_bytes(fpin, &format_id, sizeof(format_id), &failed);
+	if (failed || format_id != PGSTAT_FILE_FORMAT_ID)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -5199,7 +5285,8 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	/*
 	 * Read global stats struct
 	 */
-	if (fread(&globalStats, 1, sizeof(globalStats), fpin) != sizeof(globalStats))
+	pgstat_read_bytes(fpin, &globalStats, sizeof(globalStats), &failed);
+	if (failed)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -5220,7 +5307,8 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	/*
 	 * Read archiver stats struct
 	 */
-	if (fread(&archiverStats, 1, sizeof(archiverStats), fpin) != sizeof(archiverStats))
+	pgstat_read_bytes(fpin, &archiverStats, sizeof(archiverStats), &failed);
+	if (failed)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -5234,15 +5322,22 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	 */
 	for (;;)
 	{
-		switch (fgetc(fpin))
+		char	c;
+
+		pgstat_read_bytes(fpin, &c, 1, &failed);
+
+		switch (c)
 		{
 				/*
 				 * 'D'	A PgStat_StatDBEntry struct describing a database
 				 * follows.
 				 */
 			case 'D':
-				if (fread(&dbbuf, 1, offsetof(PgStat_StatDBEntry, tables),
-						  fpin) != offsetof(PgStat_StatDBEntry, tables))
+				pgstat_read_bytes(fpin,
+								  &dbbuf,
+								  offsetof(PgStat_StatDBEntry, tables),
+								  &failed);
+				if (failed)
 				{
 					ereport(pgStatRunningInCollector ? LOG : WARNING,
 							(errmsg("corrupted statistics file \"%s\"",
@@ -5330,7 +5425,7 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	}
 
 done:
-	FreeFile(fpin);
+	BufFileCloseTransient(fpin);
 
 	/* If requested to read the permanent file, also get rid of it. */
 	if (permanent)
@@ -5365,10 +5460,12 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 	PgStat_StatTabEntry tabbuf;
 	PgStat_StatFuncEntry funcbuf;
 	PgStat_StatFuncEntry *funcentry;
-	FILE	   *fpin;
+	TransientBufFile	   *fpin;
 	int32		format_id;
 	bool		found;
 	char		statfile[MAXPGPATH];
+	bool	failed = false;
+	char tweak_base[TWEAK_BASE_SIZE];
 
 	get_dbstat_filename(permanent, false, databaseid, statfile, MAXPGPATH);
 
@@ -5381,7 +5478,11 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 	 * not yet written the stats file the first time.  Any other failure
 	 * condition is suspicious.
 	 */
-	if ((fpin = AllocateFile(statfile, PG_BINARY_R)) == NULL)
+	if (data_encrypted)
+		pgstat_tweak_base(permanent, false, databaseid, tweak_base);
+	if ((fpin = BufFileOpenTransient(statfile,
+									 O_RDONLY | PG_BINARY,
+									 tweak_base)) == NULL)
 	{
 		if (errno != ENOENT)
 			ereport(pgStatRunningInCollector ? LOG : WARNING,
@@ -5394,8 +5495,8 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 	/*
 	 * Verify it's of the expected format.
 	 */
-	if (fread(&format_id, 1, sizeof(format_id), fpin) != sizeof(format_id) ||
-		format_id != PGSTAT_FILE_FORMAT_ID)
+	pgstat_read_bytes(fpin, &format_id, sizeof(format_id), &failed);
+	if (failed || format_id != PGSTAT_FILE_FORMAT_ID)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -5408,14 +5509,19 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 	 */
 	for (;;)
 	{
-		switch (fgetc(fpin))
+		char	c;
+
+		pgstat_read_bytes(fpin, &c, 1, &failed);
+
+		switch (c)
 		{
 				/*
 				 * 'T'	A PgStat_StatTabEntry follows.
 				 */
 			case 'T':
-				if (fread(&tabbuf, 1, sizeof(PgStat_StatTabEntry),
-						  fpin) != sizeof(PgStat_StatTabEntry))
+				pgstat_read_bytes(fpin, &tabbuf, sizeof(PgStat_StatTabEntry),
+								  &failed);
+				if (failed)
 				{
 					ereport(pgStatRunningInCollector ? LOG : WARNING,
 							(errmsg("corrupted statistics file \"%s\"",
@@ -5448,8 +5554,11 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 				 * 'F'	A PgStat_StatFuncEntry follows.
 				 */
 			case 'F':
-				if (fread(&funcbuf, 1, sizeof(PgStat_StatFuncEntry),
-						  fpin) != sizeof(PgStat_StatFuncEntry))
+				pgstat_read_bytes(fpin,
+								  &funcbuf,
+								  sizeof(PgStat_StatFuncEntry),
+								  &failed);
+				if (failed)
 				{
 					ereport(pgStatRunningInCollector ? LOG : WARNING,
 							(errmsg("corrupted statistics file \"%s\"",
@@ -5493,7 +5602,7 @@ pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash,
 	}
 
 done:
-	FreeFile(fpin);
+	BufFileCloseTransient(fpin);
 
 	if (permanent)
 	{
@@ -5526,15 +5635,21 @@ pgstat_read_db_statsfile_timestamp(Oid databaseid, bool permanent,
 	PgStat_StatDBEntry dbentry;
 	PgStat_GlobalStats myGlobalStats;
 	PgStat_ArchiverStats myArchiverStats;
-	FILE	   *fpin;
+	TransientBufFile	   *fpin;
 	int32		format_id;
 	const char *statfile = permanent ? PGSTAT_STAT_PERMANENT_FILENAME : pgstat_stat_filename;
+	bool	failed = false;
+	char tweak_base[TWEAK_BASE_SIZE];
 
 	/*
 	 * Try to open the stats file.  As above, anything but ENOENT is worthy of
 	 * complaining about.
 	 */
-	if ((fpin = AllocateFile(statfile, PG_BINARY_R)) == NULL)
+	if (data_encrypted)
+		pgstat_tweak_base(permanent, true, InvalidOid, tweak_base);
+	if ((fpin = BufFileOpenTransient(statfile,
+									 O_RDONLY | PG_BINARY,
+									 tweak_base)) == NULL)
 	{
 		if (errno != ENOENT)
 			ereport(pgStatRunningInCollector ? LOG : WARNING,
@@ -5547,36 +5662,37 @@ pgstat_read_db_statsfile_timestamp(Oid databaseid, bool permanent,
 	/*
 	 * Verify it's of the expected format.
 	 */
-	if (fread(&format_id, 1, sizeof(format_id), fpin) != sizeof(format_id) ||
-		format_id != PGSTAT_FILE_FORMAT_ID)
+	pgstat_read_bytes(fpin, &format_id, sizeof(format_id), &failed);
+	if (failed || format_id != PGSTAT_FILE_FORMAT_ID)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		FreeFile(fpin);
+		BufFileCloseTransient(fpin);
 		return false;
 	}
 
 	/*
 	 * Read global stats struct
 	 */
-	if (fread(&myGlobalStats, 1, sizeof(myGlobalStats),
-			  fpin) != sizeof(myGlobalStats))
+	pgstat_read_bytes(fpin, &myGlobalStats, sizeof(myGlobalStats), &failed);
+	if (failed)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		FreeFile(fpin);
+		BufFileCloseTransient(fpin);
 		return false;
 	}
 
 	/*
 	 * Read archiver stats struct
 	 */
-	if (fread(&myArchiverStats, 1, sizeof(myArchiverStats),
-			  fpin) != sizeof(myArchiverStats))
+	pgstat_read_bytes(fpin, &myArchiverStats, sizeof(myArchiverStats),
+					  &failed);
+	if (failed)
 	{
 		ereport(pgStatRunningInCollector ? LOG : WARNING,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		FreeFile(fpin);
+		BufFileCloseTransient(fpin);
 		return false;
 	}
 
@@ -5589,15 +5705,22 @@ pgstat_read_db_statsfile_timestamp(Oid databaseid, bool permanent,
 	 */
 	for (;;)
 	{
-		switch (fgetc(fpin))
+		char	c;
+
+		pgstat_read_bytes(fpin, &c, 1, &failed);
+
+		switch (c)
 		{
 				/*
 				 * 'D'	A PgStat_StatDBEntry struct describing a database
 				 * follows.
 				 */
 			case 'D':
-				if (fread(&dbentry, 1, offsetof(PgStat_StatDBEntry, tables),
-						  fpin) != offsetof(PgStat_StatDBEntry, tables))
+				pgstat_read_bytes(fpin,
+								  &dbentry,
+								  offsetof(PgStat_StatDBEntry, tables),
+								  &failed);
+				if (failed)
 				{
 					ereport(pgStatRunningInCollector ? LOG : WARNING,
 							(errmsg("corrupted statistics file \"%s\"",
@@ -5629,8 +5752,26 @@ pgstat_read_db_statsfile_timestamp(Oid databaseid, bool permanent,
 	}
 
 done:
-	FreeFile(fpin);
+	BufFileCloseTransient(fpin);
 	return true;
+}
+
+/*
+ * Convenience routine to read data from file and check for errors.
+ */
+static void
+pgstat_read_bytes(TransientBufFile *file, void *ptr, size_t size,
+	bool *failed)
+{
+	/* Do nothing if any previous read failed. */
+	if (*failed)
+		return;
+
+	/*
+	 * Use BufFileReadTransient() because it handles encryption transparently.
+	 */
+	if (BufFileReadTransient(file, ptr, size) != size)
+		*failed = true;
 }
 
 /*

@@ -394,6 +394,8 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 }
@@ -475,6 +477,8 @@ vacuumLeafRoot(spgBulkDeleteState *bds, Relation index, Buffer buffer)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 }
@@ -596,6 +600,8 @@ vacuumRedirectAndPlaceholder(Relation index, Buffer buffer)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 }

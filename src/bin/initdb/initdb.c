@@ -38,6 +38,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -68,11 +69,13 @@
 #include "common/logging.h"
 #include "common/restricted_token.h"
 #include "common/username.h"
+#include "fe_utils/encryption.h"
 #include "fe_utils/string_utils.h"
 #include "getaddrinfo.h"
 #include "getopt_long.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "storage/encryption.h"
 
 
 /* Ideally this would be in a .h file, but it hardly seems worth the trouble */
@@ -171,6 +174,8 @@ static bool output_failed = false;
 static int	output_errno = 0;
 static char *pgdata_native;
 
+unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+
 /* defaults */
 static int	n_connections = 10;
 static int	n_buffers = 50;
@@ -239,6 +244,7 @@ static char **filter_lines_with_token(char **lines, const char *token);
 static char **readfile(const char *path);
 static void writefile(char *path, char **lines);
 static FILE *popen_check(const char *command, const char *mode);
+static void send_encryption_key(FILE *f);
 static char *get_id(void);
 static int	get_encoding_id(const char *encoding_name);
 static void set_input(char **dest, const char *filename);
@@ -581,6 +587,22 @@ popen_check(const char *command, const char *mode)
 	if (cmdfd == NULL)
 		pg_log_error("could not execute command \"%s\": %m", command);
 	return cmdfd;
+}
+
+/*
+ * Send encryption key in hexadecimal format to the file stream passed.
+ *
+ * The backend processes could actually receive binary data but that would
+ * make startup of postgres in single-user mode less convenient.
+ */
+static void
+send_encryption_key(FILE *f)
+{
+	int	i;
+
+	for (i = 0; i < ENCRYPTION_KEY_LENGTH; i++)
+		fprintf(f, "%.2x", encryption_key[i]);
+	fputc('\n', f);
 }
 
 /*
@@ -1233,6 +1255,18 @@ setup_config(void)
 
 	snprintf(path, sizeof(path), "%s/postgresql.conf", pg_data);
 
+	if (encryption_key_command)
+#ifdef USE_ENCRYPTION
+	{
+		snprintf(repltok, sizeof(repltok), "encryption_key_command = '%s'",
+				 escape_quotes(encryption_key_command));
+		conflines = replace_token(conflines, "#encryption_key_command = ''", repltok);
+	}
+#else
+		/* encryption_key_command should not be set */
+		Assert(false);
+#endif
+
 	writefile(path, conflines);
 	if (chmod(path, pg_file_create_mode) != 0)
 	{
@@ -1377,6 +1411,7 @@ bootstrap_template1(void)
 	char	  **bki_lines;
 	char		headerline[MAXPGPATH];
 	char		buf[64];
+	char *encr_opt_str = NULL;
 
 	printf(_("running bootstrap script ... "));
 	fflush(stdout);
@@ -1444,16 +1479,36 @@ bootstrap_template1(void)
 	/* Also ensure backend isn't confused by this environment var: */
 	unsetenv("PGCLIENTENCODING");
 
+	/* Prepare the -K option for the backend. */
+	if (encryption_key_command)
+	{
+		size_t		len;
+
+		len = 3;
+		encr_opt_str = (char *) pg_malloc(len);
+		snprintf(encr_opt_str, len, "-K");
+	}
+	else
+	{
+		encr_opt_str = (char *) pg_malloc(1);
+		encr_opt_str[0] = '\0';
+	}
+
 	snprintf(cmd, sizeof(cmd),
-			 "\"%s\" --boot -x1 -X %u %s %s %s",
+			 "\"%s\" --boot -x1 -X %u %s %s %s %s",
 			 backend_exec,
 			 wal_segment_size_mb * (1024 * 1024),
 			 data_checksums ? "-k" : "",
+			 encr_opt_str,
 			 boot_options,
 			 debug ? "-d 5" : "");
 
 
 	PG_CMD_OPEN;
+
+	/* If the cluster is encrypted, first send the encryption key. */
+	if (encryption_key_command)
+		send_encryption_key(cmdfd);
 
 	for (line = bki_lines; *line != NULL; line++)
 	{
@@ -2376,6 +2431,10 @@ usage(const char *progname)
 	printf(_("\nLess commonly used options:\n"));
 	printf(_("  -d, --debug               generate lots of debugging output\n"));
 	printf(_("  -k, --data-checksums      use data page checksums\n"));
+#ifdef	USE_ENCRYPTION
+	printf(_("  -K, --encryption-key-command\n"
+			 "                            command that returns encryption key\n"));
+#endif							/* USE_ENCRYPTION */
 	printf(_("  -L DIRECTORY              where to find the input files\n"));
 	printf(_("  -n, --no-clean            do not clean up after errors\n"));
 	printf(_("  -N, --no-sync             do not wait for changes to be written safely to disk\n"));
@@ -2955,6 +3014,40 @@ initialize_data_directory(void)
 	/* Top level PG_VERSION is checked by bootstrapper, so make it first */
 	write_version_file(NULL);
 
+	/*
+	 * If the cluster will be encrypted, write the KDF file so that encryption
+	 * key can be derived from password.
+	 */
+	if (encryption_key_command)
+#ifdef USE_ENCRYPTION
+	{
+		/*
+		 * XXX Since execution of encryption_key_command produce the key (as
+		 * opposed to password), we don't know if the command received the key
+		 * itself or a password. If DBA provided initdb with a key, he will
+		 * never use password in the future (there was no KDF so far so the
+		 * key could not be derived from password, and the password can hardly
+		 * be derived from the key), so the KDF file may be useless. We don't
+		 * have enough information to recognize this special case, so just
+		 * initialize and write the KDF unconditionally.
+		 */
+		init_kdf();
+		write_kdf_file(pg_data);
+
+		/*
+		 * The key command is allowed to use pg_keytool, which in turn needs
+		 * the KDF parameters. The KDF parameters are now available so we can
+		 * run the command.
+		 */
+		run_encryption_key_command(pg_data);
+	}
+#else
+	{
+		/* User should not be able to enable encryption. */
+		Assert(false);
+	}
+#endif	/* USE_ENCRYPTION */
+
 	/* Select suitable configuration settings */
 	set_null_conf();
 	test_config_settings();
@@ -2983,6 +3076,10 @@ initialize_data_directory(void)
 			 DEVNULL);
 
 	PG_CMD_OPEN;
+
+	/* If the cluster is encrypted, first send the encryption key. */
+	if (encryption_key_command)
+		send_encryption_key(cmdfd);
 
 	setup_auth(cmdfd);
 
@@ -3052,6 +3149,9 @@ main(int argc, char *argv[])
 		{"waldir", required_argument, NULL, 'X'},
 		{"wal-segsize", required_argument, NULL, 12},
 		{"data-checksums", no_argument, NULL, 'k'},
+#ifdef	USE_ENCRYPTION
+		{"encryption-key-command", required_argument, NULL, 'K'},
+#endif							/* USE_ENCRYPTION */
 		{"allow-group-access", no_argument, NULL, 'g'},
 		{NULL, 0, NULL, 0}
 	};
@@ -3094,7 +3194,7 @@ main(int argc, char *argv[])
 
 	/* process command-line options */
 
-	while ((c = getopt_long(argc, argv, "dD:E:kL:nNU:WA:sST:X:g", long_options, &option_index)) != -1)
+	while ((c = getopt_long(argc, argv, "dD:E:kK:L:nNU:WA:sST:X:g", long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{
@@ -3146,6 +3246,11 @@ main(int argc, char *argv[])
 			case 'k':
 				data_checksums = true;
 				break;
+#ifdef	USE_ENCRYPTION
+			case 'K':
+				encryption_key_command = pg_strdup(optarg);
+				break;
+#endif							/* USE_ENCRYPTION */
 			case 'L':
 				share_path = pg_strdup(optarg);
 				break;
@@ -3315,6 +3420,24 @@ main(int argc, char *argv[])
 
 	if (pwprompt || pwfilename)
 		get_su_pwd();
+
+	/*
+	 * Try to retrieve the command from environment variable. We do this
+	 * primarily to create encrypted clusters during automated tests. XXX Not
+	 * sure the variable should be documented. If we do, then pg_ctl should
+	 * probably accept it too.
+	 */
+	if (encryption_key_command == NULL)
+	{
+		encryption_key_command = getenv("PGENCRKEYCMD");
+		if (encryption_key_command && strlen(encryption_key_command) == 0)
+			encryption_key_command = NULL;
+	}
+
+	if (encryption_key_command)
+		printf(_("Data encryption is enabled.\n"));
+	else
+		printf(_("Data encryption is disabled.\n"));
 
 	printf("\n");
 

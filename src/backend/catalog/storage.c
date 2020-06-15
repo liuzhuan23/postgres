@@ -3,6 +3,7 @@
  * storage.c
  *	  code to create and destroy physical storage for relations
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -245,12 +246,12 @@ RelationTruncate(Relation rel, BlockNumber nblocks)
 	/* Truncate the FSM first if it exists */
 	fsm = smgrexists(rel->rd_smgr, FSM_FORKNUM);
 	if (fsm)
-		FreeSpaceMapTruncateRel(rel, nblocks);
+		FreeSpaceMapTruncateRel(rel, nblocks, InvalidXLogRecPtr);
 
 	/* Truncate the visibility map too if it exists. */
 	vm = smgrexists(rel->rd_smgr, VISIBILITYMAP_FORKNUM);
 	if (vm)
-		visibilitymap_truncate(rel, nblocks);
+		visibilitymap_truncate(rel, nblocks, InvalidXLogRecPtr);
 
 	/*
 	 * We WAL-log the truncation before actually truncating, which means
@@ -333,12 +334,27 @@ RelationCopyStorage(SMgrRelation src, SMgrRelation dst,
 
 	for (blkno = 0; blkno < nblocks; blkno++)
 	{
+		char	*buf_read, *buf_dst;
+		Page	page_encr = NULL;
+		XLogRecPtr	lsn;
+
 		/* If we got a cancel signal during the copy of the data, quit */
 		CHECK_FOR_INTERRUPTS();
 
-		smgrread(src, forkNum, blkno, buf.data);
+		if (!data_encrypted)
+			buf_read = buf.data;
+		else
+			buf_read = encrypt_buf.data;
 
-		if (!PageIsVerified(page, blkno))
+		smgrread(src, forkNum, blkno, buf_read);
+
+		if (data_encrypted)
+		{
+			decrypt_page(buf_read, buf.data, blkno, relpersistence);
+			page_encr = buf_read;
+		}
+
+		if (!PageIsVerified(page, blkno, page_encr))
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("invalid page in block %u of relation %s",
@@ -353,16 +369,39 @@ RelationCopyStorage(SMgrRelation src, SMgrRelation dst,
 		 * space.
 		 */
 		if (use_wal)
+		{
 			log_newpage(&dst->smgr_rnode.node, forkNum, blkno, page, false);
+			lsn = PageGetLSN(page);
+		}
+		else if (data_encrypted)
+			lsn = get_lsn_for_encryption();
 
-		PageSetChecksumInplace(page, blkno);
+		buf_dst = (char *) page;
+
+		/*
+		 * Encrypt only if we have valid IV. It should be always except when
+		 * log_newpage() encountered an empty page - it should be safe not to
+		 * encrypt such one.
+		 */
+		if (data_encrypted && !XLogRecPtrIsInvalid(lsn))
+		{
+			encrypt_page(buf_dst,
+						 encrypt_buf.data,
+						 lsn,
+						 blkno,
+						 relpersistence);
+
+			buf_dst = encrypt_buf.data;
+		}
+
+		PageSetChecksumInplace(buf_dst, blkno);
 
 		/*
 		 * Now write the page.  We say isTemp = true even if it's not a temp
 		 * rel, because there's no need for smgr to schedule an fsync for this
 		 * write; we'll do it ourselves below.
 		 */
-		smgrextend(dst, forkNum, blkno, buf.data, true);
+		smgrextend(dst, forkNum, blkno, buf_dst, true);
 	}
 
 	/*
@@ -629,10 +668,10 @@ smgr_redo(XLogReaderState *record)
 
 		if ((xlrec->flags & SMGR_TRUNCATE_FSM) != 0 &&
 			smgrexists(reln, FSM_FORKNUM))
-			FreeSpaceMapTruncateRel(rel, xlrec->blkno);
+			FreeSpaceMapTruncateRel(rel, xlrec->blkno, lsn);
 		if ((xlrec->flags & SMGR_TRUNCATE_VM) != 0 &&
 			smgrexists(reln, VISIBILITYMAP_FORKNUM))
-			visibilitymap_truncate(rel, xlrec->blkno);
+			visibilitymap_truncate(rel, xlrec->blkno, lsn);
 
 		FreeFakeRelcacheEntry(rel);
 	}

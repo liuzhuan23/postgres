@@ -2,6 +2,7 @@
  *
  * receivelog.h
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -38,6 +39,7 @@ typedef struct StreamCtl
 	bool		mark_done;		/* Mark segment as done in generated archive */
 	bool		do_sync;		/* Flush to disk to ensure consistent state of
 								 * data */
+	bool		decrypt;		/* Decrypt the stream if it's encrypted. */
 
 	stream_stop_callback stream_stop;	/* Stop streaming when returns true */
 

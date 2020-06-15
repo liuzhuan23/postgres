@@ -4,6 +4,7 @@
  *	  This file contains definitions for structures and
  *	  externs for functions used by frontend postgres applications.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -258,6 +259,10 @@ extern PGconn *PQconnectStart(const char *conninfo);
 extern PGconn *PQconnectStartParams(const char *const *keywords,
 									const char *const *values, int expand_dbname);
 extern PostgresPollingStatusType PQconnectPoll(PGconn *conn);
+extern int PQconnectSSLHandshake(PGconn *conn);
+extern char PQconnectionSSLMode(PGconn *conn);
+extern int PQconnectedToSocket(PGconn *conn);
+extern int PQpacketSend(PGconn *conn, char *data, size_t len);
 
 /* Synchronous (blocking) */
 extern PGconn *PQconnectdb(const char *conninfo);

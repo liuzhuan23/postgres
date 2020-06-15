@@ -37,6 +37,7 @@
  * record, wait for it to be replicated to the standby, and then exit.
  *
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -77,6 +78,7 @@
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
 #include "storage/condition_variable.h"
+#include "storage/encryption.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
@@ -256,7 +258,9 @@ static void LagTrackerWrite(XLogRecPtr lsn, TimestampTz local_flush_time);
 static TimeOffset LagTrackerRead(int head, XLogRecPtr lsn, TimestampTz now);
 static bool TransactionIdInRecentPast(TransactionId xid, uint32 epoch);
 
-static void XLogRead(char *buf, XLogRecPtr startptr, Size count);
+static int	XLogReadBuffer(char *buf, int nbytes, int startoff);
+static void XLogRead(char *buf, XLogRecPtr startptr, Size count,
+		 bool decrypt);
 
 
 /* Initialize walsender process before entering the main command loop */
@@ -530,6 +534,8 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	pq_endmessage(&buf);
 }
 
+static bool decrypt_stream = false;
+
 /*
  * Handle START_REPLICATION command.
  *
@@ -694,6 +700,20 @@ StartReplication(StartReplicationCmd *cmd)
 		/* Main loop of walsender */
 		replication_active = true;
 
+		if (cmd->decrypt)
+		{
+			if (data_encrypted)
+				decrypt_stream = true;
+			else
+			{
+				ereport(NOTICE,
+						(errmsg("decryption requested but the cluster is not encrypted")));
+				decrypt_stream = false;
+			}
+		}
+		else
+			decrypt_stream = false;
+
 		WalSndLoop(XLogSendPhysical);
 
 		replication_active = false;
@@ -787,7 +807,7 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 		count = flushptr - targetPagePtr;	/* part of the page available */
 
 	/* now actually read the data, we know it's there */
-	XLogRead(cur_page, targetPagePtr, XLOG_BLCKSZ);
+	XLogRead(cur_page, targetPagePtr, XLOG_BLCKSZ, data_encrypted);
 
 	return count;
 }
@@ -2353,19 +2373,53 @@ WalSndKill(int code, Datum arg)
 	SpinLockRelease(&walsnd->mutex);
 }
 
+static int
+XLogReadBuffer(char *buf, int nbytes, int startoff)
+{
+	int			readbytes;
+
+	/* Need to seek in the file? */
+	if (sendOff != startoff)
+	{
+		if (lseek(sendFile, (off_t) startoff, SEEK_SET) < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not seek in log segment %s to offset %u: %m",
+							XLogFileNameP(curFileTimeLine, sendSegNo),
+							startoff)));
+		sendOff = startoff;
+	}
+
+	pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
+	readbytes = read(sendFile, buf, nbytes);
+	pgstat_report_wait_end();
+	if (readbytes <= 0)
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read from log segment %s, offset %u, length %lu: %m",
+						XLogFileNameP(curFileTimeLine, sendSegNo),
+						sendOff, (unsigned long) nbytes)));
+	}
+
+	return readbytes;
+}
+
 /*
- * Read 'count' bytes from WAL into 'buf', starting at location 'startptr'
+ * Read 'count' bytes from WAL into 'buf', starting at location
+ * 'startptr'. Decrypt the data if it's encrypted and if caller wants it
+ * decrypted.
  *
- * XXX probably this should be improved to suck data directly from the
- * WAL buffers when possible.
+ * XXX probably this should be improved to fetch data directly from the WAL
+ * buffers when possible.
  *
  * Will open, and keep open, one WAL segment stored in the global file
- * descriptor sendFile. This means if XLogRead is used once, there will
- * always be one descriptor left open until the process ends, but never
- * more than one.
+ * descriptor sendFile. This means if XLogRead is used once, there will always
+ * be one descriptor left open until the process ends, but never more than
+ * one.
  */
 static void
-XLogRead(char *buf, XLogRecPtr startptr, Size count)
+XLogRead(char *buf, XLogRecPtr startptr, Size count, bool decrypt)
 {
 	char	   *p;
 	XLogRecPtr	recptr;
@@ -2455,42 +2509,88 @@ retry:
 			sendOff = 0;
 		}
 
-		/* Need to seek in the file? */
-		if (sendOff != startoff)
-		{
-			if (lseek(sendFile, (off_t) startoff, SEEK_SET) < 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not seek in log segment %s to offset %u: %m",
-								XLogFileNameP(curFileTimeLine, sendSegNo),
-								startoff)));
-			sendOff = startoff;
-		}
+		/* Caller should not request decryption of unencrypted data. */
+		Assert(!(decrypt && !data_encrypted));
 
-		/* How many bytes are within this segment? */
-		if (nbytes > (wal_segment_size - startoff))
-			segbytes = wal_segment_size - startoff;
+		if (data_encrypted && decrypt)
+		{
+			int			pageoff = startoff % XLOG_BLCKSZ;
+			uint32		pagebase = startoff - pageoff;
+			int			bufbytes,
+						bufend,
+						i;
+			char		tweak[TWEAK_SIZE];
+
+			/*
+			 * Only accept as much data as what can fit into the buffer.
+			 */
+			if (nbytes > (ENCRYPT_BUF_XLOG_SIZE - pageoff))
+				bufbytes = ENCRYPT_BUF_XLOG_SIZE - pageoff;
+			else
+				bufbytes = nbytes;
+			bufend = pageoff + bufbytes;
+
+			/*
+			 * Read the data, including the leading part of the page which
+			 * caller is not interested in. The tweak we passed to
+			 * encrypt_block() for encryption was for the beginning of the
+			 * block, so it'd be hard to start decryption anywhere else.
+			 */
+			readbytes = 0;
+			while (readbytes < bufend)
+				readbytes += XLogReadBuffer(encrypt_buf_xlog + readbytes,
+											bufend - readbytes,
+											pagebase + readbytes);
+
+			/*
+			 * Decrypt the data one page at a time (the tweak is only valid
+			 * for particular page).
+			 */
+			for (i = 0; i < readbytes; i += XLOG_BLCKSZ)
+			{
+				Size		nencrypt;
+
+				XLogEncryptionTweak(tweak,
+									curFileTimeLine,
+									sendSegNo,
+									pagebase + i);
+
+				/*
+				 * If the last page is not complete, only decrypt the used
+				 * part.
+				 */
+				if ((bufend - i) < XLOG_BLCKSZ)
+					nencrypt = bufend - i;
+				else
+					nencrypt = XLOG_BLCKSZ;
+
+				decrypt_block(encrypt_buf_xlog + i,
+							  encrypt_buf_xlog + i,
+							  nencrypt,
+							  tweak,
+							  InvalidBlockNumber,
+							  EDK_PERMANENT);
+			}
+
+			/*
+			 * Caller does not care that we possibly had to read pageoff bytes
+			 * in addition (because we cannot decrypt trailing part of the
+			 * page alone). This overhead must not affect the accounting.
+			 */
+			readbytes = bufbytes;
+
+			/* Copy the data to the output buffer. */
+			memcpy(p, encrypt_buf_xlog + pageoff, bufbytes);
+		}
 		else
-			segbytes = nbytes;
+		{
+			/* How many bytes are within this segment? */
+			if (nbytes > (wal_segment_size - startoff))
+				segbytes = wal_segment_size - startoff;
+			else
+				segbytes = nbytes;
 
-		pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
-		readbytes = read(sendFile, p, segbytes);
-		pgstat_report_wait_end();
-		if (readbytes < 0)
-		{
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not read from log segment %s, offset %u, length %zu: %m",
-							XLogFileNameP(curFileTimeLine, sendSegNo),
-							sendOff, (Size) segbytes)));
-		}
-		else if (readbytes == 0)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read from log segment %s, offset %u: read %d of %zu",
-							XLogFileNameP(curFileTimeLine, sendSegNo),
-							sendOff, readbytes, (Size) segbytes)));
+			readbytes = XLogReadBuffer(p, segbytes, startoff);
 		}
 
 		/* Update state for read */
@@ -2769,7 +2869,8 @@ XLogSendPhysical(void)
 	 * calls.
 	 */
 	enlargeStringInfo(&output_message, nbytes);
-	XLogRead(&output_message.data[output_message.len], startptr, nbytes);
+	XLogRead(&output_message.data[output_message.len], startptr, nbytes,
+			 decrypt_stream);
 	output_message.len += nbytes;
 	output_message.data[output_message.len] = '\0';
 

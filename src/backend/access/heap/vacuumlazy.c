@@ -780,7 +780,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			 * Vacuum the Free Space Map to make newly-freed space visible on
 			 * upper-level FSM pages.  Note we have not yet processed blkno.
 			 */
-			FreeSpaceMapVacuumRange(onerel, next_fsm_block_to_vacuum, blkno);
+			FreeSpaceMapVacuumRange(onerel, next_fsm_block_to_vacuum, blkno,
+									InvalidXLogRecPtr);
 			next_fsm_block_to_vacuum = blkno;
 
 			/* Report that we are once again scanning the heap */
@@ -940,6 +941,9 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 				if (RelationNeedsWAL(onerel) &&
 					PageGetLSN(page) == InvalidXLogRecPtr)
 					log_newpage_buffer(buf, true);
+				else if (data_encrypted &&
+						 PageGetLSN(page) == InvalidXLogRecPtr)
+					set_page_lsn_for_encryption(page);
 
 				PageSetAllVisible(page);
 				visibilitymap_set(onerel, blkno, buf, InvalidXLogRecPtr,
@@ -1215,6 +1219,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 										 frozen, nfrozen);
 				PageSetLSN(page, recptr);
 			}
+			else if (data_encrypted)
+				set_page_lsn_for_encryption(page);
 
 			END_CRIT_SECTION();
 		}
@@ -1264,7 +1270,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
 			{
 				FreeSpaceMapVacuumRange(onerel, next_fsm_block_to_vacuum,
-										blkno);
+										blkno, InvalidXLogRecPtr);
 				next_fsm_block_to_vacuum = blkno;
 			}
 		}
@@ -1440,7 +1446,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	 * not there were indexes.
 	 */
 	if (blkno > next_fsm_block_to_vacuum)
-		FreeSpaceMapVacuumRange(onerel, next_fsm_block_to_vacuum, blkno);
+		FreeSpaceMapVacuumRange(onerel, next_fsm_block_to_vacuum, blkno,
+								InvalidXLogRecPtr);
 
 	/* report all blocks vacuumed; and that we're cleaning up */
 	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
@@ -1618,6 +1625,8 @@ lazy_vacuum_page(Relation onerel, BlockNumber blkno, Buffer buffer,
 								vacrelstats->latestRemovedXid);
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	/*
 	 * End critical section, so we safely can do visibility tests (which

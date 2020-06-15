@@ -3,6 +3,7 @@
  * basebackup.c
  *	  code for taking a base backup and streaming it to a standby
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -17,7 +18,10 @@
 #include <time.h>
 
 #include "access/xlog_internal.h"	/* for pg_start/stop_backup */
+#include "catalog/pg_class.h"
+#include "catalog/pg_control.h"
 #include "catalog/pg_type.h"
+#include "common/controldata_utils.h"
 #include "common/file_perm.h"
 #include "lib/stringinfo.h"
 #include "libpq/libpq.h"
@@ -60,6 +64,9 @@ static int64 sendDir(const char *path, int basepathlen, bool sizeonly,
 static bool sendFile(const char *readfilename, const char *tarfilename,
 					 struct stat *statbuf, bool missing_ok, Oid dboid);
 static void sendFileWithContent(const char *filename, const char *content);
+static void sendFileWithContentGeneric(const char *filename,
+									   const char *content,
+									   size_t len, struct stat *statbuf);
 static int64 _tarWriteHeader(const char *filename, const char *linktarget,
 							 struct stat *statbuf, bool sizeonly);
 static int64 _tarWriteDir(const char *pathbuf, int basepathlen, struct stat *statbuf,
@@ -134,6 +141,9 @@ struct exclude_list_item
 	const char *name;
 	bool		match_prefix;
 };
+
+/* Decrypt relation files and WAL. */
+static bool decrypt = false;
 
 /*
  * The contents of these directories are removed or recreated during server
@@ -225,6 +235,7 @@ static const struct exclude_list_item noChecksumFiles[] = {
 	{"pg_filenode.map", false},
 	{"pg_internal.init", true},
 	{"PG_VERSION", false},
+	{"kdf_params", false},
 #ifdef EXEC_BACKEND
 	{"config_exec_params", true},
 #endif
@@ -258,6 +269,10 @@ perform_base_backup(basebackup_options *opt)
 	StringInfo	tblspc_map_file = NULL;
 	int			datadirpathlen;
 	List	   *tablespaces = NIL;
+
+	if (decrypt && !data_encrypted)
+		ereport(NOTICE,
+				(errmsg("decryption requested but the cluster is not encrypted")));
 
 	datadirpathlen = strlen(DataDir);
 
@@ -368,7 +383,34 @@ perform_base_backup(basebackup_options *opt)
 							(errcode_for_file_access(),
 							 errmsg("could not stat file \"%s\": %m",
 									XLOG_CONTROL_FILE)));
-				sendFile(XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, InvalidOid);
+
+				/*
+				 * Adjust control file if the backup is not encrypted.
+				 */
+				if (decrypt && data_encrypted)
+				{
+					ControlFileData	*cfile;
+					bool	crc_ok;
+
+					cfile = get_controlfile(".", &crc_ok);
+					cfile->data_cipher = PG_CIPHER_NONE;
+					cfile->encryption_verification[0] = '\0';
+
+					/* Recalculate CRC of control file */
+					INIT_CRC32C(cfile->crc);
+					COMP_CRC32C(cfile->crc, (char *) cfile,
+								offsetof(ControlFileData, crc));
+					FIN_CRC32C(cfile->crc);
+
+					sendFileWithContentGeneric(XLOG_CONTROL_FILE,
+											   (char *) cfile,
+											   statbuf.st_size,
+											   &statbuf);
+					pfree(cfile);
+				}
+				else
+					sendFile(XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf,
+							 false, InvalidOid);
 			}
 			else
 				sendTablespace(ti->path, false);
@@ -521,6 +563,7 @@ perform_base_backup(basebackup_options *opt)
 			char		buf[TAR_SEND_SIZE];
 			size_t		cnt;
 			pgoff_t		len = 0;
+			uint32		seg_offset = 0;
 
 			snprintf(pathbuf, MAXPGPATH, XLOGDIR "/%s", walFiles[i]);
 			XLogFromFileName(walFiles[i], &tli, &segno, wal_segment_size);
@@ -564,6 +607,38 @@ perform_base_backup(basebackup_options *opt)
 								fp)) > 0)
 			{
 				CheckXLogRemoved(segno, tli);
+
+				if (decrypt && data_encrypted)
+				{
+					if (cnt % XLOG_BLCKSZ != 0)
+						ereport(ERROR,
+								(errmsg("could not decrypt page in file "
+										"\"%s\", offset %u: read buffer size "
+										"%d is not whole multiple of %d",
+										pathbuf, seg_offset, (int) cnt,
+										XLOG_BLCKSZ)));
+
+					/*
+					 * Decrypt the data, one XLOG page at a time because this
+					 * is how it was encrypted.
+					 */
+					while (seg_offset < cnt)
+					{
+						char		tweak[TWEAK_SIZE];
+						char	*data = buf + seg_offset;
+
+						XLogEncryptionTweak(tweak, tli, segno, seg_offset);
+						decrypt_block(data,
+									  data,
+									  XLOG_BLCKSZ,
+									  tweak,
+									  InvalidBlockNumber,
+									  EDK_PERMANENT);
+
+						seg_offset += XLOG_BLCKSZ;
+					}
+				}
+
 				/* Send the chunk as a CopyData message */
 				if (pq_putmessage('d', buf, cnt))
 					ereport(ERROR,
@@ -678,6 +753,7 @@ parse_basebackup_options(List *options, basebackup_options *opt)
 	bool		o_maxrate = false;
 	bool		o_tablespace_map = false;
 	bool		o_noverify_checksums = false;
+	bool		o_decrypt = false;
 
 	MemSet(opt, 0, sizeof(*opt));
 	foreach(lopt, options)
@@ -765,6 +841,15 @@ parse_basebackup_options(List *options, basebackup_options *opt)
 						 errmsg("duplicate option \"%s\"", defel->defname)));
 			noverify_checksums = true;
 			o_noverify_checksums = true;
+		}
+		else if (strcmp(defel->defname, "decrypt") == 0)
+		{
+			if (o_decrypt)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("duplicate option \"%s\"", defel->defname)));
+			decrypt = true;
+			o_decrypt = true;
 		}
 		else
 			elog(ERROR, "option \"%s\" not recognized",
@@ -943,17 +1028,10 @@ SendXlogRecPtrResult(XLogRecPtr ptr, TimeLineID tli)
 	pq_puttextmessage('C', "SELECT");
 }
 
-/*
- * Inject a file with given name and content in the output tar stream.
- */
 static void
 sendFileWithContent(const char *filename, const char *content)
 {
 	struct stat statbuf;
-	int			pad,
-				len;
-
-	len = strlen(content);
 
 	/*
 	 * Construct a stat struct for the backup_label file we're injecting in
@@ -969,9 +1047,26 @@ sendFileWithContent(const char *filename, const char *content)
 #endif
 	statbuf.st_mtime = time(NULL);
 	statbuf.st_mode = pg_file_create_mode;
-	statbuf.st_size = len;
+	statbuf.st_size = strlen(content);
 
-	_tarWriteHeader(filename, NULL, &statbuf, false);
+	sendFileWithContentGeneric(filename, content, 0, &statbuf);
+}
+
+/*
+ * Inject a file with given name and content in the output tar stream.
+ *
+ * If "len" is zero, content is considered a NULL-terminated string.
+ */
+static void
+sendFileWithContentGeneric(const char *filename, const char *content,
+						   size_t len, struct stat *statbuf)
+{
+	int			pad;
+
+	if (len == 0)
+		len = strlen(content);
+
+	_tarWriteHeader(filename, NULL, statbuf, false);
 	/* Send the contents as a CopyData message */
 	pq_putmessage('d', content, len);
 
@@ -1132,6 +1227,25 @@ sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,
 				elog(DEBUG1, "file \"%s\" excluded from backup", de->d_name);
 				excludeFound = true;
 				break;
+			}
+		}
+
+		/*
+		 * KDF_PARAMS_FILE should only be excluded if the backup will be
+		 * decrypted.
+		 */
+		if (decrypt && data_encrypted)
+		{
+			char	*fn;
+
+			fn = last_dir_separator(KDF_PARAMS_FILE);
+			Assert(fn != NULL);
+			fn++;
+
+			if (strcmp(de->d_name, fn) == 0)
+			{
+				elog(DEBUG1, "file \"%s\" excluded from backup", de->d_name);
+				excludeFound = true;
 			}
 		}
 
@@ -1421,6 +1535,9 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 	PageHeader	phdr;
 	int			segmentno = 0;
 	char	   *segmentpath;
+	bool		decrypt_files = decrypt && data_encrypted;
+	bool	decrypt_file = false;
+	bool	verify_checksums = !noverify_checksums && DataChecksumsEnabled();
 	bool		verify_checksum = false;
 
 	fp = AllocateFile(readfilename, "rb");
@@ -1435,7 +1552,11 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 
 	_tarWriteHeader(tarfilename, NULL, statbuf, false);
 
-	if (!noverify_checksums && DataChecksumsEnabled())
+	/*
+	 * Encryption can be applied to pages for which checksum can be computed
+	 * and only to those.
+	 */
+	if (verify_checksums || decrypt_files)
 	{
 		char	   *filename;
 
@@ -1448,7 +1569,8 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 
 		if (is_checksummed_file(readfilename, filename))
 		{
-			verify_checksum = true;
+			verify_checksum = verify_checksums;
+			decrypt_file = decrypt_files;
 
 			/*
 			 * Cut off at the segment boundary (".") to get the segment number
@@ -1476,20 +1598,29 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 		 */
 		Assert(TAR_SEND_SIZE % BLCKSZ == 0);
 
-		if (verify_checksum && (cnt % BLCKSZ != 0))
+		if ((verify_checksum || decrypt_file) && (cnt % BLCKSZ != 0))
 		{
-			ereport(WARNING,
-					(errmsg("could not verify checksum in file \"%s\", block "
-							"%d: read buffer size %d and page size %d "
-							"differ",
-							readfilename, blkno, (int) cnt, BLCKSZ)));
+			const char	*action;
+			int	elevel;
+
+			action = verify_checksum ? "verify checksum" : "decrypt page";
+			elevel = verify_checksum ? WARNING : ERROR;
+
+			ereport(elevel,
+					(errmsg("could not %s in file \"%s\", block "
+							"%d: read buffer size %d is not whole "
+							"multiple of %d ",
+							action, readfilename, blkno, (int) cnt,
+							BLCKSZ)));
 			verify_checksum = false;
 		}
 
-		if (verify_checksum)
+		if (verify_checksum || decrypt_file)
 		{
 			for (i = 0; i < cnt / BLCKSZ; i++)
 			{
+				BlockNumber	blkno_global = blkno + segmentno * RELSEG_SIZE;
+
 				page = buf + BLCKSZ * i;
 
 				/*
@@ -1500,9 +1631,10 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 				 * this case. We also skip completely new pages, since they
 				 * don't have a checksum yet.
 				 */
-				if (!PageIsNew(page) && PageGetLSN(page) < startptr)
+				if (verify_checksum && !PageIsNew(page) &&
+					PageGetLSN(page) < startptr)
 				{
-					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
+					checksum = pg_checksum_page((char *) page, blkno_global);
 					phdr = (PageHeader) page;
 					if (phdr->pd_checksum != checksum)
 					{
@@ -1581,6 +1713,26 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 											"be reported", readfilename)));
 					}
 				}
+
+				/*
+				 * Decrypt the page if needed.
+				 */
+				if (decrypt_file)
+				{
+					/*
+					 * The function should not be called on other than
+					 * permanent relations.
+					 */
+					decrypt_page(page, page, blkno_global,
+								 RELPERSISTENCE_PERMANENT);
+
+					/*
+					 * Compute new checksum for the decrypted page.
+					 */
+					if (DataChecksumsEnabled())
+						PageSetChecksumInplace(page, blkno_global);
+				}
+
 				block_retry = false;
 				blkno++;
 			}

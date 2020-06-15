@@ -3,6 +3,7 @@
  *
  *	options functions
  *
+ *	Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  *	Copyright (c) 2010-2019, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/option.c
  */
@@ -56,6 +57,9 @@ parseCommandLine(int argc, char *argv[])
 		{"socketdir", required_argument, NULL, 's'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"clone", no_argument, NULL, 1},
+#ifdef USE_ENCRYPTION
+		{"encryption-key-command", required_argument, NULL, 'K'},
+#endif	/* USE_ENCRYPTION */
 
 		{NULL, 0, NULL, 0}
 	};
@@ -101,7 +105,7 @@ parseCommandLine(int argc, char *argv[])
 	if (os_user_effective_id == 0)
 		pg_fatal("%s: cannot be run as root\n", os_info.progname);
 
-	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:ko:O:p:P:rs:U:v",
+	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:K:ko:O:p:P:rs:U:v",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -209,6 +213,21 @@ parseCommandLine(int argc, char *argv[])
 				user_opts.transfer_mode = TRANSFER_MODE_CLONE;
 				break;
 
+#ifdef USE_ENCRYPTION
+			case 'K':
+				encryption_key_command = pg_strdup(optarg);
+
+				/*
+				 * If the command is a command line option, it probably means
+				 * that the clusters do not have it in postgresql.conf, and
+				 * therefore we must pass it to pg_ctl when starting them.
+				 */
+				snprintf(encryption_key_command_opt,
+						 strlen(encryption_key_command) + 7,
+						 " -K \"%s\"", encryption_key_command);
+				break;
+#endif	/* USE_ENCRYPTION */
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 						os_info.progname);
@@ -309,6 +328,9 @@ usage(void)
 	printf(_("  -v, --verbose                 enable verbose internal logging\n"));
 	printf(_("  -V, --version                 display version information, then exit\n"));
 	printf(_("  --clone                       clone instead of copying files to new cluster\n"));
+#ifdef	USE_ENCRYPTION
+	printf(_("  -K, --encryption-key-command  command that returns encryption key\n\n"));
+#endif							/* USE_ENCRYPTION */
 	printf(_("  -?, --help                    show this help, then exit\n"));
 	printf(_("\n"
 			 "Before running pg_upgrade you must:\n"

@@ -1167,6 +1167,16 @@ _bt_insertonpg(Relation rel,
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+		{
+			XLogRecPtr	recptr = get_lsn_for_encryption();
+
+			if (BufferIsValid(metabuf))
+				PageSetLSN(metapg, recptr);
+			if (BufferIsValid(cbuf))
+				PageSetLSN(BufferGetPage(cbuf), recptr);
+			PageSetLSN(page, recptr);
+		}
 
 		END_CRIT_SECTION();
 
@@ -1707,6 +1717,17 @@ _bt_split(Relation rel, BTScanInsert itup_key, Buffer buf, Buffer cbuf,
 			PageSetLSN(BufferGetPage(cbuf), recptr);
 		}
 	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
+
+		PageSetLSN(origpage, recptr);
+		PageSetLSN(rightpage, recptr);
+		if (!P_RIGHTMOST(ropaque))
+			PageSetLSN(spage, recptr);
+		if (!isleaf)
+			PageSetLSN(BufferGetPage(cbuf), recptr);
+	}
 
 	END_CRIT_SECTION();
 
@@ -2182,6 +2203,14 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
 							((PageHeader) rootpage)->pd_upper);
 
 		recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_NEWROOT);
+
+		PageSetLSN(lpage, recptr);
+		PageSetLSN(rootpage, recptr);
+		PageSetLSN(metapg, recptr);
+	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
 
 		PageSetLSN(lpage, recptr);
 		PageSetLSN(rootpage, recptr);

@@ -3,6 +3,7 @@
  * bufpage.c
  *	  POSTGRES standard buffer page code.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -17,6 +18,7 @@
 #include "access/htup_details.h"
 #include "access/itup.h"
 #include "access/xlog.h"
+#include "common/string.h"
 #include "pgstat.h"
 #include "storage/checksum.h"
 #include "utils/memdebug.h"
@@ -77,16 +79,17 @@ PageInit(Page page, Size pageSize, Size specialSize)
  * allow zeroed pages here, and are careful that the page access macros
  * treat such a page as empty and without free space.  Eventually, VACUUM
  * will clean up such a page and make it usable.
+ *
+ * If "page_encr" is passed, it points to encrypted page and "page" is its
+ * plain form. The point is that checksum needs to be verified before
+ * decryption, but other fields must be checked after that.
  */
 bool
-PageIsVerified(Page page, BlockNumber blkno)
+PageIsVerified(Page page, BlockNumber blkno, Page page_encr)
 {
 	PageHeader	p = (PageHeader) page;
-	size_t	   *pagebytes;
-	int			i;
 	bool		checksum_failure = false;
 	bool		header_sane = false;
-	bool		all_zeroes = false;
 	uint16		checksum = 0;
 
 	/*
@@ -96,10 +99,25 @@ PageIsVerified(Page page, BlockNumber blkno)
 	{
 		if (DataChecksumsEnabled())
 		{
+			Page page_save = NULL;
+
+			if (page_encr)
+			{
+				page_save = page;
+				page = page_encr;
+				p = (PageHeader) page;
+			}
+
 			checksum = pg_checksum_page((char *) page, blkno);
 
 			if (checksum != p->pd_checksum)
 				checksum_failure = true;
+
+			if (page_save)
+			{
+				page = page_save;
+				p = (PageHeader) page;
+			}
 		}
 
 		/*
@@ -119,26 +137,8 @@ PageIsVerified(Page page, BlockNumber blkno)
 			return true;
 	}
 
-	/*
-	 * Check all-zeroes case. Luckily BLCKSZ is guaranteed to always be a
-	 * multiple of size_t - and it's much faster to compare memory using the
-	 * native word size.
-	 */
-	StaticAssertStmt(BLCKSZ == (BLCKSZ / sizeof(size_t)) * sizeof(size_t),
-					 "BLCKSZ has to be a multiple of sizeof(size_t)");
-
-	all_zeroes = true;
-	pagebytes = (size_t *) page;
-	for (i = 0; i < (BLCKSZ / sizeof(size_t)); i++)
-	{
-		if (pagebytes[i] != 0)
-		{
-			all_zeroes = false;
-			break;
-		}
-	}
-
-	if (all_zeroes)
+	/* Check all-zeroes case */
+	if (IsAllZero((char *) page, BLCKSZ))
 		return true;
 
 	/*
@@ -1170,8 +1170,18 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
 {
 	static char *pageCopy = NULL;
 
-	/* If we don't need a checksum, just return the passed-in data */
-	if (PageIsNew(page) || !DataChecksumsEnabled())
+	/*
+	 * If we don't need a checksum, just return the passed-in data.
+	 *
+	 * Note that encrypted page is checksumed even if it's empty. We cannot
+	 * use PageIsNew() for them safely (because the field it checks can become
+	 * zero due to encryption), and it's not always easy / efficient to
+	 * decrypt the page just to see if it's empty. One particular problem is
+	 * that the pg_checksums utility cannot decrypt the pages because it does
+	 * not know whether relation is unlogged (unlogged relations have special
+	 * encryption IV).
+	 */
+	if ((!data_encrypted && PageIsNew(page)) || !DataChecksumsEnabled())
 		return (char *) page;
 
 	/*
@@ -1197,8 +1207,13 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
 void
 PageSetChecksumInplace(Page page, BlockNumber blkno)
 {
-	/* If we don't need a checksum, just return */
-	if (PageIsNew(page) || !DataChecksumsEnabled())
+	/*
+	 * If we don't need a checksum, just return.
+	 *
+	 * Note that encrypted page is checksumed even if it's empty, see
+	 * PageSetChecksumCopy() for explanation.
+	 */
+	if ((!data_encrypted && PageIsNew(page)) || !DataChecksumsEnabled())
 		return;
 
 	((PageHeader) page)->pd_checksum = pg_checksum_page((char *) page, blkno);

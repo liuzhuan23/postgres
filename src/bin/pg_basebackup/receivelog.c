@@ -5,6 +5,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -442,6 +443,7 @@ ReceiveXlogStream(PGconn *conn, StreamCtl *stream)
 	char		slotcmd[128];
 	PGresult   *res;
 	XLogRecPtr	stoppos;
+	char	*decrypt_cmd = "";
 
 	/*
 	 * The caller should've checked the server version already, but doesn't do
@@ -510,6 +512,13 @@ ReceiveXlogStream(PGconn *conn, StreamCtl *stream)
 	}
 
 	/*
+	 * If user requested decryption, we blindly pass the DECRYPT option and
+	 * let server ignore it if the cluster is not encrypted.
+	 */
+	if (stream->decrypt)
+		decrypt_cmd = "DECRYPT";
+
+	/*
 	 * initialize flush position to starting point, it's the caller's
 	 * responsibility that that's sane.
 	 */
@@ -562,10 +571,11 @@ ReceiveXlogStream(PGconn *conn, StreamCtl *stream)
 			return true;
 
 		/* Initiate the replication stream at specified location */
-		snprintf(query, sizeof(query), "START_REPLICATION %s%X/%X TIMELINE %u",
+		snprintf(query, sizeof(query), "START_REPLICATION %s%X/%X TIMELINE %u %s",
 				 slotcmd,
 				 (uint32) (stream->startpos >> 32), (uint32) stream->startpos,
-				 stream->timeline);
+				 stream->timeline,
+				 decrypt_cmd);
 		res = PQexec(conn, query);
 		if (PQresultStatus(res) != PGRES_COPY_BOTH)
 		{

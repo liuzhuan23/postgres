@@ -33,6 +33,7 @@
  * specific parts are in the libpqwalreceiver module. It's loaded
  * dynamically to avoid linking the server with libpq.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
  *
  *
@@ -313,6 +314,15 @@ WalReceiverMain(void)
 		 * IDENTIFY_SYSTEM replication command.
 		 */
 		primary_sysid = walrcv_identify_system(wrconn, &primaryTLI);
+
+		/*
+		 * If we (the slave) are not encrypted, ask master to decrypt the data
+		 * - it will just ignore the decryption if it's unencrypted too. If we
+		 * are encrypted, we expect the primary to be encrypted too, using the
+		 * same key - it'd be too tricky to ask the primary to (re)encrypt
+		 * data using particular key.
+		 */
+		options.proto.physical.decrypt = !data_encrypted;
 
 		snprintf(standby_sysid, sizeof(standby_sysid), UINT64_FORMAT,
 				 GetSystemIdentifier());

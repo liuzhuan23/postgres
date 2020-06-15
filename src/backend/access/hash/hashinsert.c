@@ -231,6 +231,9 @@ restart_insert:
 		PageSetLSN(BufferGetPage(buf), recptr);
 		PageSetLSN(BufferGetPage(metabuf), recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption2(BufferGetPage(buf),
+									 BufferGetPage(metabuf));
 
 	END_CRIT_SECTION();
 
@@ -420,6 +423,9 @@ _hash_vacuum_one_page(Relation rel, Relation hrel, Buffer metabuf, Buffer buf)
 			PageSetLSN(BufferGetPage(buf), recptr);
 			PageSetLSN(BufferGetPage(metabuf), recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption2(BufferGetPage(buf),
+										 BufferGetPage(metabuf));
 
 		END_CRIT_SECTION();
 

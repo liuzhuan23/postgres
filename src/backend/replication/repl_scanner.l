@@ -4,6 +4,7 @@
  * repl_scanner.l
  *	  a lexical scanner for the replication commands
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -93,6 +94,7 @@ MAX_RATE		{ return K_MAX_RATE; }
 WAL			{ return K_WAL; }
 TABLESPACE_MAP			{ return K_TABLESPACE_MAP; }
 NOVERIFY_CHECKSUMS	{ return K_NOVERIFY_CHECKSUMS; }
+DECRYPT	{ return K_DECRYPT; }
 TIMELINE			{ return K_TIMELINE; }
 START_REPLICATION	{ return K_START_REPLICATION; }
 CREATE_REPLICATION_SLOT		{ return K_CREATE_REPLICATION_SLOT; }

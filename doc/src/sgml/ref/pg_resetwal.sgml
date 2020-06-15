@@ -100,6 +100,17 @@ PostgreSQL documentation
    </varlistentry>
 
    <varlistentry>
+     <term><option>-K</option></term>
+     <term><option>--encryption-key-command=<replaceable class="parameter">command</replaceable></option></term>
+     <listitem>
+       <para>
+        If the cluster is encrypted (see <xref linkend="encryption"/>), run
+        this command to retrieve the encryption key.
+       </para>
+     </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><option>-n</option></term>
     <term><option>--dry-run</option></term>
     <listitem>

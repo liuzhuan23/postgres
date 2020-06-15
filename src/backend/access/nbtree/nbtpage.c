@@ -224,6 +224,8 @@ _bt_update_meta_cleanup_info(Relation rel, TransactionId oldestBtpoXact,
 
 		PageSetLSN(metapg, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(metapg);
 
 	END_CRIT_SECTION();
 	_bt_relbuf(rel, metabuf);
@@ -413,6 +415,8 @@ _bt_getroot(Relation rel, int access)
 			PageSetLSN(rootpage, recptr);
 			PageSetLSN(metapg, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption2(rootpage, metapg);
 
 		END_CRIT_SECTION();
 
@@ -1043,6 +1047,8 @@ _bt_delitems_vacuum(Relation rel, Buffer buf,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 }
@@ -1123,6 +1129,8 @@ _bt_delitems_delete(Relation rel, Buffer buf,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 }
@@ -1755,6 +1763,9 @@ _bt_mark_page_halfdead(Relation rel, Buffer leafbuf, BTStack stack)
 		page = BufferGetPage(leafbuf);
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption2(BufferGetPage(topparent),
+									 BufferGetPage(leafbuf));
 
 	END_CRIT_SECTION();
 
@@ -2147,6 +2158,27 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
 		{
 			PageSetLSN(metapg, recptr);
 		}
+		page = BufferGetPage(rbuf);
+		PageSetLSN(page, recptr);
+		page = BufferGetPage(buf);
+		PageSetLSN(page, recptr);
+		if (BufferIsValid(lbuf))
+		{
+			page = BufferGetPage(lbuf);
+			PageSetLSN(page, recptr);
+		}
+		if (target != leafblkno)
+		{
+			page = BufferGetPage(leafbuf);
+			PageSetLSN(page, recptr);
+		}
+	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
+
+		if (BufferIsValid(metabuf))
+			PageSetLSN(metapg, recptr);
 		page = BufferGetPage(rbuf);
 		PageSetLSN(page, recptr);
 		page = BufferGetPage(buf);

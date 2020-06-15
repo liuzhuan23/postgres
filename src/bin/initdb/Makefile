@@ -2,6 +2,7 @@
 #
 # Makefile for src/bin/initdb
 #
+# Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
 # Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
@@ -26,7 +27,7 @@ ifneq (,$(with_system_tzdata))
 override CPPFLAGS += '-DSYSTEMTZDIR="$(with_system_tzdata)"'
 endif
 
-OBJS=	initdb.o findtimezone.o localtime.o encnames.o $(WIN32RES)
+OBJS=	initdb.o findtimezone.o localtime.o encnames.o encryption.o $(WIN32RES)
 
 all: initdb
 
@@ -45,6 +46,9 @@ encnames.c: % : $(top_srcdir)/src/backend/utils/mb/%
 localtime.c: % : $(top_srcdir)/src/timezone/%
 	rm -f $@ && $(LN_S) $< .
 
+encryption.c: % : $(top_srcdir)/src/backend/storage/file/%
+	rm -f $@ && $(LN_S) $< .
+
 install: all installdirs
 	$(INSTALL_PROGRAM) initdb$(X) '$(DESTDIR)$(bindir)/initdb$(X)'
 
@@ -55,7 +59,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/initdb$(X)'
 
 clean distclean maintainer-clean:
-	rm -f initdb$(X) $(OBJS) encnames.c localtime.c
+	rm -f initdb$(X) $(OBJS) encnames.c localtime.c encryption.c
 	rm -rf tmp_check
 
 # ensure that changes in datadir propagate into object file

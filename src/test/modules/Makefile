@@ -6,6 +6,7 @@ include $(top_builddir)/src/Makefile.global
 
 SUBDIRS = \
 		  brin \
+		  buffile \
 		  commit_ts \
 		  dummy_seclabel \
 		  snapshot_too_old \

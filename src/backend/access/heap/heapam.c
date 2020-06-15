@@ -2010,6 +2010,12 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+	{
+		Page		page = BufferGetPage(buffer);
+
+		set_page_lsn_for_encryption(page);
+	}
 
 	END_CRIT_SECTION();
 
@@ -2326,6 +2332,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 
 		END_CRIT_SECTION();
 
@@ -2788,6 +2796,8 @@ l1:
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -3489,6 +3499,8 @@ l2:
 			recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 
 		END_CRIT_SECTION();
 
@@ -3710,6 +3722,14 @@ l2:
 			PageSetLSN(BufferGetPage(newbuf), recptr);
 		}
 		PageSetLSN(BufferGetPage(buffer), recptr);
+	}
+	else if (data_encrypted)
+	{
+		if (newbuf != buffer)
+			set_page_lsn_for_encryption2(BufferGetPage(newbuf),
+										 BufferGetPage(buffer));
+		else
+			set_page_lsn_for_encryption(BufferGetPage(buffer));
 	}
 
 	END_CRIT_SECTION();
@@ -4621,6 +4641,8 @@ failed:
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5373,6 +5395,12 @@ l4:
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+		{
+			Page		page = BufferGetPage(buf);
+
+			set_page_lsn_for_encryption(page);
+		}
 
 		END_CRIT_SECTION();
 
@@ -5531,6 +5559,8 @@ heap_finish_speculative(Relation relation, ItemPointer tid)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5674,6 +5704,8 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5781,6 +5813,8 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -7804,7 +7838,7 @@ heap_xlog_clean(XLogReaderState *record)
 		 * Do this regardless of a full-page image being applied, since the
 		 * FSM data is not in the page anyway.
 		 */
-		XLogRecordPageWithFreeSpace(rnode, blkno, freespace);
+		XLogRecordPageWithFreeSpace(rnode, blkno, freespace, lsn);
 	}
 }
 
@@ -7903,7 +7937,7 @@ heap_xlog_visible(XLogReaderState *record)
 		 * FSM data is not in the page anyway.
 		 */
 		if (xlrec->flags & VISIBILITYMAP_VALID_BITS)
-			XLogRecordPageWithFreeSpace(rnode, blkno, space);
+			XLogRecordPageWithFreeSpace(rnode, blkno, space, lsn);
 	}
 
 	/*
@@ -8218,7 +8252,7 @@ heap_xlog_insert(XLogReaderState *record)
 	 * totally accurate anyway.
 	 */
 	if (action == BLK_NEEDS_REDO && freespace < BLCKSZ / 5)
-		XLogRecordPageWithFreeSpace(target_node, blkno, freespace);
+		XLogRecordPageWithFreeSpace(target_node, blkno, freespace, lsn);
 }
 
 /*
@@ -8357,7 +8391,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
 	 * totally accurate anyway.
 	 */
 	if (action == BLK_NEEDS_REDO && freespace < BLCKSZ / 5)
-		XLogRecordPageWithFreeSpace(rnode, blkno, freespace);
+		XLogRecordPageWithFreeSpace(rnode, blkno, freespace, lsn);
 }
 
 /*
@@ -8632,7 +8666,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 	 * totally accurate anyway.
 	 */
 	if (newaction == BLK_NEEDS_REDO && !hot_update && freespace < BLCKSZ / 5)
-		XLogRecordPageWithFreeSpace(rnode, newblk, freespace);
+		XLogRecordPageWithFreeSpace(rnode, newblk, freespace, lsn);
 }
 
 static void

@@ -24,6 +24,7 @@ PostgreSQL documentation
    <command>pg_ctl</command>
    <arg choice="plain"><option>init[db]</option></arg>
    <arg choice="opt"><option>-D</option> <replaceable>datadir</replaceable></arg>
+   <arg choice="opt"><option>-K</option> <replaceable>command</replaceable></arg>
    <arg choice="opt"><option>-s</option></arg>
    <arg choice="opt"><option>-o</option> <replaceable>initdb-options</replaceable></arg>
   </cmdsynopsis>
@@ -32,6 +33,7 @@ PostgreSQL documentation
    <command>pg_ctl</command>
    <arg choice="plain"><option>start</option></arg>
    <arg choice="opt"><option>-D</option> <replaceable>datadir</replaceable></arg>
+   <arg choice="opt"><option>-K</option> <replaceable>command</replaceable></arg>
    <arg choice="opt"><option>-l</option> <replaceable>filename</replaceable></arg>
    <arg choice="opt"><option>-W</option></arg>
    <arg choice="opt"><option>-t</option> <replaceable>seconds</replaceable></arg>
@@ -61,6 +63,7 @@ PostgreSQL documentation
    <command>pg_ctl</command>
    <arg choice="plain"><option>restart</option></arg>
    <arg choice="opt"><option>-D</option> <replaceable>datadir</replaceable></arg>
+   <arg choice="opt"><option>-K</option> <replaceable>command</replaceable></arg>
    <arg choice="opt"><option>-m</option>
      <group choice="plain">
        <arg choice="plain"><option>s[mart]</option></arg>
@@ -289,6 +292,33 @@ PostgreSQL documentation
         this option is omitted, the environment variable
         <envar>PGDATA</envar> is used.
        </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-K <replaceable class="parameter">command</replaceable></option></term>
+      <term><option>--encryption-key-command=<replaceable class="parameter">command</replaceable></option></term>
+      <listitem>
+       <para>
+        If the cluster is encrypted and
+        if <literal>encryption_key_command</literal> is not present
+        in <filename>postgresql.conf</filename>, this option can be used to
+        pass the encryption key command to <application>pg_ctl</application>.
+        <application>pg_ctl</application> runs this command to retrieve the
+        encryption key and sends the key to the database server during startup
+        - see <xref linkend="encryption"/> for details.
+       </para>
+
+       <note>
+        <para>
+         If you start your cluster in another way than
+         using <application>pg_ctl</application> (for example
+         using <firstterm>systemd</firstterm> or a custom script) (and
+         if <literal>encryption_key_command</literal> is not present
+         in <filename>postgresql.conf</filename>), consider sending the key
+         using the <xref linkend="app-pg-keytool"/> utility.
+        </para>
+       </note>
       </listitem>
      </varlistentry>
 

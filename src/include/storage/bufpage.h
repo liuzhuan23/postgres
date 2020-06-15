@@ -4,6 +4,7 @@
  *	  Standard POSTGRES buffer page definitions.
  *
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -419,7 +420,7 @@ do { \
 						((is_heap) ? PAI_IS_HEAP : 0))
 
 extern void PageInit(Page page, Size pageSize, Size specialSize);
-extern bool PageIsVerified(Page page, BlockNumber blkno);
+extern bool PageIsVerified(Page page, BlockNumber blkno, Page page_encr);
 extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
 										OffsetNumber offsetNumber, int flags);
 extern Page PageGetTempPage(Page page);

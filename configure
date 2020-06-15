@@ -580,11 +580,11 @@ MFLAGS=
 MAKEFLAGS=
 
 # Identity of this package.
-PACKAGE_NAME='PostgreSQL'
-PACKAGE_TARNAME='postgresql'
-PACKAGE_VERSION='12.3'
-PACKAGE_STRING='PostgreSQL 12.3'
-PACKAGE_BUGREPORT='pgsql-bugs@lists.postgresql.org'
+PACKAGE_NAME='PostgreSQL-TDE'
+PACKAGE_TARNAME='postgresql-tde'
+PACKAGE_VERSION='12.3_TDE_1.0'
+PACKAGE_STRING='PostgreSQL 12.3 TDE 1.0'
+PACKAGE_BUGREPORT='bugs-tde@cybertec.at'
 PACKAGE_URL=''
 
 ac_unique_file="src/backend/access/common/heaptuple.c"

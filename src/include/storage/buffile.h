@@ -15,6 +15,7 @@
  * but currently we have no need for oversize temp files without buffered
  * access.
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -28,9 +29,51 @@
 
 #include "storage/sharedfileset.h"
 
-/* BufFile is an opaque type whose details are not known outside buffile.c. */
+/*
+ * BufFile and TransientBufFile are opaque types whose details are not known
+ * outside buffile.c.
+ */
 
 typedef struct BufFile BufFile;
+typedef struct TransientBufFile TransientBufFile;
+
+/*
+ * We break BufFiles into gigabyte-sized segments, regardless of RELSEG_SIZE.
+ * The reason is that we'd like large BufFiles to be spread across multiple
+ * tablespaces when available.
+ *
+ * An integer value indicating the number of useful bytes in the segment is
+ * appended to each segment of if the file is both shared and encrypted, see
+ * BufFile.useful.
+ */
+#define MAX_PHYSICAL_FILESIZE		0x40000000
+
+/* Express segment size in the number of blocks. */
+#define BUFFILE_SEG_BLOCKS(phys)	((phys) / BLCKSZ)
+
+/* GUC to control size of the file segment. */
+extern int buffile_max_filesize;
+/* Segment size in blocks, derived from the above. */
+extern int buffile_seg_blocks;
+
+/*
+ * The portion of the encryption tweak that does not depend on position within
+ * the encrypted file.
+ *
+ * Note that the first byte of this word is reserved for a value of
+ * TransientBufFileKind.
+ */
+#define TWEAK_BASE_SIZE	8
+
+/*
+ * Value to be included in TransientBufFile.tweakBase. It helps to ensure that
+ * the encryption tweak is always unique.
+ */
+typedef enum TransientBufFileKind
+{
+	TRANS_BUF_FILE_REORDERBUFFER, /* reorderbuffer.c */
+	TRANS_BUF_FILE_PGSTATS		  /* pgstat.c */
+} TransientBufFileKind;
 
 /*
  * prototypes for functions in buffile.c
@@ -50,5 +93,14 @@ extern BufFile *BufFileCreateShared(SharedFileSet *fileset, const char *name);
 extern void BufFileExportShared(BufFile *file);
 extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
+
+extern TransientBufFile *BufFileOpenTransient(const char *path, int fileFlags,
+											  char tweak_base[TWEAK_BASE_SIZE]);
+extern void BufFileCloseTransient(TransientBufFile *file);
+extern File BufFileTransientGetVfd(TransientBufFile *file);
+extern size_t BufFileReadTransient(TransientBufFile *file, void *ptr,
+					 size_t size);
+extern size_t BufFileWriteTransient(TransientBufFile *file, void *ptr,
+					  size_t size);
 
 #endif							/* BUFFILE_H */

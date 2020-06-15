@@ -499,6 +499,8 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				recptr = gistXLogSplit(is_leaf,
 									   dist, oldrlink, oldnsn, leftchildbuf,
 									   markfollowright);
+			else if (data_encrypted)
+				recptr = get_lsn_for_encryption();
 			else
 				recptr = gistGetFakeLSN(rel);
 		}
@@ -577,6 +579,8 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 										deloffs, ndeloffs, itup, ntup,
 										leftchildbuf);
 			}
+			else if (data_encrypted)
+				recptr = get_lsn_for_encryption();
 			else
 				recptr = gistGetFakeLSN(rel);
 		}
@@ -1699,6 +1703,8 @@ gistprunepage(Relation rel, Page page, Buffer buffer, Relation heapRel)
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 		else
 			PageSetLSN(page, gistGetFakeLSN(rel));
 

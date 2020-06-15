@@ -5,6 +5,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -43,6 +44,7 @@ static bool do_create_slot = false;
 static bool slot_exists_ok = false;
 static bool do_drop_slot = false;
 static bool do_sync = true;
+static bool decrypt = false;
 static bool synchronous = false;
 static char *replication_slot = NULL;
 static XLogRecPtr endpos = InvalidXLogRecPtr;
@@ -92,6 +94,9 @@ usage(void)
 	printf(_("      --synchronous      flush write-ahead log immediately after writing\n"));
 	printf(_("  -v, --verbose          output verbose messages\n"));
 	printf(_("  -V, --version          output version information, then exit\n"));
+#ifdef	USE_ENCRYPTION
+	printf(_("  -y, --decrypt          receive the data decrypted\n"));
+#endif	/* USE_ENCRYPTION */
 	printf(_("  -Z, --compress=0-9     compress logs with given compression level\n"));
 	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
@@ -429,6 +434,7 @@ StreamLog(void)
 	stream.standby_message_timeout = standby_message_timeout;
 	stream.synchronous = synchronous;
 	stream.do_sync = do_sync;
+	stream.decrypt = decrypt;
 	stream.mark_done = false;
 	stream.walmethod = CreateWalDirectoryMethod(basedir, compresslevel,
 												stream.do_sync);
@@ -518,7 +524,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:d:E:h:p:U:s:S:nwWvZ:",
+	while ((c = getopt_long(argc, argv, "D:d:E:h:p:U:s:S:nwWvyZ:",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
@@ -574,6 +580,11 @@ main(int argc, char **argv)
 			case 'v':
 				verbose++;
 				break;
+#ifdef	USE_ENCRYPTION
+			case 'y':
+				decrypt = true;
+				break;
+#endif	/* USE_ENCRYPTION */
 			case 'Z':
 				compresslevel = atoi(optarg);
 				if (compresslevel < 0 || compresslevel > 9)

@@ -855,6 +855,8 @@ ginVacuumPostingTreeLeaf(Relation indexrel, Buffer buffer, GinVacuumState *gvs)
 			recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_VACUUM_DATA_LEAF_PAGE);
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 
 		END_CRIT_SECTION();
 	}
@@ -1847,6 +1849,8 @@ createPostingTree(Relation index, ItemPointerData *items, uint32 nitems,
 		recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_CREATE_PTREE);
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	UnlockReleaseBuffer(buffer);
 

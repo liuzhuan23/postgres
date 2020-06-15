@@ -419,10 +419,15 @@ GenericXLogFinish(GenericXLogState *state)
 
 			if (BufferIsInvalid(pageData->buffer))
 				continue;
+
+			/* We don't worry about zeroing the "hole" in this case */
 			memcpy(BufferGetPage(pageData->buffer),
 				   pageData->image,
 				   BLCKSZ);
-			/* We don't worry about zeroing the "hole" in this case */
+
+			if (data_encrypted)
+				set_page_lsn_for_encryption(BufferGetPage(pageData->buffer));
+
 			MarkBufferDirty(pageData->buffer);
 		}
 		END_CRIT_SECTION();

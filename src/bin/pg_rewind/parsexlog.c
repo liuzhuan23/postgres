@@ -3,6 +3,7 @@
  * parsexlog.c
  *	  Functions for reading Write-Ahead-Log
  *
+ * Portions Copyright (c) 2019, Cybertec Schönig & Schönig GmbH
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -317,6 +318,20 @@ SimpleXLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr,
 						 xlogfpath, r, (Size) XLOG_BLCKSZ);
 
 		return -1;
+	}
+
+	if (data_encrypted)
+	{
+		char		tweak[TWEAK_SIZE];
+
+		XLogEncryptionTweak(tweak, targetHistory[private->tliIndex].tli,
+							xlogreadsegno, targetPageOff);
+		decrypt_block(readBuf,
+					  readBuf,
+					  XLOG_BLCKSZ,
+					  tweak,
+					  InvalidBlockNumber,
+					  EDK_PERMANENT);
 	}
 
 	Assert(targetSegNo == xlogreadsegno);
