@@ -26,6 +26,7 @@
 
 #include "catalog/pg_control.h"
 #include "common/controldata_utils.h"
+#include "common/encryption.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
 #include "fe_utils/encryption.h"
@@ -112,7 +113,7 @@ static volatile pgpid_t postmasterPID = -1;
  * Define encryption_key locally rather that linking to storage/encryption.c
  * only because of this one variable.
  */
-unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+extern unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
 #ifndef HAVE_UNIX_SOCKETS
 /*
  * Port at which postmaster listens for encryption key message.

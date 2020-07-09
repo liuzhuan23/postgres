@@ -174,7 +174,7 @@ static bool output_failed = false;
 static int	output_errno = 0;
 static char *pgdata_native;
 
-unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+extern unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
 
 /* defaults */
 static int	n_connections = 10;

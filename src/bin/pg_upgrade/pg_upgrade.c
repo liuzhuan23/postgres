@@ -40,6 +40,7 @@
 
 #include "pg_upgrade.h"
 #include "catalog/pg_class_d.h"
+#include "common/encryption.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
 #include "common/restricted_token.h"
@@ -83,7 +84,7 @@ char encryption_key_command_opt[MAXPGPATH];
  * here.
  */
 bool		encryption_setup_done = false;
-unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+extern unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
 
 int
 main(int argc, char **argv)

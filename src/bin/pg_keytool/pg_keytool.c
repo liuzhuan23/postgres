@@ -35,7 +35,7 @@
 
 static const char *progname;
 
-unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+extern unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
 
 static void
 usage(const char *progname)
