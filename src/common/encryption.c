@@ -138,11 +138,11 @@ read_encryption_key_f(FILE *f, char *command)
 		if (read_len >= ENCRYPTION_KEY_CHARS)
 		{
 #ifdef FRONTEND
-			pg_log_fatal("encryption key is too long");
+			pg_log_fatal("encryption key is too long, should be a %d character hex key", ENCRYPTION_KEY_CHARS);
 			exit(EXIT_FAILURE);
 #else
 			ereport(FATAL,
-					(errmsg("encryption key is too long")));
+					(errmsg("encryption key is too long, should be a %d character hex key", ENCRYPTION_KEY_CHARS)));
 #endif	/* FRONTEND */
 		}
 
@@ -171,11 +171,11 @@ read_encryption_key_f(FILE *f, char *command)
 	if (read_len < ENCRYPTION_KEY_CHARS)
 	{
 #ifdef FRONTEND
-		pg_log_fatal("encryption key is too short");
+		pg_log_fatal("encryption key is too short, should be a %d character hex key", ENCRYPTION_KEY_CHARS);
 		exit(EXIT_FAILURE);
 #else
 		ereport(FATAL,
-				(errmsg("encryption key is too short")));
+				(errmsg("encryption key is too short, should be a %d character hex key", ENCRYPTION_KEY_CHARS)));
 #endif	/* FRONTEND */
 	}
 
