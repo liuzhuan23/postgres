@@ -22,9 +22,9 @@
 
 #ifdef USE_ENCRYPTION
 #include <openssl/evp.h>
+#endif	/* USE_ENCRYPTION */
 
 unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
-#endif	/* USE_ENCRYPTION */
 
 char	   *encryption_key_command = NULL;
 
