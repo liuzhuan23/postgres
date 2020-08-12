@@ -57,7 +57,7 @@ typedef struct UndoPageHeaderData
 typedef UndoPageHeaderData *UndoPageHeader;
 
 #define SizeOfUndoPageHeaderData \
-	(offsetof(UndoPageHeaderData, ud_continue_chunk_type) + sizeof(UndoRecPtr))
+	(offsetof(UndoPageHeaderData, ud_continue_chunk_type) + sizeof(uint8))
 #define UsableBytesPerUndoPage \
 	(BLCKSZ - SizeOfUndoPageHeaderData)
 
