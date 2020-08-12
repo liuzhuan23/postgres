@@ -90,7 +90,7 @@ UndoPageInsertHeader(Page page, int page_offset, int header_offset,
 			Min(BLCKSZ - page_offset,
 				SizeOfUndoRecordSetChunkHeader - local_header_offset);
 
-		Assert(page_offset + chunk_header_bytes <= 8192);
+		Assert(page_offset + chunk_header_bytes <= BLCKSZ);
 		memcpy(page + page_offset,
 			   ((char *) header) + local_header_offset,
 			   chunk_header_bytes);
