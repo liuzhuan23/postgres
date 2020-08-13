@@ -458,7 +458,6 @@ static UndoRecPtr
 reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 {
 	UndoLogOffset new_insert;
-	UndoLogOffset size;
 
 	Assert(urs->nchunks >= 1);
 	Assert(urs->chunks);
@@ -489,7 +488,6 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 */
 	LWLockAcquire(&urs->slot->meta_lock, LW_SHARED);
 	urs->recent_end = urs->slot->end;
-	size = urs->slot->meta.size;
 	LWLockRelease(&urs->slot->meta_lock);
 	if (new_insert <= urs->recent_end)
 		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
@@ -499,7 +497,7 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 * end to advance concurrently, but UndoLogAdjustPhysicalRange() can deal
 	 * with that.
 	 */
-	if (new_insert <= size)
+	if (new_insert <= UndoLogMaxSize)
 	{
 		UndoLogAdjustPhysicalRange(urs->slot->logno, 0, new_insert);
 		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
