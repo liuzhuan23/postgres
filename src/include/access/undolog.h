@@ -33,8 +33,18 @@
 /* printf-family format string for UndoLogOffset. */
 #define UndoLogOffsetFormat UINT64_FORMAT
 
+/*
+ * UNDO_TEST can be defined to make the log file and its segments much smaller
+ * so that it's easier to simulate what happens when a transaction needs
+ * multiple segments or even logs.
+ */
+
 /* Number of blocks of BLCKSZ in an undo log segment file.  128 = 1MB. */
+#ifndef UNDO_TEST
 #define UNDOSEG_SIZE 128
+#else
+#define UNDOSEG_SIZE 4			/* 32 kB */
+#endif
 
 /* Size of an undo log segment file in bytes. */
 #define UndoLogSegmentSize ((size_t) BLCKSZ * UNDOSEG_SIZE)
@@ -46,7 +56,17 @@
 #define MaxUndoLogNumber ((1 << UndoLogNumberBits) - 1)
 
 /* The width of an undo log offset in bits.  40 allows for 1TB per log.*/
+#ifndef UNDO_TEST
 #define UndoLogOffsetBits (64 - UndoLogNumberBits)
+#else
+/*
+ * We want maximum offset 2^17 = 128 kB (64 kB would be too little because
+ * only two segments would fit into it, so we would only test boundaries of
+ * the log), however we do not increase the size of the log number so it still
+ * fits into integer type.
+*/
+#define UndoLogOffsetBits (41 - UndoLogNumberBits)
+#endif
 
 /* End-of-list value when building linked lists of undo logs. */
 #define InvalidUndoLogNumber -1
