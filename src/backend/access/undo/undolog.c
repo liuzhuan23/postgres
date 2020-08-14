@@ -525,7 +525,11 @@ scan_physical_range(void)
 			 * exist we'll tolerate that, recreating missing files as
 			 * necessary.
 			 */
+#ifndef UNDO_TEST
 			offset = ((UndoLogOffset) offset_high << 32) | offset_low;
+#else
+			offset = ((UndoLogOffset) offset_high << 12) | offset_low;
+#endif
 			slot->begin = Min(offset, slot->begin);
 			slot->end = Max(offset + UndoLogSegmentSize, slot->end);
 		}
