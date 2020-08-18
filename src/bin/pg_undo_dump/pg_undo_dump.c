@@ -99,37 +99,38 @@ undo_seg_compare(const void *s1, const void *s2)
 }
 
 static void
-print_chunk_info(UndoRecPtr	start, UndoRecPtr prev, UndoLogOffset size)
+print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size)
 {
 	UndoLogNumber logno = UndoRecPtrGetLogNo(start);
-	UndoLogOffset off_start = UndoRecPtrGetOffset(start);
+	UndoLogOffset off = UndoRecPtrGetOffset(start);
+	UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
 	UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
 
-	/* Both chunks should be in the same log. */
-	Assert(logno == UndoRecPtrGetLogNo(prev) || prev == InvalidUndoRecPtr);
-
 #ifndef UNDO_TEST
-	printf("logno: %d, start: %010zX, prev: %010zX, size: %zu\n",
-		   logno, off_start, off_prev, size);
+	printf("logno: %d, start: %010zX, prev: %X.%010zX, size: %zu\n",
+		   logno, off, logno_prev, off_prev, size);
 #else
-	printf("logno: %d, start: %05zX, prev: %05zX, size: %zu\n",
-		   logno, off_start, off_prev, size);
+	printf("logno: %d, start: %05zX, prev: %X.%05zX, size: %zu\n",
+		   logno, off, logno_prev, off_prev, size);
 #endif
 }
 
 /*
  * Process segments of a single log file. Return prematurely if any error is
  * encountered.
+ *
+ * prev_chunk is in/out argument that helps to maintain the pointer to the
+ * previous chunk across calls.
  */
 static void
-process_log(const char *dir_path, UndoSegFile *first, int count)
+process_log(const char *dir_path, UndoSegFile *first, int count,
+			UndoRecPtr *prev_chunk)
 {
 	int	i;
 	UndoSegFile	*seg = first;
 	UndoLogOffset	off_expected = 0;
 	char	buf[UndoLogSegmentSize];
 	UndoRecPtr	current_chunk = InvalidUndoRecPtr;
-	UndoRecPtr	prev_chunk = InvalidUndoRecPtr;
 	UndoRecordSetChunkHeader	chunk_hdr;
 	int	chunk_hdr_bytes_left = 0;
 	UndoLogOffset	chunk_bytes_left = 0;
@@ -303,11 +304,11 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 							return;
 						}
 
-						print_chunk_info(current_chunk, prev_chunk,
+						print_chunk_info(current_chunk, *prev_chunk,
 										 chunk_hdr.size);
 
-						if (chunk_hdr.previous_chunk != prev_chunk &&
-							prev_chunk != InvalidUndoRecPtr &&
+						if (chunk_hdr.previous_chunk != *prev_chunk &&
+							*prev_chunk != InvalidUndoRecPtr &&
 							chunk_hdr.previous_chunk != InvalidUndoRecPtr)
 						{
 							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
@@ -348,7 +349,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 				if (chunk_bytes_left == 0)
 				{
 					chunk_hdr_bytes_left = SizeOfUndoRecordSetChunkHeader;
-					prev_chunk = current_chunk;
+					*prev_chunk = current_chunk;
 					/* The following chunk is becoming the current one. */
 					current_chunk = MakeUndoRecPtr(seg->logno, seg->offset +
 												   j * BLCKSZ + page_offset);
@@ -372,6 +373,7 @@ process_directory(const char *dir_path)
 	struct dirent *de;
 	UndoSegFile	*segments, *seg, *log_start;
 	int	nseg, nseg_max, i;
+	UndoRecPtr	prev_chunk = InvalidUndoRecPtr;
 
 	dir = opendir(dir_path);
 	if (dir == NULL)
@@ -451,14 +453,14 @@ process_directory(const char *dir_path)
 		/* Reached the end or a new log? */
 		if (i == nseg || seg->logno != log_start->logno)
 		{
-			process_log(dir_path, log_start, seg - log_start);
+			process_log(dir_path, log_start, seg - log_start, &prev_chunk);
 			log_start = seg;
 		}
 
 		seg++;
 	}
 	if (seg > log_start)
-		process_log(dir_path, log_start, seg - log_start);
+		process_log(dir_path, log_start, seg - log_start, &prev_chunk);
 
 cleanup:
 	for (i = 0; i < nseg; i++)
