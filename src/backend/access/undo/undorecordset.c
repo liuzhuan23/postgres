@@ -1714,6 +1714,14 @@ find_start_of_final_chunk_in_undo_log(UndoLogNumber logno, UndoLogOffset insert)
 									   RBM_NORMAL,
 									   NULL,
 									   RELPERSISTENCE_PERMANENT);
+
+	/*
+	 * Cannot do anything if the interesting part of undo log was deleted (or
+	 * discarded?) accidentally.
+	 */
+	if (!BufferIsValid(buffer))
+		ereport(ERROR, (errmsg("could not read undo log buffer")));
+
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 
 	/* Find the start of the final chunk by examining this page. */
