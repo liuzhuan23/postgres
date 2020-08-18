@@ -306,7 +306,9 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 						print_chunk_info(current_chunk, prev_chunk,
 										 chunk_hdr.size);
 
-						if (chunk_hdr.previous_chunk != prev_chunk)
+						if (chunk_hdr.previous_chunk != prev_chunk &&
+							prev_chunk != InvalidUndoRecPtr &&
+							chunk_hdr.previous_chunk != InvalidUndoRecPtr)
 						{
 							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
 							UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
