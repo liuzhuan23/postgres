@@ -233,6 +233,30 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 
 			page_offset = SizeOfUndoPageHeaderData;
 
+			/*
+			 * If we are currently processing chunk data, the page header must
+			 * be subtracted because it's included in the chunk size.
+			 */
+			if (chunk_bytes_left > 0)
+			{
+				if (chunk_bytes_left < SizeOfUndoPageHeaderData)
+				{
+					UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
+					UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
+
+#ifndef UNDO_TEST
+					pg_log_error("chunk starting at %06X.%010zX has invalid size %zu",
+								 logno, offset, chunk_hdr.size);
+#else
+					pg_log_error("chunk starting at %06X.%05zX has invalid size %zu",
+								 logno, offset, chunk_hdr.size);
+#endif
+					return;
+				}
+
+				chunk_bytes_left -= SizeOfUndoPageHeaderData;
+			}
+
 			/* Process the page data. */
 			while (page_offset < page_usage)
 			{
