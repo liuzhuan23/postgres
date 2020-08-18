@@ -174,6 +174,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 			UndoPageHeaderData	pghdr;
 			int	page_offset = 0;
 			int	page_usage;
+			uint16	first_rec;
 
 			/* The segment is not loaded aligned. */
 			memcpy(&pghdr, p, SizeOfUndoPageHeaderData);
@@ -191,6 +192,16 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 			{
 				pg_log_error("page %d of the log segment \"%s\" has invalid ud_insertion_point: %d",
 							 j, seg->name, page_usage);
+				return;
+			}
+
+			first_rec = pghdr.ud_first_record;
+			if (first_rec != 0 &&
+				(first_rec < SizeOfUndoPageHeaderData||
+				 first_rec >= pghdr.ud_insertion_point))
+			{
+				pg_log_error("page %d of the log segment \"%s\" has invalid ud_first_record: %d",
+							 j, seg->name, pghdr.ud_first_record);
 				return;
 			}
 
