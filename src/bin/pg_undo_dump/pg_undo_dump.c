@@ -50,13 +50,8 @@ open_file_in_directory(const char *directory, UndoSegFile *seg)
 
 	Assert(directory != NULL);
 
-#ifndef UNDO_TEST
 	snprintf(fpath, MAXPGPATH, "%s/%06X.%010zX",
 			directory, seg->logno, seg->offset);
-#else
-	snprintf(fpath, MAXPGPATH, "%s/%06X.%05zX",
-			directory, seg->logno, seg->offset);
-#endif
 
 	fd = open(fpath, O_RDONLY | PG_BINARY, 0);
 
@@ -106,13 +101,8 @@ print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size)
 	UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
 	UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
 
-#ifndef UNDO_TEST
 	printf("logno: %d, start: %010zX, prev: %X.%010zX, size: %zu\n",
 		   logno, off, logno_prev, off_prev, size);
-#else
-	printf("logno: %d, start: %05zX, prev: %X.%05zX, size: %zu\n",
-		   logno, off, logno_prev, off_prev, size);
-#endif
 }
 
 /*
@@ -154,13 +144,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 		 */
 		if (seg->offset != off_expected)
 		{
-#ifndef UNDO_TEST
 			pg_log_error("segment %010zX missing in log %d", seg->offset,
 						 seg->logno);
-#else
-			pg_log_error("segment %05zX missing in log %d", seg->offset,
-						 seg->logno);
-#endif
 			return;
 		}
 
@@ -245,13 +230,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 					UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
 					UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
 
-#ifndef UNDO_TEST
 					pg_log_error("chunk starting at %06X.%010zX has invalid size %zu",
 								 logno, offset, chunk_hdr.size);
-#else
-					pg_log_error("chunk starting at %06X.%05zX has invalid size %zu",
-								 logno, offset, chunk_hdr.size);
-#endif
 					return;
 				}
 
@@ -294,13 +274,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
 							UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
 
-#ifndef UNDO_TEST
 							pg_log_error("chunk starting at %06X.%010zX has invalid size %zu",
 										 logno, offset, chunk_hdr.size);
-#else
-							pg_log_error("chunk starting at %06X.%05zX has invalid size %zu",
-										 logno, offset, chunk_hdr.size);
-#endif
 							return;
 						}
 
@@ -314,14 +289,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
 							UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
 
-#ifndef UNDO_TEST
 							pg_log_error("chunk starting at %06X.%010zX has invalid previous_chunk link",
 										 logno, offset);
-#else
-							pg_log_error("chunk starting at %06X.%05zX has invalid previous_chunk link",
-										 logno, offset);
-							return;
-#endif
 						}
 
 						/* The header is included in the chunk size. */
@@ -398,24 +367,15 @@ process_directory(const char *dir_path)
 			(strcmp(de->d_name, "..") == 0))
 			continue;
 
-#ifndef UNDO_TEST
 		if (strlen(de->d_name) != 17 ||
 			sscanf(de->d_name, "%06X.%02X%08X",
-#else
-		if (strlen(de->d_name) != 12 ||
-			sscanf(de->d_name, "%06X.%02X%03X",
-#endif
-			   &logno, &offset_high, &offset_low) != 3)
+				   &logno, &offset_high, &offset_low) != 3)
 		{
 			pg_log_info("unexpected file \"%s\" in \"%s\"", de->d_name, dir_path);
 			continue;
 		}
 
-#ifndef UNDO_TEST
 		offset = ((UndoLogOffset) offset_high << 32) | offset_low;
-#else
-		offset = ((UndoLogOffset) offset_high << 12) | offset_low;
-#endif
 
 		if (nseg >= nseg_max)
 		{

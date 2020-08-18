@@ -188,14 +188,8 @@ UndoLogSegmentPath(UndoLogNumber logno, int segno, Oid tablespace, char *path)
 	 * UndoRecPtr of the first byte in the segment in hexadecimal, with a
 	 * period inserted between the components.
 	 */
-#ifndef UNDO_TEST
-	snprintf(path, MAXPGPATH, "%s/%06X.%010zX",
-			 dir, logno, segno * UndoLogSegmentSize);
-#else
-	snprintf(path, MAXPGPATH, "%s/%06X.%05zX",
-			 dir, logno, segno * UndoLogSegmentSize);
-#endif
-
+	snprintf(path, MAXPGPATH, "%s/%06X.%010zX", dir, logno,
+			 segno * UndoLogSegmentSize);
 }
 
 /*
@@ -492,14 +486,8 @@ scan_physical_range(void)
 				continue;
 
 			/* Can we parse the name as a segment file name? */
-#ifndef UNDO_TEST
 			if (strlen(de->d_name) != 17 ||
-				sscanf(de->d_name, "%06X.%02X%08X",
-#else
-			if (strlen(de->d_name) != 12 ||
-				sscanf(de->d_name, "%06X.%02X%03X",
-#endif
-					   &logno, &offset_high, &offset_low) != 3)
+				sscanf(de->d_name, "%06X.%02X%08X", &logno, &offset_high, &offset_low) != 3)
 			{
 				elog(LOG, "unexpected file \"%s\" in \"%s\"", de->d_name, tablespace_path);
 				continue;
@@ -525,11 +513,7 @@ scan_physical_range(void)
 			 * exist we'll tolerate that, recreating missing files as
 			 * necessary.
 			 */
-#ifndef UNDO_TEST
 			offset = ((UndoLogOffset) offset_high << 32) | offset_low;
-#else
-			offset = ((UndoLogOffset) offset_high << 12) | offset_low;
-#endif
 			slot->begin = Min(offset, slot->begin);
 			slot->end = Max(offset + UndoLogSegmentSize, slot->end);
 		}

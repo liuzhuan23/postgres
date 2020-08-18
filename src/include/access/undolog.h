@@ -34,13 +34,13 @@
 #define UndoLogOffsetFormat UINT64_FORMAT
 
 /*
- * UNDO_TEST can be defined to make the log file and its segments much smaller
+ * UNDO_DEVEL can be defined to make the log file and its segments much smaller
  * so that it's easier to simulate what happens when a transaction needs
  * multiple segments or even logs.
  */
 
 /* Number of blocks of BLCKSZ in an undo log segment file.  128 = 1MB. */
-#ifndef UNDO_TEST
+#ifndef UNDO_DEVEL
 #define UNDOSEG_SIZE 128
 #else
 #define UNDOSEG_SIZE 4			/* 32 kB */
@@ -49,14 +49,21 @@
 /* Size of an undo log segment file in bytes. */
 #define UndoLogSegmentSize ((size_t) BLCKSZ * UNDOSEG_SIZE)
 
-/* The width of an undo log number in bits.  24 allows for 16.7m logs. */
+/*
+ * The width of an undo log number in bits.  24 allows for 16.7m logs.
+ *
+ * It's probably not necessary to define higher value for the UNDO_DEVEL build
+ * as that should not be used in production systems. To cope with the smaller
+ * logs, the log number would need more than 32 bits and so we'd need specific
+ * formatting for the UNDO_DEVEL build.
+*/
 #define UndoLogNumberBits 24
 
 /* The maximum valid undo log number. */
 #define MaxUndoLogNumber ((1 << UndoLogNumberBits) - 1)
 
 /* The width of an undo log offset in bits.  40 allows for 1TB per log.*/
-#ifndef UNDO_TEST
+#ifndef UNDO_DEVEL
 #define UndoLogOffsetBits (64 - UndoLogNumberBits)
 #else
 /*

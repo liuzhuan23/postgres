@@ -329,4 +329,4 @@
  */
 /* #define HEAPDEBUGALL */
 /* #define ACLDEBUG */
-/* #define UNDO_TEST */
+#define UNDO_DEVEL
