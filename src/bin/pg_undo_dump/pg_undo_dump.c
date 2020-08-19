@@ -106,11 +106,18 @@ print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size,
 {
 	UndoLogNumber logno = UndoRecPtrGetLogNo(start);
 	UndoLogOffset off = UndoRecPtrGetOffset(start);
-	UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
-	UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
 
-	printf("logno: %d, start: %010zX, prev: %X.%010zX, size: %zu",
-		   logno, off, logno_prev, off_prev, size);
+	printf("logno: %d, start: %010zX, prev: ", logno, off);
+	if (prev != InvalidUndoRecPtr)
+	{
+		UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
+		UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
+
+		printf("%X.%010zX, ", logno_prev, off_prev);
+	}
+	else
+		printf("<invalid>, ");
+	printf("size: %zu", size);
 
 	if (type_header)
 	{
