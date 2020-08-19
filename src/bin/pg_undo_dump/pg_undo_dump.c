@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "access/transam.h"
 #include "access/undolog.h"
 #include "access/undopage.h"
 #include "access/undorecordset.h"
@@ -93,16 +94,48 @@ undo_seg_compare(const void *s1, const void *s2)
 	return 0;
 }
 
+typedef	union
+{
+	XactUndoRecordSetHeader	xact;
+	char	foo[4];
+} TypeHeader;
+
 static void
-print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size)
+print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size,
+				 UndoRecordSetType type, TypeHeader *type_header)
 {
 	UndoLogNumber logno = UndoRecPtrGetLogNo(start);
 	UndoLogOffset off = UndoRecPtrGetOffset(start);
 	UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
 	UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
 
-	printf("logno: %d, start: %010zX, prev: %X.%010zX, size: %zu\n",
+	printf("logno: %d, start: %010zX, prev: %X.%010zX, size: %zu",
 		   logno, off, logno_prev, off_prev, size);
+
+	if (type_header)
+	{
+		if (type == URST_TRANSACTION)
+		{
+			XactUndoRecordSetHeader	*hdr;
+			TransactionId	xid;
+
+			hdr = &type_header->xact;
+			xid = XidFromFullTransactionId(hdr->fxid);
+			printf(", type: transaction (xid=%u, dboid=%u)",
+				   xid, hdr->dboid);
+		}
+		else if (type == URST_FOO)
+		{
+			printf(", type: foo (%s)", type_header->foo);
+		}
+		else
+		{
+			pg_log_error("unrecognized URS type %d", type);
+			return;
+		}
+	}
+
+	printf("\n");
 }
 
 /*
@@ -123,7 +156,10 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 	UndoRecPtr	current_chunk = InvalidUndoRecPtr;
 	UndoRecordSetChunkHeader	chunk_hdr;
 	int	chunk_hdr_bytes_left = 0;
+	UndoRecordSetType	urs_type = URST_INVALID;
+	int	type_hdr_size, type_hdr_bytes_left = 0;
 	UndoLogOffset	chunk_bytes_left = 0;
+	TypeHeader	type_hdr;
 
 	/* This is very unlikely, but easy to check. */
 	if (count > (UndoLogMaxSize / UndoLogSegmentSize))
@@ -254,6 +290,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 			/* Process the page data. */
 			while (page_offset < page_usage)
 			{
+				int	done, read_now;
+
 				/*
 				 * At any moment we're reading either the chunk or chunk
 				 * header, but never both.
@@ -262,8 +300,6 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 
 				if (chunk_hdr_bytes_left > 0)
 				{
-					int	done, read_now;
-
 					/*
 					 * Retrieve the remaining part of the header that fits on
 					 * the current page.`
@@ -292,9 +328,6 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 							return;
 						}
 
-						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
-										 chunk_hdr.size);
-
 						/*
 						 * *prev_chunk is not aware of the fact that the first
 						 * chunk header in the URS has previous_chunk invalid,
@@ -310,9 +343,48 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 										 logno, offset);
 						}
 
-						/* The header is included in the chunk size. */
-						Assert(chunk_hdr.size >= SizeOfUndoRecordSetChunkHeader);
+						/*
+						 * Invalid previous_chunk indicates that this is the
+						 * first chunk of the undo record set. Read the type
+						 * specific header if we can recognize it.
+						 */
+						if (chunk_hdr.previous_chunk == InvalidUndoRecPtr &&
+							(chunk_hdr.type == URST_TRANSACTION ||
+							 chunk_hdr.type == URST_FOO))
+						{
+							type_hdr_size = get_urs_type_header_size(chunk_hdr.type);
+							type_hdr_bytes_left = type_hdr_size;
+							urs_type = chunk_hdr.type;
+							continue;
+						}
+
+						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
+										 chunk_hdr.size, URST_INVALID, NULL);
+
 						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader;
+					}
+					else
+						continue;
+				}
+				else if (type_hdr_bytes_left > 0)
+				{
+					done = type_hdr_size - type_hdr_bytes_left;
+					read_now = Min(type_hdr_bytes_left, page_usage - page_offset);
+					memcpy((char *) &type_hdr + done, p + page_offset, read_now);
+					type_hdr_bytes_left -= read_now;
+					page_offset  += read_now;
+
+					/* Have the whole type header? */
+					if (type_hdr_bytes_left == 0)
+					{
+						print_chunk_info(current_chunk,
+										 chunk_hdr.previous_chunk,
+										 chunk_hdr.size,
+										 urs_type,
+										 &type_hdr);
+
+						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader -
+							type_hdr_size;
 					}
 					else
 						continue;
