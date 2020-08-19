@@ -272,6 +272,32 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 											   pghdr.ud_first_chunk);
 				chunk_hdr_bytes_left = SizeOfUndoRecordSetChunkHeader;
 			}
+			else
+			{
+				UndoRecPtr	cont = pghdr.ud_continue_chunk;
+
+				/*
+				 * If not at the beginning of the log, we should always keep
+				 * track of the current chunk.
+				 */
+				Assert(current_chunk != InvalidUndoRecPtr);
+
+				/*
+				 * We're at the start of the current page, current_chunk must
+				 * have been initialized earlier.
+				 */
+				Assert(current_chunk <
+					MakeUndoRecPtr(seg->logno, seg->offset + j * BLCKSZ));
+
+				if (cont == InvalidUndoRecPtr || cont != current_chunk)
+				{
+					UndoLogNumber logno = UndoRecPtrGetLogNo(cont);
+					UndoLogOffset offset = UndoRecPtrGetOffset(cont);
+
+					pg_log_error("page %d of the log segment \"%s\" has invalid ud_continue_chunk %06X.%010zX",
+								 j, seg->name, logno, offset);
+				}
+			}
 
 			page_offset = SizeOfUndoPageHeaderData;
 
