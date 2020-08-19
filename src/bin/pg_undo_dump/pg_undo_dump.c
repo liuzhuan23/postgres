@@ -175,6 +175,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 			int	page_offset = 0;
 			int	page_usage;
 			uint16	first_rec;
+			uint16	first_chunk = 0;
 
 			/* The segment is not loaded aligned. */
 			memcpy(&pghdr, p, SizeOfUndoPageHeaderData);
@@ -215,6 +216,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 								 seg->name);
 					return;
 				}
+				first_chunk = pghdr.ud_first_chunk;
 
 				if (pghdr.ud_continue_chunk != InvalidUndoRecPtr)
 				{
@@ -333,7 +335,34 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 					/* The following chunk is becoming the current one. */
 					current_chunk = MakeUndoRecPtr(seg->logno, seg->offset +
 												   j * BLCKSZ + page_offset);
+
+					/*
+					 * Save the offset of the first chunk start, to check the
+					 * value stored in the header.
+					 */
+					if (first_chunk == 0)
+						first_chunk = page_offset;
 				}
+			}
+
+			/* Check ud_first_chunk. */
+			if (pghdr.ud_first_chunk != first_chunk)
+			{
+				/*
+				 * current_chunk is where the next chunk should start, but
+				 * that chunk might not exist yet. In such a case,
+				 * ud_first_chunk is still zero and should not be checked.
+				 */
+				if ((current_chunk % BLCKSZ) != page_offset)
+				{
+					pg_log_error("page %d of the log segment \"%s\" has invalid ud_first_chunk: %d",
+								 j, seg->name, pghdr.ud_first_chunk);
+					return;
+				}
+#ifdef USE_ASSERT_CHECKING
+				else
+					Assert(pghdr.ud_first_chunk == 0);
+#endif	/* USE_ASSERT_CHECKING */
 			}
 
 			p += BLCKSZ;
