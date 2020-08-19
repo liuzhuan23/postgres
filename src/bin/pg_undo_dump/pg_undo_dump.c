@@ -295,8 +295,12 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
 										 chunk_hdr.size);
 
+						/*
+						 * *prev_chunk is not aware of the fact that the first
+						 * chunk header in the URS has previous_chunk invalid,
+						 * so only check valid previous_chunk.
+						 */
 						if (chunk_hdr.previous_chunk != *prev_chunk &&
-							*prev_chunk != InvalidUndoRecPtr &&
 							chunk_hdr.previous_chunk != InvalidUndoRecPtr)
 						{
 							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
