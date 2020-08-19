@@ -292,7 +292,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 							return;
 						}
 
-						print_chunk_info(current_chunk, *prev_chunk,
+						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
 										 chunk_hdr.size);
 
 						if (chunk_hdr.previous_chunk != *prev_chunk &&
