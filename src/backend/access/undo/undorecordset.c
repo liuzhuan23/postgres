@@ -197,23 +197,6 @@ UndoCreate(UndoRecordSetType type, char persistence, int nestingLevel,
 }
 
 /*
- * TODO: think about where this belongs.
- */
-static size_t
-get_type_header_size(UndoRecordSetType type)
-{
-	switch (type)
-	{
-	case URST_TRANSACTION:
-		return 8;
-	case URST_FOO:
-		return 4;
-	default:
-		return 0;
-	}
-}
-
-/*
  * Return the index in urs->buffers of the requested buffer, or create a new
  * one.
  */
@@ -1877,7 +1860,7 @@ CloseDanglingUndoRecordSets(void)
 			release_buffers(buffers, lengthof(buffers));
 		}
 		type = chunk_header.type;
-		type_header_size = get_type_header_size(type);
+		type_header_size = get_urs_type_header_size(type);
 		type_header = palloc(type_header_size);
 		read_undo_header(type_header, type_header_size,
 						 UndoRecPtrPlusUsableBytes(begin, SizeOfUndoRecordSetChunkHeader),

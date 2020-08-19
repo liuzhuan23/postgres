@@ -12,6 +12,7 @@
 #ifndef UNDORECORDSET_H
 #define UNDORECORDSET_H
 
+#include "access/transam.h"
 #include "access/undodefs.h"
 #include "access/xlogreader.h"
 
@@ -41,6 +42,30 @@ typedef struct UndoRecordSetChunkHeader
 
 #define SizeOfUndoRecordSetChunkHeader \
 	(offsetof(UndoRecordSetChunkHeader, type) + sizeof(uint8))
+
+/* On-disk header for an UndoRecordSet of type URST_TRANSACTION. */
+typedef struct XactUndoRecordSetHeader
+{
+	FullTransactionId	fxid;
+	Oid					dboid;
+} XactUndoRecordSetHeader;
+
+/*
+ * TODO Handle the missing types.
+ */
+static inline size_t
+get_urs_type_header_size(UndoRecordSetType type)
+{
+	switch (type)
+	{
+		case URST_TRANSACTION:
+			return sizeof(XactUndoRecordSetHeader);
+		case URST_FOO:
+			return 4;
+		default:
+			Assert(false);
+	}
+}
 
 extern UndoRecordSet *UndoCreate(UndoRecordSetType type, char presistence,
 								 int nestingLevel, Size type_header_size,

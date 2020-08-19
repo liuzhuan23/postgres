@@ -127,13 +127,6 @@ typedef struct XactUndoData
 	UndoRecordSet *record_set[NUndoPersistenceLevels];
 } XactUndoData;
 
-/* On-disk header for an UndoRecordSet of type URST_TRANSACTION. */
-typedef struct XactUndoRecordSetHeader
-{
-	FullTransactionId	fxid;
-	Oid					dboid;
-} XactUndoRecordSetHeader;
-
 static XactUndoData XactUndo;
 static XactUndoSubTransaction XactUndoTopState;
 
