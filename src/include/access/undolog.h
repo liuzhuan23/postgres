@@ -40,7 +40,7 @@
  */
 
 /* Number of blocks of BLCKSZ in an undo log segment file.  128 = 1MB. */
-#ifndef UNDO_DEVEL
+#ifndef UNDO_DEBUG
 #define UNDOSEG_SIZE 128
 #else
 #define UNDOSEG_SIZE 4			/* 32 kB */
