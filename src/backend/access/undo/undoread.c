@@ -515,6 +515,12 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r)
 	if (r->next_urp == InvalidUndoRecPtr)
 		return false;
 
+	if (r->next_urp >= r->end_reading)
+	{
+		undo_reader_release_buffer(r);
+		return false;
+	}
+
 	/* first read the URS record length, could be split over pages */
 	{
 		/*
@@ -541,7 +547,6 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r)
 	next = undo_reader_read_bytes(r, urp_content, r->node.n.length);
 	r->node.n.data = r->buf.data;
 
-	/* FIXME: also check r->end_reading for the last chunk */
 	if (next >= curchunk->urp_chunk_end)
 	{
 		r->next_urp = InvalidUndoRecPtr;
