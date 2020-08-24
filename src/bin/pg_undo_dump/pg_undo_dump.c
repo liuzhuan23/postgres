@@ -219,6 +219,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 			int	page_usage;
 			uint16	first_rec;
 			uint16	first_chunk = 0;
+			bool	pghdr_accounted;
 
 			/* The segment is not loaded aligned. */
 			memcpy(&pghdr, p, SizeOfUndoPageHeaderData);
@@ -271,6 +272,12 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 				current_chunk = MakeUndoRecPtr(seg->logno, seg->offset +
 											   pghdr.ud_first_chunk);
 				chunk_hdr_bytes_left = SizeOfUndoRecordSetChunkHeader;
+
+				/*
+				 * The size of the header of the first page cannot be included
+				 * in any chunk size.
+				 */
+				pghdr_accounted = true;
 			}
 			else
 			{
@@ -297,14 +304,25 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 					pg_log_error("page %d of the log segment \"%s\" has invalid ud_continue_chunk %06X.%010zX",
 								 j, seg->name, logno, offset);
 				}
+
+				/*
+				 * The page header size must eventually be subtracted from
+				 * chunk_bytes_left because it's included in the chunk size.
+				 * However we might not be able to subtract it now because
+				 * chunk_bytes_left can be zero if we're still reading the
+				 * chunk or type-specific header.
+				 */
+				if (chunk_bytes_left > 0)
+				{
+					chunk_bytes_left -= SizeOfUndoPageHeaderData;
+					pghdr_accounted = true;
+				}
+				else
+					pghdr_accounted = false;
 			}
 
 			page_offset = SizeOfUndoPageHeaderData;
 
-			/*
-			 * If we are currently processing chunk data, the page header must
-			 * be subtracted because it's included in the chunk size.
-			 */
 			if (chunk_bytes_left > 0)
 			{
 				if (chunk_bytes_left < SizeOfUndoPageHeaderData)
@@ -316,8 +334,6 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 								 logno, offset, chunk_hdr.size);
 					return;
 				}
-
-				chunk_bytes_left -= SizeOfUndoPageHeaderData;
 			}
 
 			/* Process the page data. */
@@ -396,6 +412,16 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 										 chunk_hdr.size, URST_INVALID, NULL);
 
 						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader;
+
+						/*
+						 * Account for the page header if we could not do so
+						 * earlier.
+						 */
+						if (!pghdr_accounted)
+						{
+							chunk_bytes_left -= SizeOfUndoPageHeaderData;
+							pghdr_accounted = true;
+						}
 					}
 					else
 						continue;
@@ -419,6 +445,16 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 
 						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader -
 							type_hdr_size;
+
+						/*
+						 * Account for the page header if we could not do so
+						 * earlier.
+						 */
+						if (!pghdr_accounted)
+						{
+							chunk_bytes_left -= SizeOfUndoPageHeaderData;
+							pghdr_accounted = true;
+						}
 					}
 					else
 						continue;
