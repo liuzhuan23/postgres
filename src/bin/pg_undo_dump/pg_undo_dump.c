@@ -499,7 +499,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 				 * that chunk might not exist yet. In such a case,
 				 * ud_first_chunk is still zero and should not be checked.
 				 */
-				if ((current_chunk % BLCKSZ) != page_offset)
+				if (UndoRecPtrGetPageOffset(current_chunk) != page_offset)
 				{
 					pg_log_error("page %d of the log segment \"%s\" has invalid ud_first_chunk: %d",
 								 j, seg->name, pghdr.ud_first_chunk);
