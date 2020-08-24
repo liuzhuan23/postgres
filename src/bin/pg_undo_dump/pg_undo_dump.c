@@ -374,6 +374,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 
 							pg_log_error("chunk starting at %06X.%010zX has invalid previous_chunk link",
 										 logno, offset);
+							return;
 						}
 
 						/*
