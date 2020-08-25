@@ -18,3 +18,7 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION test_undoread_read(text, text)
 RETURNS SETOF pg_catalog.text STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION test_undoread_cache_empty_log()
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;

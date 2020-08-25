@@ -14,7 +14,9 @@
 
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "access/session.h"
 #include "access/undolog.h"
+#include "access/undopage.h"
 #include "access/undoread.h"
 #include "access/undorecordset.h"
 #include "access/xact.h"
@@ -205,4 +207,82 @@ test_undoread_read(PG_FUNCTION_ARGS)
 	}
 	else
 		SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * Arrange things so that next time this backend acquires a new slot, it's one
+ * to which no data has been written yet. It's useful to make the reader tests
+ * reproducible.
+ *
+ * Note that no other backend should be trying to acquire UNDO slot
+ * concurrently, since the cached slot is not locked. This is ok for tests.
+ */
+PG_FUNCTION_INFO_V1(test_undoread_cache_empty_log);
+Datum
+test_undoread_cache_empty_log(PG_FUNCTION_ARGS)
+{
+	UndoLogSlot	*slot;
+	bool	accept = false;
+	List	*slots = NIL;
+	char	persistence = RELPERSISTENCE_PERMANENT;
+	UndoPersistenceLevel plevel = GetUndoPersistenceLevel(persistence);
+	ListCell	*lc;
+
+	/* Should not happen. */
+	if (!CurrentSession)
+		elog(ERROR, "backend session is not initialized");
+
+	check_debug_build();
+
+	slot = CurrentSession->private_undolog_free_lists[plevel];
+	/* Is the suitable slot already cached in the session? */
+	if (slot)
+	{
+		LWLockAcquire(&slot->meta_lock, LW_SHARED);
+		/* See UndoLogAcquire() for comments on PID. */
+		if (slot->pid == MyProcPid)
+		{
+			Assert(slot->state == UNDOLOGSLOT_ON_PRIVATE_FREE_LIST);
+			/* Is this slot a fresh one? */
+			if (slot->meta.insert == SizeOfUndoPageHeaderData)
+				accept = true;
+		}
+		LWLockRelease(&slot->meta_lock);
+
+		if (accept)
+			PG_RETURN_VOID();
+	}
+
+	while (true)
+	{
+		/* By acquiring the slot we ensure that the session cache is empty. */
+		slot = UndoLogAcquire(persistence);
+		/* The slot is already ours, so no need to lock meta_lock. */
+		if (slot->meta.insert == SizeOfUndoPageHeaderData)
+		{
+			/*
+			 * By releasing this slot first we ensure that it gets added to
+			 * the session cache.
+			 */
+			UndoLogRelease(slot);
+			break;
+		}
+
+		/*
+		 * Keep the slot acquired so that the next call of UndoLogAcquire()
+		 * returns another one.
+		 */
+		slots = lappend(slots, slot);
+	}
+
+	/* Release the slots that did not match our requirements. */
+	foreach(lc, slots)
+	{
+		slot = (UndoLogSlot *) lfirst(lc);
+		UndoLogRelease(slot);
+	}
+
+	list_free(slots);
+
+	PG_RETURN_VOID();
 }
