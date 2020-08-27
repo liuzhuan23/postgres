@@ -98,6 +98,7 @@ typedef struct UndoBuffer
 	Buffer			buffer;
 	bool			is_new;
 	bool			needs_init;
+	uint16			init_page_offset;
 	UndoRecordSetXLogBufData bufdata;
 } UndoBuffer;
 
@@ -579,6 +580,7 @@ UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size)
 			rbm = RBM_ZERO;
 			urs->buffers[urs->nbuffers].is_new = true;
 			urs->buffers[urs->nbuffers].needs_init = true;
+			urs->buffers[urs->nbuffers].init_page_offset = 0;
 		}
 		else
 			rbm = RBM_NORMAL;
@@ -650,6 +652,14 @@ init_if_needed(UndoBuffer *ubuf)
 	if (ubuf->needs_init)
 	{
 		UndoPageInit(BufferGetPage(ubuf->buffer));
+
+		if (ubuf->init_page_offset)
+		{
+			UndoPageHeader uph = (UndoPageHeader) BufferGetPage(ubuf->buffer);
+
+			uph->ud_insertion_point = ubuf->init_page_offset;
+		}
+
 		ubuf->needs_init = false;
 	}
 }
@@ -695,6 +705,9 @@ UndoInsert(UndoRecordSet *urs,
 	int type_header_size = urs->need_type_header ? urs->type_header_size : 0;
 	int chunk_header_size = urs->need_chunk_header ? SizeOfUndoRecordSetChunkHeader : 0;
 	int all_header_size = type_header_size + chunk_header_size;
+	UndoRecordSetChunk	*first_chunk;
+	bool	first_insert;
+	uint16	init_page_offset = 0;
 
 	Assert(!InRecovery);
 	Assert(CritSectionCount > 0);
@@ -712,6 +725,22 @@ UndoInsert(UndoRecordSet *urs,
 
 	/* Can't be pointing into page header. */
 	Assert(page_offset >= SizeOfUndoPageHeaderData);
+
+	/* Is this the first insert in the current URS? */
+	first_chunk = &urs->chunks[0];
+	first_insert = urs->begin == MakeUndoRecPtr(first_chunk->slot->logno,
+												first_chunk->chunk_header_offset);
+	/*
+	 * The first buffer of the temporary set needs to be initialized because
+	 * the previous owner (backend) of the underlying log might have dropped
+	 * the corresponding local buffer w/o writing it to disk. The
+	 * initialization should not make any harm to that previous owner because
+	 * it shouldn't be using it anymore (and there's nothing like background
+	 * UNDO for temporary relations).
+	 */
+	if (urs->persistence == RELPERSISTENCE_TEMP &&
+		buffer_index == 0 && first_insert)
+		init_page_offset = page_offset;
 
 	/* Write out the header(s), if necessary. */
 	if (urs->need_chunk_header)
@@ -739,6 +768,13 @@ UndoInsert(UndoRecordSet *urs,
 
 			if (buffer_index >= urs->nbuffers)
 				elog(ERROR, "ran out of buffers while inserting undo record headers");
+			if (init_page_offset > 0)
+			{
+				ubuf->needs_init = true;
+				ubuf->init_page_offset = init_page_offset;
+				/* Do not force initialization of the same page again. */
+				init_page_offset = 0;
+			}
 			init_if_needed(ubuf);
 			if (URSNeedsWAL(urs))
 			{
@@ -801,6 +837,11 @@ UndoInsert(UndoRecordSet *urs,
 
 		if (buffer_index >= urs->nbuffers)
 			elog(ERROR, "ran out of buffers while inserting undo record");
+		if (init_page_offset > 0)
+		{
+			ubuf->needs_init = true;
+			ubuf->init_page_offset = init_page_offset;
+		}
 		init_if_needed(ubuf);
 		if (URSNeedsWAL(urs))
 			register_insert_page_offset_if_needed(ubuf, page_offset);
@@ -925,6 +966,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				rbm = RBM_ZERO_AND_LOCK;
 				buffers[nbuffers].is_new = true;
 				buffers[nbuffers].needs_init = true;
+				buffers[nbuffers].init_page_offset = 0;
 			}
 			else
 				rbm = RBM_NORMAL;
