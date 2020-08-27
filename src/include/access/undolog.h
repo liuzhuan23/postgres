@@ -34,7 +34,7 @@
 #define UndoLogOffsetFormat UINT64_FORMAT
 
 /*
- * UNDO_DEVEL can be defined to make the log file and its segments much smaller
+ * UNDO_DEBUG can be defined to make the log file and its segments much smaller
  * so that it's easier to simulate what happens when a transaction needs
  * multiple segments or even logs.
  */
@@ -52,10 +52,10 @@
 /*
  * The width of an undo log number in bits.  24 allows for 16.7m logs.
  *
- * It's probably not necessary to define higher value for the UNDO_DEVEL build
+ * It's probably not necessary to define higher value for the UNDO_DEBUG build
  * as that should not be used in production systems. To cope with the smaller
  * logs, the log number would need more than 32 bits and so we'd need specific
- * formatting for the UNDO_DEVEL build.
+ * formatting for the UNDO_DEBUG build.
 */
 #define UndoLogNumberBits 24
 
@@ -63,7 +63,7 @@
 #define MaxUndoLogNumber ((1 << UndoLogNumberBits) - 1)
 
 /* The width of an undo log offset in bits.  40 allows for 1TB per log.*/
-#ifndef UNDO_DEVEL
+#ifndef UNDO_DEBUG
 #define UndoLogOffsetBits (64 - UndoLogNumberBits)
 #else
 /*
