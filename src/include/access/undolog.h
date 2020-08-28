@@ -355,7 +355,7 @@ extern void UndoLogRelease(UndoLogSlot *slot);
 extern void UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 									   UndoLogOffset new_discard,
 									   UndoLogOffset new_isnert);
-extern void UndoLogTruncate(UndoLogSlot *uls);
+extern void UndoLogTruncate(UndoLogSlot *uls, UndoLogOffset size);
 
 extern UndoPersistenceLevel GetUndoPersistenceLevel(char persistence);
 

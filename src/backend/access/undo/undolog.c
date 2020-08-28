@@ -779,7 +779,7 @@ UndoLogAcquire(char persistence)
 	slot->meta.logno = UndoLogShared->next_logno;
 	slot->meta.tablespace = tablespace;
 	slot->meta.persistence = persistence;
-	slot->meta.size = UndoLogSegmentSize;
+	slot->meta.size = UndoLogMaxSize;
 	slot->pid = MyProcPid;
 	slot->xid = GetTopTransactionIdIfAny();
 	slot->state = UNDOLOGSLOT_IN_UNDO_RECORD_SET;
@@ -842,15 +842,19 @@ UndoLogRelease(UndoLogSlot *slot)
 	}
 }
 
+/*
+ * size is passed because caller may need to insert the XLOG record before
+ * changing the size in the shared memory.
+ */
 void
-UndoLogTruncate(UndoLogSlot *uls)
+UndoLogTruncate(UndoLogSlot *uls, UndoLogOffset size)
 {
 	xl_undolog_truncate xlrec;
 
 	/* TODO thinking about timing problems with checkpoints */
 
 	xlrec.logno = uls->meta.logno;
-	xlrec.size = uls->meta.insert;
+	xlrec.size = size;
 
 	XLogBeginInsert();
 	XLogRegisterData((char *) &xlrec, SizeOfUndologTruncate);

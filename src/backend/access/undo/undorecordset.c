@@ -137,8 +137,6 @@ struct UndoRecordSet
 	UndoLogSlot	   *slot;
 	UndoRecPtr		chunk_start;		/* where the chunk started */
 
-	UndoLogOffset	recent_end;
-
 	/* Resource management. */
 	UndoRecordSetState	state;
 	slist_node		link;
@@ -421,7 +419,6 @@ create_new_chunk(UndoRecordSet *urs)
 
 	/* Get our hands on a new undo log. */
 	urs->need_chunk_header = true;
-	urs->recent_end = 0;
 	urs->slot = UndoLogAcquire(urs->persistence);
 	urs->chunks[urs->nchunks].slot = urs->slot;
 	urs->chunks[urs->nchunks].chunk_header_written = false;
@@ -442,6 +439,7 @@ static UndoRecPtr
 reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 {
 	UndoLogOffset new_insert;
+	UndoLogOffset size, insert, end;
 
 	Assert(urs->nchunks >= 1);
 	Assert(urs->chunks);
@@ -453,7 +451,16 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 */
 	if (unlikely(urs->slot->force_truncate))
 	{
-		UndoLogTruncate(urs->slot);
+		/*
+		 * Issue the XLOG record first. If we first modified the size
+		 * information in the shared memory, it could trigger some other
+		 * operation (e.g. discarding by a background worker) that writes its
+		 * own XLOG, and we might fail to write the truncation XLOG record
+		 * before the XLOG of the other operation.
+		 */
+		UndoLogTruncate(urs->slot, urs->slot->meta.insert);
+
+		urs->slot->meta.size = urs->slot->meta.insert;
 		urs->slot->force_truncate = false;
 		urs->slot = NULL;
 		return InvalidUndoRecPtr;
@@ -462,18 +469,25 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	new_insert = UndoLogOffsetPlusUsableBytes(urs->slot->meta.insert,
 											  total_size);
 
-	/* The fast path: we already know there is enough space. */
-	if (new_insert <= urs->recent_end)
-		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
-
 	/*
 	 * Another backend might have advanced 'end' while discarding,
 	 * since we last updated it.
 	 */
 	LWLockAcquire(&urs->slot->meta_lock, LW_SHARED);
-	urs->recent_end = urs->slot->end;
+	end = urs->slot->end;
+	size = urs->slot->meta.size;
+	insert = urs->slot->meta.insert;
 	LWLockRelease(&urs->slot->meta_lock);
-	if (new_insert <= urs->recent_end)
+
+	/* The log is full, possibly due to recent truncation. */
+	if (insert >= size)
+	{
+		Assert(insert == size);
+		urs->slot = NULL;
+		return InvalidUndoRecPtr;
+	}
+
+	if (new_insert <= end)
 		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
 
 	/*
@@ -481,7 +495,7 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 * end to advance concurrently, but UndoLogAdjustPhysicalRange() can deal
 	 * with that.
 	 */
-	if (new_insert <= UndoLogMaxSize)
+	if (new_insert <= size)
 	{
 		UndoLogAdjustPhysicalRange(urs->slot->logno, 0, new_insert);
 		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
@@ -492,7 +506,7 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 * space, so that we stop trying to reuse this undo log, and a checkpoint
 	 * will eventually give up its slot for reuse.
 	 */
-	UndoLogTruncate(urs->slot);
+	UndoLogTruncate(urs->slot, insert);
 	urs->slot = NULL;
 	return InvalidUndoRecPtr;
 }
