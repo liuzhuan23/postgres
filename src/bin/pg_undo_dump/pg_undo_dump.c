@@ -153,8 +153,7 @@ print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size,
  * previous chunk across calls.
  */
 static void
-process_log(const char *dir_path, UndoSegFile *first, int count,
-			UndoRecPtr *prev_chunk)
+process_log(const char *dir_path, UndoSegFile *first, int count)
 {
 	int	i;
 	UndoSegFile	*seg = first;
@@ -378,22 +377,6 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 						}
 
 						/*
-						 * *prev_chunk is not aware of the fact that the first
-						 * chunk header in the URS has previous_chunk invalid,
-						 * so only check valid previous_chunk.
-						 */
-						if (chunk_hdr.previous_chunk != *prev_chunk &&
-							chunk_hdr.previous_chunk != InvalidUndoRecPtr)
-						{
-							UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
-							UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
-
-							pg_log_error("chunk starting at %06X.%010zX has invalid previous_chunk link",
-										 logno, offset);
-							return;
-						}
-
-						/*
 						 * Invalid previous_chunk indicates that this is the
 						 * first chunk of the undo record set. Read the type
 						 * specific header if we can recognize it.
@@ -477,7 +460,6 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 				if (chunk_bytes_left == 0)
 				{
 					chunk_hdr_bytes_left = SizeOfUndoRecordSetChunkHeader;
-					*prev_chunk = current_chunk;
 					/* The following chunk is becoming the current one. */
 					current_chunk = MakeUndoRecPtr(seg->logno, seg->offset +
 												   j * BLCKSZ + page_offset);
@@ -528,7 +510,6 @@ process_directory(const char *dir_path)
 	struct dirent *de;
 	UndoSegFile	*segments, *seg, *log_start;
 	int	nseg, nseg_max, i;
-	UndoRecPtr	prev_chunk = InvalidUndoRecPtr;
 
 	dir = opendir(dir_path);
 	if (dir == NULL)
@@ -599,14 +580,14 @@ process_directory(const char *dir_path)
 		/* Reached the end or a new log? */
 		if (i == nseg || seg->logno != log_start->logno)
 		{
-			process_log(dir_path, log_start, seg - log_start, &prev_chunk);
+			process_log(dir_path, log_start, seg - log_start);
 			log_start = seg;
 		}
 
 		seg++;
 	}
 	if (seg > log_start)
-		process_log(dir_path, log_start, seg - log_start, &prev_chunk);
+		process_log(dir_path, log_start, seg - log_start);
 
 cleanup:
 	for (i = 0; i < nseg; i++)
