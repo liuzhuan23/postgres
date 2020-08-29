@@ -507,6 +507,9 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 	 * will eventually give up its slot for reuse.
 	 */
 	UndoLogTruncate(urs->slot, insert);
+	LWLockAcquire(&urs->slot->meta_lock, LW_SHARED);
+	urs->slot->meta.size = insert;
+	LWLockRelease(&urs->slot->meta_lock);
 	urs->slot = NULL;
 	return InvalidUndoRecPtr;
 }
