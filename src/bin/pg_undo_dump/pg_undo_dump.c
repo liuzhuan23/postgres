@@ -381,14 +381,25 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 						 * first chunk of the undo record set. Read the type
 						 * specific header if we can recognize it.
 						 */
-						if (chunk_hdr.previous_chunk == InvalidUndoRecPtr &&
-							(chunk_hdr.type == URST_TRANSACTION ||
-							 chunk_hdr.type == URST_FOO))
+						if (chunk_hdr.previous_chunk == InvalidUndoRecPtr)
 						{
-							type_hdr_size = get_urs_type_header_size(chunk_hdr.type);
-							type_hdr_bytes_left = type_hdr_size;
-							urs_type = chunk_hdr.type;
-							continue;
+							if (chunk_hdr.type == URST_TRANSACTION ||
+								chunk_hdr.type == URST_FOO)
+							{
+								type_hdr_size = get_urs_type_header_size(chunk_hdr.type);
+								type_hdr_bytes_left = type_hdr_size;
+								urs_type = chunk_hdr.type;
+								continue;
+							}
+							else if (chunk_hdr.type != URST_INVALID)
+							{
+								UndoLogNumber logno = UndoRecPtrGetLogNo(current_chunk);
+								UndoLogOffset offset = UndoRecPtrGetOffset(current_chunk);
+
+								pg_log_error("chunk starting at %06X.%010zX has invalid type header %d",
+											 logno, offset, chunk_hdr.type);
+								return;
+							}
 						}
 
 						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
