@@ -187,7 +187,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count,
 		 */
 		if (seg->offset != off_expected)
 		{
-			pg_log_error("segment %010zX missing in log %d", seg->offset,
+			pg_log_error("segment %010zX missing in log %d", off_expected,
 						 seg->logno);
 			return;
 		}
