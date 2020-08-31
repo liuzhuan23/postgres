@@ -15,6 +15,9 @@
 #include "access/transam.h"
 #include "access/undodefs.h"
 #include "access/xlogreader.h"
+#ifdef FRONTEND
+#include "common/logging.h"
+#endif
 
 /*
  * Possible undo record set types. These are stored as 1-byte values on disk;
@@ -63,7 +66,12 @@ get_urs_type_header_size(UndoRecordSetType type)
 		case URST_FOO:
 			return 4;
 		default:
-			Assert(false);
+#ifndef FRONTEND
+			elog(FATAL, "unrecognized undo record set type %d", type);
+#else
+			pg_log_error("unrecognized undo record set type %d", type);
+			exit(EXIT_FAILURE);
+#endif
 	}
 }
 
