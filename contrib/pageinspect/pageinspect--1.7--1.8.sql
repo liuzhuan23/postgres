@@ -14,3 +14,25 @@ CREATE FUNCTION heap_tuple_infomask_flags(
 RETURNS record
 AS 'MODULE_PATHNAME', 'heap_tuple_infomask_flags'
 LANGUAGE C STRICT PARALLEL SAFE;
+
+--
+-- get_undo_raw_page()
+--
+CREATE FUNCTION get_undo_raw_page(int4, int4)
+RETURNS bytea
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+--
+-- undo_page_header()
+--
+CREATE FUNCTION undo_page_header(IN page bytea,
+    OUT lsn pg_lsn,
+    OUT checksum smallint,
+    OUT insertion_point smallint,
+    OUT first_record smallint,
+    OUT first_chunk smallint,
+    OUT continue_chunk text,
+    OUT continue_chunk_type smallint)
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT PARALLEL SAFE;
