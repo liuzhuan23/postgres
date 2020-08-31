@@ -401,7 +401,7 @@ UndoRSReaderInit(UndoRSReaderState *r,
 				 char relpersistence, bool toplevel)
 {
 	UndoRecordSetChunkListItem *last_chunk;
-	UndoRecordSetChunkListItem *first_chunk;
+	UndoRecordSetChunkListItem *first_chunk PG_USED_FOR_ASSERTS_ONLY;
 	UndoRecPtr end_within;
 
 	memset(r, 0, sizeof(UndoRSReaderState));

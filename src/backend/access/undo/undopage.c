@@ -57,7 +57,9 @@ UndoPageInsertHeader(Page page, int page_offset, int header_offset,
 					 UndoRecPtr chunk_start)
 {
 	UndoPageHeader uph = (UndoPageHeader) page;
+#ifdef USE_ASSERT_CHECKING
 	Size	total_bytes = SizeOfUndoRecordSetChunkHeader + type_header_size;
+#endif
 	int		data_bytes = 0;
 	int		local_header_offset = header_offset;
 
@@ -273,7 +275,9 @@ int
 UndoPageOverwrite(Page page, int page_offset, int data_offset, Size data_size,
 				  char *data)
 {
+#ifdef USE_ASSERT_CHECKING
 	UndoPageHeader uph = (UndoPageHeader) page;
+#endif
 	int		this_page_bytes;
 
 	/* Copy as much data as we have, or as much as will fit. */
