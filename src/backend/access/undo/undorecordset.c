@@ -1674,8 +1674,6 @@ find_start_of_chunk_on_final_page(Page page, UndoRecPtr page_begin_urp)
 		/* Walk forwards until we find the last chunk on the page. */
 		for (;;)
 		{
-			UndoLogOffset size;
-
 			/*
 			 * The size must be entirely on this page, or this wouldn't be
 			 * the last page in the log.
