@@ -668,9 +668,11 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 
 /*
  * Find or make an undo log for use in an UndoRecordSet.
+ *
+ * If min_logno is valid, use only slot with this or higher value of logno.
  */
 UndoLogSlot *
-UndoLogAcquire(char persistence)
+UndoLogAcquire(char persistence, UndoLogNumber min_logno)
 {
 	UndoLogSlot *slot = NULL;
 	slist_mutable_iter iter;
@@ -682,8 +684,15 @@ UndoLogAcquire(char persistence)
 	/*
 	 * Can we use a recently used undo log from our private free list?
 	 * XXX Not actually a list yet, just a single item
+	 *
+	 * If the min_logno needs to be considered, the caller should already have
+	 * the first log of the current URS acquired, so the session cache is
+	 * probably empty. Furthermore, if we wanted to handle this special case,
+	 * we should be ready to return the slot with mismatching logno to the
+	 * shared list, which is not trivial in terms of locking.
 	 */
-	if ((slot = CurrentSession->private_undolog_free_lists[plevel]))
+	if (min_logno != InvalidUndoLogNumber &&
+		(slot = CurrentSession->private_undolog_free_lists[plevel]))
 	{
 		bool		dropped;
 
@@ -734,7 +743,9 @@ UndoLogAcquire(char persistence)
 		slot = slist_container(UndoLogSlot, next, iter.cur);
 
 		LWLockAcquire(&slot->meta_lock, LW_EXCLUSIVE);
-		if (slot->meta.tablespace == tablespace)
+		if (slot->meta.tablespace == tablespace &&
+			(min_logno == InvalidUndoLogNumber ||
+			 slot->meta.logno >= min_logno))
 		{
 			slist_delete_current(&iter);
 
@@ -774,6 +785,7 @@ UndoLogAcquire(char persistence)
 						   UndoLogNumSlots()),
 				 errhint("Consider increasing max_connections.")));
 	slot->logno = UndoLogShared->next_logno;
+	Assert(slot->logno >= min_logno);
 	slot->meta.insert = SizeOfUndoPageHeaderData;
 	slot->meta.discard = SizeOfUndoPageHeaderData;
 	slot->meta.logno = UndoLogShared->next_logno;

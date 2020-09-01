@@ -407,7 +407,7 @@ reserve_buffer_array(UndoRecordSet *urs, size_t capacity)
  * Attach to a new undo log so that we can begin a new chunk.
  */
 static void
-create_new_chunk(UndoRecordSet *urs)
+create_new_chunk(UndoRecordSet *urs, UndoLogNumber min_logno)
 {
 	/* Make sure there is book-keeping space for one more chunk. */
 	if (urs->nchunks == urs->max_chunks)
@@ -419,7 +419,7 @@ create_new_chunk(UndoRecordSet *urs)
 
 	/* Get our hands on a new undo log. */
 	urs->need_chunk_header = true;
-	urs->slot = UndoLogAcquire(urs->persistence);
+	urs->slot = UndoLogAcquire(urs->persistence, min_logno);
 	urs->chunks[urs->nchunks].slot = urs->slot;
 	urs->chunks[urs->nchunks].chunk_header_written = false;
 	urs->chunks[urs->nchunks].chunk_header_offset = urs->slot->meta.insert;
@@ -532,6 +532,7 @@ UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size)
 	BlockNumber block;
 	int offset;
 	int chunk_number_to_close = -1;
+	UndoLogNumber	min_logno = InvalidUndoLogNumber;
 
 	for (;;)
 	{
@@ -547,6 +548,14 @@ UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size)
 		/* Try to use the active undo log, if there is one. */
 		if (urs->slot)
 		{
+			/*
+			 * If a new log will be needed, do not go backwards in the
+			 * sequence of logs. If the URS consisted of a non-increasing
+			 * sequence of undo records pointers, many things (at least
+			 * reading from start to end location) would get broken.
+			 */
+			min_logno = urs->slot->logno + 1;
+
 			begin = reserve_physical_undo(urs, total_size);
 			if (begin != InvalidUndoRecPtr)
 				break;
@@ -565,7 +574,7 @@ UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size)
 		}
 
 		/* We need to create a new chunk in a new undo log. */
-		create_new_chunk(urs);
+		create_new_chunk(urs, min_logno);
 	}
 
 	/* Make sure our buffer array is large enough. */
