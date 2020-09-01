@@ -660,7 +660,6 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 		slot->begin = new_begin;
 	if (new_end != 0)
 		slot->end = new_end;
-	slot->meta.size = slot->end - slot->begin;
 	LWLockRelease(&slot->meta_lock);
 
 	LWLockRelease(&slot->file_lock);
