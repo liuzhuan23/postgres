@@ -531,7 +531,7 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r)
 		resetStringInfo(&r->buf);
 		urp_content = undo_reader_read_bytes(r, r->next_urp, sizeof(r->node.n.length));
 		r->node.location = r->next_urp;
-		r->node.n.length = *(uint16*) r->buf.data;
+		r->node.n.length = *(Size *) r->buf.data;
 	}
 
 	/* same with type */
