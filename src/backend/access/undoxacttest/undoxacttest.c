@@ -160,7 +160,7 @@ undoxacttest_undo(const WrittenUndoNode *record)
 {
 	const xu_undoxactest_mod *uxt_r = ( const xu_undoxactest_mod *) record->n.data;
 
-	elog(DEBUG1, "called for record of type %d, length %u at %lu: %ld",
+	elog(DEBUG1, "called for record of type %d, length %zu at %lu: %ld",
 		 record->n.type, record->n.length, record->location,
 		 uxt_r->mod);
 

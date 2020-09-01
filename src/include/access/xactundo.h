@@ -31,7 +31,7 @@ typedef struct UndoNode
 	 * TODO: replace with actual serialization format - to unblock development,
 	 * have an absolutely dumb format, for now.
 	 */
-	uint16		length;
+	Size		length;
 	uint8		type;
 	char	   *data;
 } UndoNode;
