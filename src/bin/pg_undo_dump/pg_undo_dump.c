@@ -610,7 +610,7 @@ main(int argc, char **argv)
 	int			optindex = 0;
 
 	pg_logging_init(argv[0]);
-	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_waldump"));
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_undo_dump"));
 	progname = get_progname(argv[0]);
 
 	if (argc > 1)
