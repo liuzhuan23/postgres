@@ -168,7 +168,7 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 
 	while (true)
 	{
-		UndoLogOffset effective_header_size;
+		UndoLogOffset effective_chunk_size;
 
 		Assert(current_off >= SizeOfUndoPageHeaderData);
 		Assert(target_off >= current_off);
@@ -177,12 +177,12 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 						urp_page_start + current_off,
 						SizeOfUndoRecordSetChunkHeader, (char *) urs_header);
 
-		effective_header_size = urs_header->size;
-		if (effective_header_size == 0)
+		effective_chunk_size = urs_header->size;
+		if (effective_chunk_size == 0)
 		{
 			if (end_location != InvalidUndoRecPtr &&
 				UndoRecPtrGetBlockNum(end_location) == UndoRecPtrGetBlockNum(urp))
-				effective_header_size = end_location - (urp_page_start + current_off);
+				effective_chunk_size = end_location - (urp_page_start + current_off);
 			else
 				elog(ERROR, "found open chunk at %lu", urp);
 		}
@@ -193,13 +193,13 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 			if (target_off == current_off)
 				break;
 
-			if (target_off < (current_off + effective_header_size))
+			if (target_off < (current_off + effective_chunk_size))
 				elog(ERROR, "invalid page: pointing to the middle of chunk");
 		}
 		else
 		{
 			/* found target */
-			if (target_off < (current_off + effective_header_size))
+			if (target_off < (current_off + effective_chunk_size))
 				break;
 		}
 
