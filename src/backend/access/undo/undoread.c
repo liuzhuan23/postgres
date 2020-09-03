@@ -199,7 +199,7 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 		else
 		{
 			/* found target */
-			if (target_off <= (current_off + effective_header_size))
+			if (target_off < (current_off + effective_header_size))
 				break;
 		}
 
@@ -245,13 +245,16 @@ urs_chunk_find_start(UndoCachedBuffer *cached_buffer,
 		elog(ERROR, "page not initialized");
 	else if (off >= uph_initial.ud_insertion_point)
 		elog(ERROR, "invalid urp: beyond insertion point");
-	else if (uph_initial.ud_first_chunk == 0 || off <= uph_initial.ud_first_chunk)
+	else if (uph_initial.ud_first_chunk == 0 || off < uph_initial.ud_first_chunk)
 	{
 		/*
-		 * The start of the urp is on a preceding page. Perform some
+		 * The start of the chunk is on a preceding page. Perform some
 		 * verification, and then continue by reading the start of the urp at
 		 * the other page.
 		 */
+
+		if (uph_initial.ud_first_chunk > 0 && off < SizeOfUndoPageHeaderData)
+			elog(ERROR, "invalid urp: within page header");
 
 		if (uph_initial.ud_continue_chunk == InvalidUndoRecPtr)
 			elog(ERROR, "invalid page: continue invalid");
