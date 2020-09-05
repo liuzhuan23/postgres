@@ -1096,7 +1096,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				}
 				/* The shared memory insertion point must be after this fragment. */
 				/* TODO: consolidate the places we maintain meta.insert, fix the locking, and update shm just once at the end of the WAL record */
-				slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
+				if (bufdata->flags & URS_XLOG_INSERT)
+					slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
 				/* Do we need to go around again, on the next page? */
 				if (header_offset < SizeOfUndoRecordSetChunkHeader + type_header_size)
 				{
@@ -1129,7 +1130,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				}
 
 				/* The shared memory insertion point must be after this fragment. */
-				slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
+				if (bufdata->flags & URS_XLOG_INSERT)
+					slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
 
 				/* Do we need to go around again, on the next page? */
 				if (record_offset < record_size)
@@ -1238,7 +1240,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				}
 
 				/* The shared memory insertion point must be after this fragment. */
-				slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
+				if (bufdata->flags & URS_XLOG_INSERT)
+					slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
 
 				/* Do we need to go around again, on the next page? */
 				if (record_offset < record_size)
@@ -1272,7 +1275,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				}
 
 				/* The shared memory insertion point must be after this fragment. */
-				slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
+				if (bufdata->flags & URS_XLOG_INSERT)
+					slot->meta.insert = BLCKSZ * block->blkno + uph->ud_insertion_point;
 
 				/*
 				 * If we closed an UndoRecordSet of type URST_TRANSACTION,
