@@ -466,13 +466,6 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 		return InvalidUndoRecPtr;
 	}
 
-	new_insert = UndoLogOffsetPlusUsableBytes(urs->slot->meta.insert,
-											  total_size);
-
-	/*
-	 * Another backend might have advanced 'end' while discarding,
-	 * since we last updated it.
-	 */
 	LWLockAcquire(&urs->slot->meta_lock, LW_SHARED);
 	end = urs->slot->end;
 	size = urs->slot->meta.size;
@@ -487,6 +480,7 @@ reserve_physical_undo(UndoRecordSet *urs, size_t total_size)
 		return InvalidUndoRecPtr;
 	}
 
+	new_insert = UndoLogOffsetPlusUsableBytes(insert, total_size);
 	if (new_insert <= end)
 		return MakeUndoRecPtr(urs->slot->logno, urs->slot->meta.insert);
 
