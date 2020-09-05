@@ -2011,7 +2011,7 @@ undolog_xlog_create(XLogReaderState *record)
 	slot->logno = xlrec->logno;
 	slot->pid = InvalidPid;
 	slot->meta.logno = xlrec->logno;
-	slot->meta.size = UndoLogSegmentSize;
+	slot->meta.size = UndoLogMaxSize;
 	slot->meta.persistence = xlrec->persistence;
 	slot->meta.tablespace = xlrec->tablespace;
 	slot->meta.insert = SizeOfUndoPageHeaderData;
