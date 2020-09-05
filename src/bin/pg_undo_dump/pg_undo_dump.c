@@ -69,7 +69,8 @@ usage(void)
 		   progname);
 	printf(_("Usage:\n  %s [OPTION]... DATADIR\n\n"), progname);
 	printf(_("\nOptions:\n"));
-	printf(_(" [-D, --pgdata=]DATADIR          data directory\n"));
+	printf(_(" [-D, --pgdata=]DATADIR  data directory\n"));
+	printf(_("  -m, --metadata         show metadata of the undo log files\n"));
 	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@lists.postgresql.org>.\n"));
 }
@@ -502,7 +503,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 }
 
 static void
-process_directory(const char *dir_path)
+process_logs(const char *dir_path)
 {
 	DIR		   *dir;
 	struct dirent *de;
@@ -596,13 +597,117 @@ cleanup:
 	pfree(segments);
 }
 
+static void
+process_metadata(const char *dir_path)
+{
+	DIR		   *dir;
+	struct dirent *de;
+	XLogRecPtr	last = InvalidXLogRecPtr;
+	int			fd = -1;
+	char		fpath[MAXPGPATH];
+	UndoLogMetaData	buf;
+	UndoLogNumber next_logno, num_logs;
+	int	i, nread;
+
+	dir = opendir(dir_path);
+	if (dir == NULL)
+	{
+		pg_log_error("could not open directory \"%s\": %m", dir_path);
+		exit(1);
+	}
+
+	/* First, select the latest checkpoint */
+	while (errno = 0, (de = readdir(dir)) != NULL)
+	{
+		XLogRecPtr	current;
+
+		if ((strcmp(de->d_name, ".") == 0) ||
+			(strcmp(de->d_name, "..") == 0))
+			continue;
+
+		if (strlen(de->d_name) != 16 ||
+			sscanf(de->d_name, "%016" INT64_MODIFIER "X", &current) != 1)
+		{
+			pg_log_info("unexpected file \"%s\" in \"%s\"", de->d_name, dir_path);
+			continue;
+		}
+
+		if (last == InvalidXLogRecPtr || current > last)
+			last = current;
+	}
+
+	if (last == InvalidXLogRecPtr)
+	{
+		pg_log_error("No metadata found in \"%s\"", dir_path);
+		exit(1);
+	}
+
+	snprintf(fpath, MAXPGPATH, "pg_undo/%016" INT64_MODIFIER "X", last);
+
+	fd = open(fpath, O_RDONLY | PG_BINARY, 0);
+
+	if (fd < 0)
+	{
+		pg_log_error("could not open file \"%s\": %s", fpath,
+					 strerror(errno));
+		exit(1);
+	}
+
+	/* TODO Verify CRC. */
+
+	nread = read(fd, &next_logno, sizeof(next_logno));
+	if (nread != sizeof(next_logno))
+	{
+		pg_log_error("could not read next_logno");
+		exit(1);
+	}
+	nread = read(fd, &num_logs, sizeof(num_logs));
+	if (nread != sizeof(num_logs))
+	{
+		pg_log_error("could not read num_logs");
+		exit(1);
+	}
+
+	for (i = 0; i < num_logs; i++)
+	{
+		nread = read(fd, &buf, sizeof(UndoLogMetaData));
+		if (nread == 0)
+			break;
+		if (nread != sizeof(UndoLogMetaData))
+		{
+			if (nread <= 0)
+				pg_log_error("could not read from log file %s: %s", fpath,
+							 strerror(errno));
+			else
+				pg_log_error("could only read %d bytes out of %zu from log file %s: %s",
+							 nread, sizeof(UndoLogMetaData), fpath,
+							 strerror(errno));
+			return;
+		}
+
+		/* TODO Print out all the fields. */
+		printf("logno: %d, discard: " UndoRecPtrFormat
+			   ", insert: " UndoRecPtrFormat ", size: %lu \n", buf.logno,
+			   MakeUndoRecPtr(buf.logno, buf.discard),
+			   MakeUndoRecPtr(buf.logno, buf.insert),
+			   buf.size);
+	}
+
+	close(fd);
+}
+
 int
 main(int argc, char **argv)
 {
 	char	   *DataDir = NULL;
 
+	/* Show metadata instead of the log file contents? */
+	bool	show_metadata	= false;
+
 	static struct option long_options[] = {
 		{"pgdata", required_argument, NULL, 'D'},
+		{"log-files", no_argument, NULL, 'l'},
+		{"metadata", no_argument, NULL, 'm'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -627,13 +732,17 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "D:",
+	while ((option = getopt_long(argc, argv, "D:m",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
 		{
 			case 'D':
 				DataDir = optarg;
+				break;
+
+			case 'm':
+				show_metadata = true;
 				break;
 
 			default:
@@ -666,7 +775,10 @@ main(int argc, char **argv)
 	}
 
 	/* TODO Process tablespaces too. */
-	process_directory("base/undo");
+	if (!show_metadata)
+		process_logs("base/undo");
+	else
+		process_metadata("pg_undo");
 
 	return EXIT_SUCCESS;
 
