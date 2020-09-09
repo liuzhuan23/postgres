@@ -350,7 +350,7 @@ UndoRecPtrIsDiscarded(UndoRecPtr pointer)
 }
 
 /* Interfaces used by undorecordset.c. */
-extern UndoLogSlot *UndoLogAcquire(char persistence);
+extern UndoLogSlot *UndoLogAcquire(char persistence, UndoLogNumber min_logno);
 extern void UndoLogRelease(UndoLogSlot *slot);
 extern void UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 									   UndoLogOffset new_discard,
