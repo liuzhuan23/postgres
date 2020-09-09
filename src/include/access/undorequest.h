@@ -83,6 +83,7 @@ extern unsigned SnapshotActiveUndoRequests(UndoRequestManager *,
 										   UndoRequestData **);
 extern bool UndoRequestExists(UndoRequestManager *urm, FullTransactionId fxid,
 				  bool *is_failed_request);
+extern bool UndoRequestIsInProgress(UndoRequest *req);
 extern TupleDesc MakeUndoRequestDataTupleDesc(void);
 extern HeapTuple MakeUndoRequestDataTuple(TupleDesc, UndoRequestData *,
 										  unsigned index);

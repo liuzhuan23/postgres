@@ -684,7 +684,53 @@ AtAbort_XactUndo(bool *perform_foreground_undo)
 		 * background processing, so that we don't lose track of it.
 		 */
 		Assert(XactUndo.my_request != NULL);
-		RescheduleUndoRequest(XactUndo.manager, XactUndo.my_request);
+
+		if (UndoRequestIsInProgress(XactUndo.my_request))
+			RescheduleUndoRequest(XactUndo.manager, XactUndo.my_request);
+		else
+		{
+			/*
+			 * This can happen when aborting a transaction which hasn't failed
+			 * itself but abort of its subtransaction was tried and it failed.
+			 */
+			if (proc_exit_inprogress)
+			{
+				/*
+				 * Try to avoid additional errors by our proc_exit() hooks.
+				 *
+				 * Shared memory shouldn't probably be accessed at this stage
+				 * and the backend is going to exit, so cleanup is not
+				 * critical here.
+				 */
+				ResetXactUndo();
+
+				/*
+				 * When called from proc_exit(), elevel >= ERROR would cause
+				 * recursion.
+				 */
+				elog(WARNING, "failed to undo transaction");
+
+				/*
+				 *
+				 * XXX The changes the transaction made should not be visible
+				 * by the AM - it should check the transaction status anyway,
+				 * otherwise background undo wouldn't make sense. One problem
+				 * is that we haven't freed the space used, but more serious
+				 * is the question how the data the transaction rewrote should
+				 * be available after restart. It should appear in the undo
+				 * log during recovery, but that undo log will probably be
+				 * discarded soon.
+				 */
+			}
+			else
+			{
+				/*
+				 * Currently this branch seems to be unreachable. Should we
+				 * yet try to reschedule the request?
+				 */
+				Assert(false);
+			}
+		}
 
 		/*
 		 * XXX. If we have any temporary undo, we're in big trouble, because

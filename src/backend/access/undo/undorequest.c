@@ -1183,6 +1183,12 @@ UndoRequestExists(UndoRequestManager *urm, FullTransactionId fxid,
 	return result;
 }
 
+bool
+UndoRequestIsInProgress(UndoRequest *req)
+{
+	return req->d.status == UNDO_REQUEST_IN_PROGRESS;
+}
+
 /*
  * Get oldest registered FXID, whether LISTED or UNLISTED (as defined above).
  *
