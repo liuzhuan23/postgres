@@ -180,8 +180,7 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 		effective_chunk_size = urs_header->size;
 		if (effective_chunk_size == 0)
 		{
-			if (end_location != InvalidUndoRecPtr &&
-				UndoRecPtrGetBlockNum(end_location) == UndoRecPtrGetBlockNum(urp))
+			if (end_location != InvalidUndoRecPtr)
 				effective_chunk_size = end_location - (urp_page_start + current_off);
 			else
 				elog(ERROR, "found open chunk at %lu", urp);
