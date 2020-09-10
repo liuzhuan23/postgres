@@ -2079,6 +2079,13 @@ undolog_xlog_truncate(XLogReaderState *record)
 	slot->meta.size = xlrec->size;
 }
 
+static void
+undolog_xlog_urs_close(XLogReaderState *record)
+{
+	/* This record is processed specially, UndoReplay() knows what to do. */
+	UndoReplay(record, NULL, 0);
+}
+
 void
 undolog_redo(XLogReaderState *record)
 {
@@ -2094,6 +2101,9 @@ undolog_redo(XLogReaderState *record)
 			break;
 		case XLOG_UNDOLOG_TRUNCATE:
 			undolog_xlog_truncate(record);
+			break;
+		case XLOG_UNDOLOG_URS_CLOSE:
+			undolog_xlog_urs_close(record);
 			break;
 		default:
 			elog(PANIC, "undo_redo: unknown op code %u", info);

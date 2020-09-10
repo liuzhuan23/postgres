@@ -58,6 +58,7 @@
 
 #include "access/undo.h"
 #include "access/undolog.h"
+#include "access/undolog_xlog.h"
 #include "access/undopage.h"
 #include "access/undorecordset.h"
 #include "access/undorecordset_xlog.h"
@@ -1276,39 +1277,60 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				 * If we closed an UndoRecordSet of type URST_TRANSACTION,
 				 * we need to let xactundo.c know about the state change.
 				 */
-				if (bufdata->urs_type == URST_TRANSACTION &&
-					(bufdata->flags & URS_XLOG_CLOSE) != 0)
+				if ((bufdata->flags & URS_XLOG_CLOSE) != 0 &&
+					bufdata->urs_type == URST_TRANSACTION)
 				{
 					UndoRecPtr begin;
 					UndoRecPtr end;
 					bool	isCommit = false;
 					bool	isPrepare = false;
-					uint8	info;
+					RmgrId	rmid = XLogRecGetRmid(xlog_record);
+					uint8	info = XLogRecGetInfo(xlog_record) & ~XLR_INFO_MASK;
 
 					/* Determine which type of record closed the record set. */
-					if (XLogRecGetRmid(xlog_record) != RM_XACT_ID)
+					if (rmid != RM_XACT_ID &&
+						!(rmid == RM_UNDOLOG_ID && info == XLOG_UNDOLOG_URS_CLOSE))
 						elog(ERROR,
 							 "transaction undo closed by unexpected rmgr %d",
 							 XLogRecGetRmid(xlog_record));
-					info = XLogRecGetInfo(xlog_record) & ~XLR_INFO_MASK;
 
-					switch (info & XLOG_XACT_OPMASK)
+					if (rmid == RM_XACT_ID)
 					{
-						case XLOG_XACT_COMMIT:
-						case XLOG_XACT_COMMIT_PREPARED:
-							isCommit = true;
-							break;
-						case XLOG_XACT_ABORT:
-						case XLOG_XACT_ABORT_PREPARED:
-							break;
-						case XLOG_XACT_PREPARE:
-							isPrepare = true;
-							break;
-						default:
-							elog(ERROR,
-								 "transaction undo closed by unexpected record %d",
-								info);
+						switch (info & XLOG_XACT_OPMASK)
+						{
+							case XLOG_XACT_COMMIT:
+							case XLOG_XACT_COMMIT_PREPARED:
+								isCommit = true;
+								break;
+							case XLOG_XACT_ABORT:
+							case XLOG_XACT_ABORT_PREPARED:
+								break;
+							case XLOG_XACT_PREPARE:
+								isPrepare = true;
+								break;
+							default:
+								elog(ERROR,
+									 "transaction undo closed by unexpected record %d",
+									 info);
+						}
 					}
+					else
+					{
+						xl_undolog_urs_close	*xlrec;
+
+						/*
+						 * If the undo actions should be executed, the URS
+						 * needs to be treated like with abort.
+						 */
+						xlrec = (xl_undolog_urs_close *) XLogRecGetData(xlog_record);
+						isCommit = !xlrec->execute;
+					}
+
+					/*
+					 * Closing of the whole URS implies closing of the last
+					 * chunk.
+					 */
+					Assert((bufdata->flags & URS_XLOG_CLOSE_CHUNK) != 0);
 
 					/* Find the chunk start and end. */
 					if (bufdata->flags & URS_XLOG_CLOSE_MULTI_CHUNK)
@@ -1620,11 +1642,8 @@ UndoDestroyForXactLevel(int nestingLevel)
  *
  * This should normally be used only when a transaction or subtransaction ends
  * without writing some other WAL record to which the closure of the
- * UndoRecordSet could be attached.
- *
- * Closing an UndoRecordSet piggybacks on another WAL record; since this
- * is intended to be used when there is no such record, we write an XLOG_NOOP
- * record.
+ * UndoRecordSet could be attached. Special kind of WAL record is used to
+ * carry the buffer metadata.
  *
  * Returns true if we did anything, and false if nothing needed to be done.
  */
@@ -1638,14 +1657,17 @@ UndoCloseAndDestroyForXactLevel(int nestingLevel)
 
 	if (needs_work)
 	{
-		char dummy[24] = { '\0' };
+		xl_undolog_urs_close	xlrec;
+
+		/* Callers of this function only want to close the URS. */
+		xlrec.execute = false;
 
 		START_CRIT_SECTION();
 		XLogBeginInsert();
 		UndoMarkClosedForXactLevel(nestingLevel);
 		UndoXLogRegisterBuffersForXactLevel(nestingLevel, 0);
-		XLogRegisterData(dummy, 24); /* TODO remove me */
-		lsn = XLogInsert(RM_XLOG_ID, XLOG_NOOP);
+		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
+		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_URS_CLOSE);
 		UndoPageSetLSNForXactLevel(nestingLevel, lsn);
 		END_CRIT_SECTION();
 	}
@@ -1867,7 +1889,7 @@ CloseDanglingUndoRecordSets(void)
 		uint16 page_offset;
 		uint16 bytes_on_first_page;
 		UndoRecordSetXLogBufData bufdata = {0};
-		char dummy[24] = {0};
+		xl_undolog_urs_close	xlrec;
 		XLogRecPtr lsn;
 
 		/* If the undo is empty, skip. */
@@ -1981,8 +2003,18 @@ CloseDanglingUndoRecordSets(void)
 			MarkBufferDirty(buffers[1]);
 			XLogRegisterBuffer(1, buffers[1], REGBUF_KEEP_DATA);
 		}
-		XLogRegisterData(dummy, 24); /* TODO remove me */
-		lsn = XLogInsert(RM_XLOG_ID, XLOG_NOOP); /* new record id? */
+
+		/*
+		 * The transactions that could not be rolled back due to server crash
+		 * should be rolled back now. This WAL record ensures that those
+		 * transaction rollbacks are retried during crash recovery even if the
+		 * server crashes again between the end of this function and the next
+		 * checkpoint.
+		 */
+		xlrec.execute = true;
+
+		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
+		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_URS_CLOSE);
 		PageSetLSN(BufferGetPage(buffers[0]), lsn);
 		if (buffers[1] != InvalidBuffer)
 			PageSetLSN(BufferGetPage(buffers[1]), lsn);

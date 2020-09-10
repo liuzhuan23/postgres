@@ -44,6 +44,12 @@ undolog_desc(StringInfo buf, XLogReaderState *record)
 						 xlrec->logno,
 						 xlrec->size);
 	}
+	else if (info == XLOG_UNDOLOG_URS_CLOSE)
+	{
+		xl_undolog_urs_close *xlrec = (xl_undolog_urs_close *) rec;
+
+		appendStringInfo(buf, "execute %u", xlrec->execute);
+	}
 }
 
 const char *
@@ -61,6 +67,9 @@ undolog_identify(uint8 info)
 			break;
 		case XLOG_UNDOLOG_TRUNCATE:
 			id = "TRUNCATE";
+			break;
+		case XLOG_UNDOLOG_URS_CLOSE:
+			id = "CLOSE";
 			break;
 	}
 

@@ -21,6 +21,7 @@
 #define XLOG_UNDOLOG_CREATE		0x00
 #define XLOG_UNDOLOG_DISCARD	0x10
 #define XLOG_UNDOLOG_TRUNCATE	0x20
+#define XLOG_UNDOLOG_URS_CLOSE	0x30
 
 /* Create a new undo log. */
 typedef struct xl_undolog_create
@@ -52,6 +53,15 @@ typedef struct xl_undolog_truncate
 } xl_undolog_truncate;
 
 #define SizeOfUndologTruncate sizeof(xl_undolog_truncate)
+
+/* Close URS set. Use this record if there's no reason to use RM_XACT_ID. */
+typedef struct xl_undolog_urs_close
+{
+	/* Execute the undo actions before closing the set? */
+	bool	execute;
+} xl_undolog_urs_close;
+
+#define SizeOfUndologURSClose sizeof(xl_undolog_urs_close);
 
 extern void undolog_desc(StringInfo buf,XLogReaderState *record);
 extern void undolog_redo(XLogReaderState *record);

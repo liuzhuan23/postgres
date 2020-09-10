@@ -9825,8 +9825,7 @@ xlog_redo(XLogReaderState *record)
 	}
 	else if (info == XLOG_NOOP)
 	{
-		/* sometimes XLOG_NOOP is used to carry undo buffer data */
-		UndoReplay(record, NULL, 0);
+		/* nothing to do here */
 	}
 	else if (info == XLOG_SWITCH)
 	{
