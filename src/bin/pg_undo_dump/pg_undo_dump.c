@@ -20,13 +20,10 @@
 #include "access/undolog.h"
 #include "access/undopage.h"
 #include "access/undorecordset.h"
+#include "access/undorequest.h"
 #include "common/logging.h"
 #include "common/fe_memutils.h"
 
-/*
- * #include "access/undorecordset_xlog.h"
- * #include "catalog/database_internal.h"
- */
 #include "getopt_long.h"
 
 static const char *progname;
@@ -597,17 +594,23 @@ cleanup:
 	pfree(segments);
 }
 
+#define	METADATA_SLOTS		0x01
+#define	METADATA_REQUESTS	0x02
+
 static void
-process_metadata(const char *dir_path)
+process_metadata(const char *dir_path, int flags)
 {
 	DIR		   *dir;
 	struct dirent *de;
 	XLogRecPtr	last = InvalidXLogRecPtr;
 	int			fd = -1;
 	char		fpath[MAXPGPATH];
-	UndoLogMetaData	buf;
 	UndoLogNumber next_logno, num_logs;
+	Size	req_bytes;
 	int	i, nread;
+	Size	ntotal = 0;
+	pg_crc32c	crc;
+	bool	crc_found = false;
 
 	dir = opendir(dir_path);
 	if (dir == NULL)
@@ -638,7 +641,7 @@ process_metadata(const char *dir_path)
 
 	if (last == InvalidXLogRecPtr)
 	{
-		pg_log_error("No metadata found in \"%s\"", dir_path);
+		pg_log_error("No slot metadata found in \"%s\"", dir_path);
 		exit(1);
 	}
 
@@ -653,44 +656,136 @@ process_metadata(const char *dir_path)
 		exit(1);
 	}
 
-	/* TODO Verify CRC. */
-
 	nread = read(fd, &next_logno, sizeof(next_logno));
 	if (nread != sizeof(next_logno))
 	{
 		pg_log_error("could not read next_logno");
 		exit(1);
 	}
+	ntotal += nread;
+
 	nread = read(fd, &num_logs, sizeof(num_logs));
 	if (nread != sizeof(num_logs))
 	{
 		pg_log_error("could not read num_logs");
 		exit(1);
 	}
+	ntotal += nread;
 
 	for (i = 0; i < num_logs; i++)
 	{
-		nread = read(fd, &buf, sizeof(UndoLogMetaData));
+		UndoLogMetaData	slot;
+
+		nread = read(fd, &slot, sizeof(UndoLogMetaData));
 		if (nread == 0)
 			break;
 		if (nread != sizeof(UndoLogMetaData))
 		{
 			if (nread <= 0)
-				pg_log_error("could not read from log file %s: %s", fpath,
+				pg_log_error("could not read from file %s: %s", fpath,
 							 strerror(errno));
 			else
-				pg_log_error("could only read %d bytes out of %zu from log file %s: %s",
+				pg_log_error("could only read %d bytes out of %zu from file %s: %s",
 							 nread, sizeof(UndoLogMetaData), fpath,
 							 strerror(errno));
-			return;
+			exit(1);
 		}
+		ntotal += nread;
 
 		/* TODO Print out all the fields. */
-		printf("logno: %d, discard: " UndoRecPtrFormat
-			   ", insert: " UndoRecPtrFormat ", size: %lu \n", buf.logno,
-			   MakeUndoRecPtr(buf.logno, buf.discard),
-			   MakeUndoRecPtr(buf.logno, buf.insert),
-			   buf.size);
+		if (flags & METADATA_SLOTS)
+			printf("logno: %d, discard: " UndoRecPtrFormat
+				   ", insert: " UndoRecPtrFormat ", size: %lu \n",
+				   slot.logno,
+				   MakeUndoRecPtr(slot.logno, slot.discard),
+				   MakeUndoRecPtr(slot.logno, slot.insert),
+				   slot.size);
+	}
+
+	if ((flags & METADATA_REQUESTS) == 0)
+		exit(1);
+
+	nread = read(fd, &req_bytes, sizeof(req_bytes));
+	if (nread != sizeof(req_bytes))
+	{
+		pg_log_error("could not read the total size of undo requests");
+		exit(1);
+	}
+	ntotal += nread;
+
+	while (true)
+	{
+		UndoRequestData	req;
+		char	*status = "unknown";
+
+		nread = read(fd, &req, sizeof(UndoRequestData));
+		if (nread == 0)
+			break;
+		if (nread != sizeof(UndoRequestData))
+		{
+			if (nread == 0)
+				break;
+			else if (nread == sizeof(pg_crc32c))
+			{
+				memcpy(&crc, &req, sizeof(pg_crc32c));
+				crc_found = true;
+				break;
+			}
+			else
+			{
+				if (nread < 0)
+					pg_log_error("could not read from file %s: %s", fpath,
+								 strerror(errno));
+				else
+					pg_log_error("could only read %d bytes out of %zu from file %s: %s",
+								 nread, sizeof(UndoRequestData), fpath,
+								 strerror(errno));
+
+				exit(1);
+			}
+		}
+
+		switch (req.status)
+		{
+			case UNDO_REQUEST_FREE:
+				Assert(false);
+				status = "free";
+				break;
+			case UNDO_REQUEST_ALLOCATED:
+				status = "allocated";
+				break;
+			case UNDO_REQUEST_READY:
+				status = "ready";
+				break;
+			case UNDO_REQUEST_WAITING:
+				status = "waiting";
+				break;
+			case UNDO_REQUEST_IN_PROGRESS:
+				status = "in progress";
+				break;
+		}
+
+		printf("status: %s, fxid: %u:%u, dbid: %u, size: %zu, start: "
+			   UndoRecPtrFormat ", end: " UndoRecPtrFormat
+			   ", start unlogged: " UndoRecPtrFormat
+			   ", end unlogged: " UndoRecPtrFormat "\n",
+			   status,
+			   EpochFromFullTransactionId(req.fxid),
+			   XidFromFullTransactionId(req.fxid),
+			   req.dbid,
+			   req.size,
+			   req.start_location_logged,
+			   req.end_location_logged,
+			   req.start_location_unlogged,
+			   req.end_location_unlogged);
+	}
+
+	if (!crc_found)
+		/* Should not happen */
+		pg_log_warning("CRC not found");
+	else
+	{
+		/* TODO Verify CRC. */
 	}
 
 	close(fd);
@@ -701,13 +796,15 @@ main(int argc, char **argv)
 {
 	char	   *DataDir = NULL;
 
-	/* Show metadata instead of the log file contents? */
-	bool	show_metadata	= false;
+	bool	show_logs	= false;
+	bool	show_requests	= false;
+	bool	show_slots	= false;
 
 	static struct option long_options[] = {
 		{"pgdata", required_argument, NULL, 'D'},
 		{"log-files", no_argument, NULL, 'l'},
-		{"metadata", no_argument, NULL, 'm'},
+		{"requests", no_argument, NULL, 'r'},
+		{"slots", no_argument, NULL, 's'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -732,7 +829,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "D:m",
+	while ((option = getopt_long(argc, argv, "D:lrs",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -741,8 +838,16 @@ main(int argc, char **argv)
 				DataDir = optarg;
 				break;
 
-			case 'm':
-				show_metadata = true;
+			case 'l':
+				show_logs = true;
+				break;
+
+			case 'r':
+				show_requests = true;
+				break;
+
+			case 's':
+				show_slots = true;
 				break;
 
 			default:
@@ -767,6 +872,28 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
+	/*
+	 * The 'l' option is not required to show logs, but if 'r' or 's' is
+	 * specified,
+	 */
+	if (show_logs)
+	{
+		if (show_slots)
+		{
+			pg_log_error("the '-l' and '-s' options are mutually exclusive");
+			exit(1);
+		}
+
+		if (show_requests)
+		{
+			pg_log_error("the '-l' and '-r' options are mutually exclusive");
+			exit(1);
+		}
+	}
+
+	if (!(show_logs || show_requests || show_slots))
+		show_logs = true;
+
 	if (chdir(DataDir) < 0)
 	{
 		pg_log_error("could not change directory to \"%s\": %m",
@@ -774,11 +901,20 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	/* TODO Process tablespaces too. */
-	if (!show_metadata)
+	if (show_logs)
+		/* TODO Process tablespaces too. */
 		process_logs("base/undo");
 	else
-		process_metadata("pg_undo");
+	{
+		int	flags = 0;
+
+		if (show_requests)
+			flags |= METADATA_REQUESTS;
+		if (show_slots)
+			flags |= METADATA_SLOTS;
+
+		process_metadata("pg_undo", flags);
+	}
 
 	return EXIT_SUCCESS;
 
