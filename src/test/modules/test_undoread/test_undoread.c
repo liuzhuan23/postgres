@@ -256,7 +256,7 @@ test_undoread_cache_empty_log(PG_FUNCTION_ARGS)
 	while (true)
 	{
 		/* By acquiring the slot we ensure that the session cache is empty. */
-		slot = UndoLogAcquire(persistence);
+		slot = UndoLogAcquire(persistence, InvalidUndoLogNumber);
 		/* The slot is already ours, so no need to lock meta_lock. */
 		if (slot->meta.insert == SizeOfUndoPageHeaderData)
 		{
