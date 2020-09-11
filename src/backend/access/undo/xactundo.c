@@ -598,12 +598,19 @@ PerformUndoActions(int nestingLevel)
 
 			while (UndoRSReaderReadOneBackward(&r))
 			{
-				const RmgrUndoHandler *undo_handler;
+				const RmgrData	*rmgr;
+				const RmgrUndoHandler* (*rm_undo) (void);
+				const RmgrUndoHandler*	undo_handler;
 
 				/* FIXME: probably should move checking of type into undo reader */
-				undo_handler = RmgrTable[r.node.n.type].rm_undo();
-				/* XXX: Should we add error check for undo_handler being NULL? */
-				undo_handler->undo(&r.node);
+				rmgr = &RmgrTable[r.node.n.type];
+				if (rmgr->rm_undo)
+				{
+					rm_undo = rmgr->rm_undo;
+					undo_handler = rm_undo();
+					/* XXX: Should we add error check for undo_handler being NULL? */
+					undo_handler->undo(&r.node);
+				}
 			}
 
 			UndoRSReaderClose(&r);
