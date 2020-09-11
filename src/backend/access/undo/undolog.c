@@ -212,11 +212,9 @@ UndoLogRecPtrIsDiscardedSlowPath(UndoRecPtr pointer)
 		 * If we couldn't find the undo log number, then it must be entirely
 		 * discarded.  Set this backend's recent_discard value to the highest
 		 * possible value, so that all records appear to be discarded to the
-		 * fast-path code.  Technically this value is too low by 1, but
-		 * assuming only pointers to records are tested, and no record can
-		 * have size 1, this value suffices.
+		 * fast-path code.
 		 */
-		discard = MakeUndoRecPtr(logno, UndoLogMaxSize - 1);
+		discard = MakeUndoRecPtr(logno, UndoLogMaxSize);
 	}
 	else
 	{
@@ -228,7 +226,7 @@ UndoLogRecPtrIsDiscardedSlowPath(UndoRecPtr pointer)
 			 * above, and the UndoLogSlot is now unused or being used for some
 			 * other undo log.  This is the same as not finding it.
 			 */
-			discard = MakeUndoRecPtr(logno, UndoLogMaxSize - 1);
+			discard = MakeUndoRecPtr(logno, UndoLogMaxSize);
 		}
 		else
 			discard = MakeUndoRecPtr(logno, slot->meta.discard);

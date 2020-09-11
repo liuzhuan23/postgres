@@ -132,9 +132,15 @@ undofile_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	Assert(forknum == MAIN_FORKNUM);
 
-	/* Check if the block has been discarded. */
+	/*
+	 * Check if the block has been discarded.
+	 *
+	 * Since "discard" is defined as the "oldest data needed" (see
+	 * UndoLogMetaData), we need to test the last byte of the current block
+	 * rather than the first byte of the next block.
+	 */
 	if (UndoRecPtrIsDiscarded(MakeUndoRecPtr(reln->smgr_rnode.node.relNode,
-											 BLCKSZ * (blocknum + 1))))
+											 BLCKSZ * (blocknum + 1) - 1)))
 		return false;
 
 	file = undofile_get_segment_file(reln, blocknum / UNDOSEG_SIZE);
