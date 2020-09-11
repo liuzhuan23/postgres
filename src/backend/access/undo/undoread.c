@@ -468,7 +468,6 @@ UndoRSReaderInit(UndoRSReaderState *r,
 	urs_load_preceding_chunks(&r->cached_buffer, r->relpersistence,
 							  &r->chunks);
 	first_chunk = &r->chunks.chunks[0];
-	last_chunk = &r->chunks.chunks[r->chunks.nchunks - 1];
 
 	Assert(first_chunk->header.previous_chunk == InvalidUndoRecPtr);
 
