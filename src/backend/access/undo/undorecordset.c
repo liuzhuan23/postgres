@@ -1426,7 +1426,7 @@ UndoXLogRegisterBuffers(UndoRecordSet *urs, uint8 first_block_id)
  * Set page LSNs for buffers dirtied by UndoInsert or UndoMarkClosed.
  */
 void
-UndoPageSetLSN(UndoRecordSet *urs, UndoRecPtr lsn)
+UndoPageSetLSN(UndoRecordSet *urs, XLogRecPtr lsn)
 {
 	for (int i = 0; i < urs->nbuffers; ++i)
 		PageSetLSN(BufferGetPage(urs->buffers[i].buffer), lsn);
