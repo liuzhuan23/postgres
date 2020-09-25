@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "access/undodefs.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
@@ -77,6 +78,12 @@ static uint32 mainrdata_len;	/* total # of bytes in chain */
 static uint8 curinsert_flags = 0;
 
 /*
+ * If the current record was created during UNDO, this identifies the
+ * corresponding UNDO record.
+ */
+UndoRecPtr	curinsert_undo_ptr = InvalidUndoRecPtr;
+
+/*
  * These are used to hold the record header while constructing a record.
  * 'hdr_scratch' is not a plain variable, but is palloc'd at initialization,
  * because we want it to be MAXALIGNed and padding bytes zeroed.
@@ -90,7 +97,7 @@ static char *hdr_scratch = NULL;
 #define SizeOfXlogOrigin	(sizeof(RepOriginId) + sizeof(char))
 
 #define HEADER_SCRATCH_SIZE \
-	(SizeOfXLogRecord + \
+	(SizeOfXLogRecord + sizeof(UndoRecPtr) +			   \
 	 MaxSizeOfXLogRecordBlockHeader * (XLR_MAX_BLOCK_ID + 1) + \
 	 SizeOfXLogRecordDataHeaderLong + SizeOfXlogOrigin)
 
@@ -122,6 +129,7 @@ XLogBeginInsert(void)
 	Assert(max_registered_block_id == 0);
 	Assert(mainrdata_last == (XLogRecData *) &mainrdata_head);
 	Assert(mainrdata_len == 0);
+	Assert(curinsert_undo_ptr == InvalidUndoRecPtr);
 
 	/* cross-check on whether we should be here or not */
 	if (!XLogInsertAllowed())
@@ -202,6 +210,7 @@ XLogResetInsertion(void)
 	mainrdata_len = 0;
 	mainrdata_last = (XLogRecData *) &mainrdata_head;
 	curinsert_flags = 0;
+	curinsert_undo_ptr = InvalidUndoRecPtr;
 	begininsert_called = false;
 }
 
@@ -401,6 +410,17 @@ XLogSetRecordFlags(uint8 flags)
 }
 
 /*
+ * Set pointer to the UNDO record responsible for creation of the upcoming WAL
+ * record.
+ */
+void
+XLogSetRecordUndoPtr(UndoRecPtr	undo_ptr)
+{
+	Assert(begininsert_called);
+	curinsert_undo_ptr = undo_ptr;
+}
+
+/*
  * Insert an XLOG record having the specified RMID and info bytes, with the
  * body of the record being the data and buffer references registered earlier
  * with XLogRegister* calls.
@@ -505,6 +525,16 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 	hdr_rdt.next = NULL;
 	rdt_datas_last = &hdr_rdt;
 	hdr_rdt.data = hdr_scratch;
+
+	/*
+	 * Store the pointer to the UNDO record responsible for this WAL record.
+	 */
+	if (curinsert_undo_ptr != InvalidUndoRecPtr)
+	{
+		memcpy(scratch, &curinsert_undo_ptr, sizeof(UndoRecPtr));
+		scratch += sizeof(UndoRecPtr);
+		info |= XLR_CONTAINS_UNDO_PTR;
+	}
 
 	/*
 	 * Enforce consistency checks for this record if user is looking for it.

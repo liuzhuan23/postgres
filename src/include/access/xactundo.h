@@ -72,6 +72,7 @@ extern UndoRecPtr XactUndoReplay(XLogReaderState *xlog_record,
 extern void XactUndoCloseRecordSet(void *type_header, UndoRecPtr begin,
 								   UndoRecPtr end,
 								   bool isCommit, bool isPrepare);
+extern void XactUpdateLastUndoReplayed(XLogReaderState *record);
 
 /* undo worker infrastructure */
 extern long XactUndoWaitTime(TimestampTz now);

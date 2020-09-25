@@ -30,6 +30,7 @@
 #endif
 
 #include "access/xlogrecord.h"
+#include "access/undodefs.h"
 
 /* WALOpenSegment represents a WAL segment being read. */
 typedef struct WALOpenSegment
@@ -148,6 +149,9 @@ struct XLogReaderState
 
 	RepOriginId record_origin;
 
+	/* Pointer to the UNDO record responsible for the WAL record. */
+	UndoRecPtr	undo_ptr;
+
 	/* information about blocks referenced by the record. */
 	DecodedBkpBlock blocks[XLR_MAX_BLOCK_ID + 1];
 
@@ -243,6 +247,7 @@ extern bool DecodeXLogRecord(XLogReaderState *state, XLogRecord *record,
 #define XLogRecGetRmid(decoder) ((decoder)->decoded_record->xl_rmid)
 #define XLogRecGetXid(decoder) ((decoder)->decoded_record->xl_xid)
 #define XLogRecGetOrigin(decoder) ((decoder)->record_origin)
+#define XLogRecGetUndoPtr(decoder) ((decoder)->undo_ptr)
 #define XLogRecGetData(decoder) ((decoder)->main_data)
 #define XLogRecGetDataLen(decoder) ((decoder)->main_data_len)
 #define XLogRecHasAnyBlockRefs(decoder) ((decoder)->max_block_id >= 0)

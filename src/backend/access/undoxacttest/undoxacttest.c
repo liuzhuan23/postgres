@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/undolog.h"
 #include "access/undoxacttest.h"
 #include "access/xactundo.h"
 #include "access/xlogutils.h"
@@ -9,7 +10,8 @@
 
 
 int64
-undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod, bool is_undo)
+undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod,
+							 UndoRecPtr undo_ptr)
 {
 	XactUndoContext undo_context;
 	UndoNode undo_node;
@@ -17,6 +19,7 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 	int64		oldval;
 	int64		newval;
+	bool	is_undo = undo_ptr != InvalidUndoRecPtr;
 
 	/* build undo record */
 	if (!is_undo)
@@ -62,6 +65,9 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 		uint8		info = XLOG_UNDOXACTTEST_MOD;
 
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
+
+		if (is_undo)
+			XLogSetRecordUndoPtr(undo_ptr);
 
 		recptr = XLogInsert(RM_UNDOXACTTEST_ID, info);
 
@@ -127,16 +133,34 @@ undoxacttest_redo_mod(XLogReaderState *record)
 	if (BufferIsValid(buf))
 		UnlockReleaseBuffer(buf);
 
-	/* reconstruct undo record */
+	/*
+	 * Reconstruct undo record if the WAL originates from DO.
+	 *
+	 * XXX Real AM (zheap) will probably generate a dedicated WAL record
+	 * during UNDO, so it won't make any decision based on ->undo_ptr.
+	 */
+	if (record->undo_ptr == InvalidUndoRecPtr)
 	{
 		UndoNode undo_node;
 		xu_undoxactest_mod undo_rec;
 
+		undo_rec.reloid = xlrec->reloid;
 		undo_rec.mod = xlrec->debug_mod;
-		undo_node.data = (char *) &undo_rec;
+		undo_node.type = RM_UNDOXACTTEST_ID;
 		undo_node.length = sizeof(undo_rec);
+		undo_node.data = (char *) &undo_rec;
 
 		XactUndoReplay(record, &undo_node);
+	}
+	else
+	{
+		/*
+		 * The WAL was generated at the UNDO phase, so there's no reason to
+		 * create undo log for it. However we need to notify the slot that
+		 * this record should not be replayed again when the recovery is
+		 * complete.
+		 */
+		XactUpdateLastUndoReplayed(record);
 	}
 }
 
@@ -160,11 +184,12 @@ undoxacttest_undo(const WrittenUndoNode *record)
 {
 	const xu_undoxactest_mod *uxt_r = ( const xu_undoxactest_mod *) record->n.data;
 
-	elog(DEBUG1, "called for record of type %d, length %zu at %lu: %ld",
+	elog(DEBUG1, "called for record of type %d, length %zu at %lu: %ld, undorecptr: "
+		 UndoRecPtrFormat,
 		 record->n.type, record->n.length, record->location,
-		 uxt_r->mod);
+		 uxt_r->mod, record->location);
 
-	undoxacttest_undo_mod(uxt_r);
+	undoxacttest_undo_mod(uxt_r, record->location);
 }
 
 static const RmgrUndoHandler undoxact_undo_handler =

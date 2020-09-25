@@ -80,6 +80,14 @@ typedef struct XLogRecord
 #define XLR_CHECK_CONSISTENCY	0x02
 
 /*
+ * This flag indicates that the record was created during UNDO execution,
+ * (i.e. during transaction abort) and therefore it contains pointer to the
+ * UNDO record responsible for the WAL record. This is needed so that the UNDO
+ * stage resumes at the correct UNDO record during crash recovery.
+ */
+#define XLR_CONTAINS_UNDO_PTR  0x04
+
+/*
  * Header info for block data appended to an XLOG record.
  *
  * 'data_length' is the length of the rmgr-specific payload data associated

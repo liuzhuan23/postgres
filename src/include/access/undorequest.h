@@ -166,5 +166,8 @@ extern HeapTuple MakeUndoRequestDataTuple(TupleDesc, UndoRequestData *,
 
 /* Get oldest registered FXID. */
 extern FullTransactionId UndoRequestManagerOldestFXID(UndoRequestManager *urm);
+
+extern void UndoRequestUpdateLastReplayed(UndoRequestManager *urm,
+										  UndoRecPtr last_replayed);
 #endif	/* FRONTEND */
 #endif

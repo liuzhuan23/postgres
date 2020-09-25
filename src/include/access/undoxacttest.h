@@ -28,6 +28,7 @@
 
 typedef struct xl_undoxacttest_mod
 {
+	Oid reloid;
 	int64 newval;
 	int64 debug_mod;
 	int64 debug_oldval;
@@ -51,8 +52,9 @@ extern const char *undoxacttest_identify(uint8 info);
 extern const RmgrUndoHandler* undoxacttest_undo_handler(void);
 
 /* functions to be called by SQL UDFs */
-int64 undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod, bool is_undo);
+int64 undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod,
+								   UndoRecPtr undo_ptr);
 
-void undoxacttest_undo_mod(const xu_undoxactest_mod *uxt_r);
+void undoxacttest_undo_mod(const xu_undoxactest_mod *uxt_r, UndoRecPtr undo_ptr);
 
 #endif /* UNDOXACTTEST */

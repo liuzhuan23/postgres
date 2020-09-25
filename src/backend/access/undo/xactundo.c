@@ -449,6 +449,15 @@ XactUndoCloseRecordSet(void *type_header, UndoRecPtr begin, UndoRecPtr end,
 }
 
 /*
+ * Update the information on the last UNDO WAL replayed during recovery.
+ */
+void
+XactUpdateLastUndoReplayed(XLogReaderState *record)
+{
+	UndoRequestUpdateLastReplayed(XactUndo.manager, record->undo_ptr);
+}
+
+/*
  * Return the amount of time until InitializeBackgroundXactUndo can obtain
  * an undo request.
  *

@@ -64,7 +64,8 @@ undoxacttest_mod_impl(Oid reloid, int64 mod)
 	data = undoxacttest_fetch(rel, &buf, /* is_undo = */ false);
 	counter = ((int64 *) &data[0]);
 
-	oldval = undoxacttest_log_execute_mod(rel, buf, counter, mod, /* is_undo = */ false);
+	oldval = undoxacttest_log_execute_mod(rel, buf, counter, mod,
+										  InvalidUndoRecPtr);
 
 	UnlockReleaseBuffer(buf);
 
@@ -120,7 +121,7 @@ undoxacttest_read(PG_FUNCTION_ARGS)
 }
 
 void
-undoxacttest_undo_mod(const xu_undoxactest_mod *uxt_r)
+undoxacttest_undo_mod(const xu_undoxactest_mod *uxt_r, UndoRecPtr undo_ptr)
 {
 	Relation	rel;
 	Buffer		buf;
@@ -134,7 +135,7 @@ undoxacttest_undo_mod(const xu_undoxactest_mod *uxt_r)
 	data = undoxacttest_fetch(rel, &buf, /* is_undo = */ true);
 	counter = ((int64 *) &data[0]);
 
-	undoxacttest_log_execute_mod(rel, buf, counter, -uxt_r->mod, /* is_undo = */ true);
+	undoxacttest_log_execute_mod(rel, buf, counter, -uxt_r->mod, undo_ptr);
 
 	UnlockReleaseBuffer(buf);
 
