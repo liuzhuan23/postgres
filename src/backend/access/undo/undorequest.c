@@ -1157,43 +1157,6 @@ UndoRequestManagerOldestFXID(UndoRequestManager *urm)
 }
 
 /*
- * Tell the undo request manager that the request for transaction fxid does
- * already have some requests processed. The intended use is that we can
- * create undo requests during crash recovery, but later in the recovery we
- * find out that some of the undo records have already been applied before the
- * crash, so we just need to replay the WAL records generated during UNDO.
- */
-void
-UndoRequestUpdateLastReplayed(UndoRequestManager *urm,
-							  UndoRecPtr last_replayed)
-{
-	dlist_iter	iter;
-
-	/* The record should have been generated at the UNDO stage. */
-	Assert(last_replayed != InvalidUndoRecPtr);
-
-	/* Find the request the last_replayed pointer belongs to. */
-	dlist_foreach(iter, &urm->used_requests)
-	{
-		UndoRequest *req = dlist_container(UndoRequest, link, iter.cur);
-
-		if (req->d.start_location_logged != InvalidUndoRecPtr &&
-			req->d.end_location_logged != InvalidUndoRecPtr &&
-			last_replayed >= req->d.start_location_logged &&
-			last_replayed < req->d.end_location_logged)
-			req->d.end_location_logged = last_replayed;
-		else if (req->d.start_location_unlogged != InvalidUndoRecPtr &&
-			req->d.end_location_unlogged != InvalidUndoRecPtr &&
-			last_replayed >= req->d.start_location_unlogged &&
-			last_replayed < req->d.end_location_unlogged)
-			req->d.end_location_unlogged = last_replayed;
-		else
-			elog(ERROR,
-				 "could not find undo request to update the end location");
-	}
-}
-
-/*
  * Perform a left-to-right search of all three RBTrees, looking for a request
  * for a given database. The searches are interleaved so that we latch
  * onto the highest-priority request in any RBTree.

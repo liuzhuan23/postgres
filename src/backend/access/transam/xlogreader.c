@@ -1072,15 +1072,10 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 
 	state->decoded_record = record;
 	state->record_origin = InvalidRepOriginId;
-	state->undo_ptr = InvalidUndoRecPtr;
 
 	ptr = (char *) record;
 	ptr += SizeOfXLogRecord;
 	remaining = record->xl_tot_len - SizeOfXLogRecord;
-
-	/* Decode the undo pointer if it's there. */
-	if (record->xl_info & XLR_CONTAINS_UNDO_PTR)
-		COPY_HEADER_FIELD(&state->undo_ptr, sizeof(UndoRecPtr));
 
 	/* Decode the headers */
 	datatotal = 0;

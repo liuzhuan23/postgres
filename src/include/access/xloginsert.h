@@ -12,7 +12,6 @@
 #define XLOGINSERT_H
 
 #include "access/rmgr.h"
-#include "access/undodefs.h"
 #include "access/xlogdefs.h"
 #include "storage/block.h"
 #include "storage/buf.h"
@@ -42,7 +41,6 @@
 /* prototypes for public functions in xloginsert.c: */
 extern void XLogBeginInsert(void);
 extern void XLogSetRecordFlags(uint8 flags);
-extern void XLogSetRecordUndoPtr(UndoRecPtr	undo_ptr);
 extern XLogRecPtr XLogInsert(RmgrId rmid, uint8 info);
 extern void XLogEnsureRecordSpace(int max_block_id, int ndatas);
 extern void XLogRegisterData(char *data, int len);

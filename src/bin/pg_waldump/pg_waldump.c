@@ -578,12 +578,7 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 		   XLogRecGetXid(record),
 		   (uint32) (record->ReadRecPtr >> 32), (uint32) record->ReadRecPtr,
 		   (uint32) (xl_prev >> 32), (uint32) xl_prev);
-	printf("desc: %s,", id);
-
-	if (record->undo_ptr != InvalidUndoRecPtr)
-		printf(" undo: " UndoRecPtrFormat ", ", record->undo_ptr);
-	else
-		putchar(' ');
+	printf("desc: %s ", id);
 
 	/* the desc routine will printf the description directly to stdout */
 	desc->rm_desc(NULL, record);
