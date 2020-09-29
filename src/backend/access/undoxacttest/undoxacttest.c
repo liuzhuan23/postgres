@@ -57,7 +57,10 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 	if (RelationNeedsWAL(rel))
 	{
 		Page		page = BufferGetPage(buf);
-		xl_undoxacttest_mod xlrec = {.newval = newval, .debug_mod = mod, .debug_oldval = oldval};
+		xl_undoxacttest_mod xlrec = {.newval = newval,
+									 .debug_mod = mod,
+									 .debug_oldval = oldval,
+									 .reloid = RelationGetRelid(rel)};
 		XLogRecPtr	recptr;
 		uint8		info = XLOG_UNDOXACTTEST_MOD;
 
@@ -132,7 +135,9 @@ undoxacttest_redo_mod(XLogReaderState *record)
 		UndoNode undo_node;
 		xu_undoxactest_mod undo_rec;
 
+		undo_rec.reloid = xlrec->reloid;
 		undo_rec.mod = xlrec->debug_mod;
+		undo_node.type = RM_UNDOXACTTEST_ID;
 		undo_node.data = (char *) &undo_rec;
 		undo_node.length = sizeof(undo_rec);
 
