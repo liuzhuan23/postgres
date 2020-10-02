@@ -1255,7 +1255,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 
 				if (skip)
 				{
-					chunk_size_offset = UndoPageSkipOverwrite(SizeOfUndoPageHeaderData,
+					chunk_size_offset = UndoPageSkipOverwrite(bufdata->chunk_size_page_offset,
 															  chunk_size_offset,
 															  sizeof(chunk_size));
 				}
