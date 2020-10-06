@@ -44,11 +44,8 @@ undolog_desc(StringInfo buf, XLogReaderState *record)
 						 xlrec->logno,
 						 xlrec->size);
 	}
-	else if (info == XLOG_UNDOLOG_URS_CLOSE)
+	else if (info == XLOG_UNDOLOG_CLOSE_URS)
 	{
-		xl_undolog_urs_close *xlrec = (xl_undolog_urs_close *) rec;
-
-		appendStringInfo(buf, "execute %u", xlrec->execute);
 	}
 }
 
@@ -68,7 +65,7 @@ undolog_identify(uint8 info)
 		case XLOG_UNDOLOG_TRUNCATE:
 			id = "TRUNCATE";
 			break;
-		case XLOG_UNDOLOG_URS_CLOSE:
+		case XLOG_UNDOLOG_CLOSE_URS:
 			id = "CLOSE";
 			break;
 	}

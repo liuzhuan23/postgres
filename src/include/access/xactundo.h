@@ -18,6 +18,7 @@
 #include "access/xlogreader.h"
 #include "datatype/timestamp.h"
 #include "lib/stringinfo.h"
+#include "storage/buf.h"
 
 typedef struct XactUndoContext
 {
@@ -43,22 +44,23 @@ typedef struct UndoNode
 typedef struct WrittenUndoNode
 {
 	UndoRecPtr location;
+	/*
+	 * TODO Try to store it elsewhere as many records share the same
+	 * chunk. Currently the problem is that UndoRSReaderReadOneBackward() is
+	 * not aware of chunks at all.
+	 */
+	UndoRecPtr	chunk_hdr;
 	UndoNode n;
 } WrittenUndoNode;
 
 /* typedef is in xlog_internal.h */
 struct RmgrUndoHandler
 {
-	/* XXX: Probably should also pass in current chunk */
-	void (*undo)(const WrittenUndoNode *record);
+	void (*undo)(const WrittenUndoNode *record, UndoRecPtr chunk_hdr);
 };
 /* initialization */
 extern Size XactUndoShmemSize(void);
 extern void XactUndoShmemInit(void);
-
-/* undo insertion */
-extern void StartupXactUndo(UndoCheckpointContext *ctx);
-extern void CheckPointXactUndo(UndoCheckpointContext *ctx);
 
 extern UndoRecPtr PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 									  UndoNode *undo_node);
@@ -72,6 +74,7 @@ extern UndoRecPtr XactUndoReplay(XLogReaderState *xlog_record,
 extern void XactUndoCloseRecordSet(void *type_header, UndoRecPtr begin,
 								   UndoRecPtr end,
 								   bool isCommit, bool isPrepare);
+extern bool XactUndoRequestExists(FullTransactionId fxid);
 
 /* undo worker infrastructure */
 extern long XactUndoWaitTime(TimestampTz now);

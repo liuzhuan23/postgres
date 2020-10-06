@@ -18,10 +18,10 @@
 #include "lib/stringinfo.h"
 
 /* XLOG records */
-#define XLOG_UNDOLOG_CREATE		0x00
-#define XLOG_UNDOLOG_DISCARD	0x10
-#define XLOG_UNDOLOG_TRUNCATE	0x20
-#define XLOG_UNDOLOG_URS_CLOSE	0x30
+#define XLOG_UNDOLOG_CREATE			0x00
+#define XLOG_UNDOLOG_DISCARD		0x10
+#define XLOG_UNDOLOG_TRUNCATE		0x20
+#define XLOG_UNDOLOG_CLOSE_URS		0x30
 
 /* Create a new undo log. */
 typedef struct xl_undolog_create
@@ -54,14 +54,17 @@ typedef struct xl_undolog_truncate
 
 #define SizeOfUndologTruncate sizeof(xl_undolog_truncate)
 
-/* Close URS set. Use this record if there's no reason to use RM_XACT_ID. */
-typedef struct xl_undolog_urs_close
+/*
+ * Close URS set. The useful information is encoded in the buffer data, so
+ * XLOG_NOOP would be usable too. However separate record type makes the code
+ * cleaner and troubleshooting easier.
+ */
+typedef struct xl_undolog_close_urs
 {
-	/* Execute the undo actions before closing the set? */
-	bool	execute;
-} xl_undolog_urs_close;
+	char	dummy[1];
+} xl_undolog_close_urs;
 
-#define SizeOfUndologURSClose sizeof(xl_undolog_urs_close);
+#define SizeOfUndologCloseURS sizeof(xl_undolog_close_urs);
 
 extern void undolog_desc(StringInfo buf,XLogReaderState *record);
 extern void undolog_redo(XLogReaderState *record);

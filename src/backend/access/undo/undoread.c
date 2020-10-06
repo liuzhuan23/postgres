@@ -360,7 +360,7 @@ undo_reader_read_block(UndoRSReaderState *r, UndoRecPtr urp)
  * Read a number of bytes of undo content, correctly crossing page boundaries
  * if necessary. Returns pointer to the byte after the data.
  */
-static UndoRecPtr
+UndoRecPtr
 undo_reader_read_bytes(UndoRSReaderState *r,
 					   UndoRecPtr urp,
 					   size_t nbytes)
@@ -547,6 +547,7 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r)
 	resetStringInfo(&r->buf);
 	next = undo_reader_read_bytes(r, urp_content, r->node.n.length);
 	r->node.n.data = r->buf.data;
+	r->node.chunk_hdr = r->chunks.chunks[r->current_chunk - 1].urp_chunk_header;
 
 	if (next >= curchunk->urp_chunk_end)
 	{
@@ -588,6 +589,7 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 										   r->node.n.length);
 
 			node->location = r->node.location;
+			node->chunk_hdr = r->node.chunk_hdr;
 			node->n = r->node.n;
 			node->n.data = (char *) node + MAXALIGN(sizeof(WrittenUndoNode));
 			memcpy(node->n.data, r->node.n.data, r->node.n.length);

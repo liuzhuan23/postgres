@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/undorecordset.h"
 #include "access/undoxacttest.h"
 #include "access/xactundo.h"
 #include "access/xlogutils.h"
@@ -9,11 +10,14 @@
 
 
 int64
-undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod, bool is_undo)
+undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod,
+							 UndoRecPtr undo_ptr, UndoRecPtr chunk_hdr)
 {
 	XactUndoContext undo_context;
 	UndoNode undo_node;
 	xu_undoxactest_mod undo_rec;
+	bool	is_undo = undo_ptr != InvalidUndoRecPtr;
+	Buffer	undo_bufs[2];
 
 	int64		oldval;
 	int64		newval;
@@ -32,6 +36,14 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 		PrepareXactUndoData(&undo_context,
 							rel->rd_rel->relpersistence,
 							&undo_node);
+	}
+	else
+	{
+		Assert(chunk_hdr != InvalidUndoRecPtr);
+
+		UndoPrepareToUpdateLastAppliedRecord(chunk_hdr,
+											 rel->rd_rel->relpersistence,
+											 undo_bufs);
 	}
 
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -56,28 +68,42 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 	if (RelationNeedsWAL(rel))
 	{
-		Page		page = BufferGetPage(buf);
 		xl_undoxacttest_mod xlrec = {.newval = newval,
 									 .debug_mod = mod,
 									 .debug_oldval = oldval,
-									 .reloid = RelationGetRelid(rel)};
+									 .reloid = RelationGetRelid(rel),
+									 .is_undo = is_undo};
 		XLogRecPtr	recptr;
 		uint8		info = XLOG_UNDOXACTTEST_MOD;
+
+		/* Make sure that last_rec_applied gets updated during recovery. */
+		if (is_undo)
+			UpdateLastAppliedRecord(undo_ptr, chunk_hdr, undo_bufs, 1);
 
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
 
 		recptr = XLogInsert(RM_UNDOXACTTEST_ID, info);
 
-		PageSetLSN(page, recptr);
-
 		if (!is_undo)
 			SetXactUndoPageLSNs(&undo_context, recptr);
+		else
+		{
+			PageSetLSN(BufferGetPage(undo_bufs[0]), recptr);
+			if (undo_bufs[1] != InvalidBuffer)
+				PageSetLSN(BufferGetPage(undo_bufs[1]), recptr);
+		}
 	}
 
 	END_CRIT_SECTION();
 
 	if (!is_undo)
 		CleanupXactUndoInsertion(&undo_context);
+	else
+	{
+		UnlockReleaseBuffer(undo_bufs[0]);
+		if (undo_bufs[1] != InvalidBuffer)
+			UnlockReleaseBuffer(undo_bufs[1]);
+	}
 
 	return oldval;
 }
@@ -130,11 +156,12 @@ undoxacttest_redo_mod(XLogReaderState *record)
 	if (BufferIsValid(buf))
 		UnlockReleaseBuffer(buf);
 
-	/* reconstruct undo record */
+	if (!xlrec->is_undo)
 	{
 		UndoNode undo_node;
 		xu_undoxactest_mod undo_rec;
 
+		/* reconstruct undo record */
 		undo_rec.reloid = xlrec->reloid;
 		undo_rec.mod = xlrec->debug_mod;
 		undo_node.type = RM_UNDOXACTTEST_ID;
@@ -142,6 +169,15 @@ undoxacttest_redo_mod(XLogReaderState *record)
 		undo_node.length = sizeof(undo_rec);
 
 		XactUndoReplay(record, &undo_node);
+	}
+	else
+	{
+		/*
+		 * When replaying the undo execution, only use the undo WAL metadata
+		 * to update the last_rec_applied pointer of the corresponding undo
+		 * log chunk.
+		 */
+		XactUndoReplay(record, NULL);
 	}
 }
 
@@ -161,7 +197,7 @@ undoxacttest_redo(XLogReaderState *record)
 }
 
 static void
-undoxacttest_undo(const WrittenUndoNode *record)
+undoxacttest_undo(const WrittenUndoNode *record, UndoRecPtr chunk_hdr)
 {
 	const xu_undoxactest_mod *uxt_r = ( const xu_undoxactest_mod *) record->n.data;
 
@@ -169,7 +205,7 @@ undoxacttest_undo(const WrittenUndoNode *record)
 		 record->n.type, record->n.length, record->location,
 		 uxt_r->mod);
 
-	undoxacttest_undo_mod(uxt_r);
+	undoxacttest_undo_mod(uxt_r, record->location, record->chunk_hdr);
 }
 
 static const RmgrUndoHandler undoxact_undo_handler =

@@ -33,6 +33,7 @@
 #define URS_XLOG_CLOSE_MULTI_CHUNK	0x10
 #define URS_XLOG_INSERT				0x20
 #define URS_XLOG_ADD_PAGE			0x40
+#define URS_XLOG_SET_APPLIED		0x80
 
 #define URS_XLOG_HAS_TYPE_MASK									\
 	(URS_XLOG_CREATE | URS_XLOG_ADD_PAGE | URS_XLOG_ADD_CHUNK | \
@@ -78,9 +79,11 @@ typedef struct UndoRecordSetXLogBufData
 
 	/*
 	 * If URS_XLOG_CLOSE_CHUNK is set, then a chunk is being closed.  The
-	 * following members contain the offset of the chunk size within the page,
-	 * and the chunk size that should be written there.  The location begins
-	 * on this page, but may spill over to the following page.
+	 * following members contain the offset of the chunk header within the
+	 * page, and the chunk size that should be written there. Note that the
+	 * 'last_rec_applied' field of the chunk header is written on closing
+	 * too. The location begins on this page, but may spill over to the
+	 * following page.
 	 */
 	uint16		chunk_size_page_offset;
 	size_t		chunk_size;
@@ -107,6 +110,15 @@ typedef struct UndoRecordSetXLogBufData
 	 * type, to go in the page header.
 	 */
 	UndoRecPtr	chunk_header_location;
+
+	/*
+	 * If URS_XLOG_SET_APPLIED is set, then the following member contains the
+	 * pointer to the last record applied so far. See also the comments for
+	 * last_rec_applied in UndoRecordSetChunkHeader.
+	 */
+	UndoRecPtr		chunk_last_rec_applied;
+	/* Where should chunk_last_rec_applied be written.  */
+	uint16			chunk_lra_page_offset;
 } UndoRecordSetXLogBufData;
 
 extern bool

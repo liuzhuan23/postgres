@@ -63,6 +63,8 @@ typedef struct UndoRSReaderState
 	StringInfoData buf;
 }  UndoRSReaderState;
 
+extern UndoRecPtr undo_reader_read_bytes(UndoRSReaderState *r, UndoRecPtr urp,
+										 size_t nbytes);
 extern void UndoRSReaderInit(UndoRSReaderState *r,
 							 UndoRecPtr start, UndoRecPtr end,
 							 char relpersistence, bool toplevel);

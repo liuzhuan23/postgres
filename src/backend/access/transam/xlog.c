@@ -7790,6 +7790,13 @@ StartupXLOG(void)
 	CloseDanglingUndoRecordSets();
 
 	/*
+	 * Even for closed undo record sets we might have failed to register /
+	 * execute the undo requests due to server crash. Scan the sets and create
+	 * the undo requests if needed.
+	 */
+	RecoverUndoRequests();
+
+	/*
 	 * All done with end-of-recovery actions.
 	 *
 	 * Now allow backends to write WAL and update the control file status in

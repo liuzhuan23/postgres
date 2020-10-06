@@ -18,6 +18,7 @@
 #ifdef FRONTEND
 #include "common/logging.h"
 #endif
+#include "storage/buf.h"
 
 /*
  * Possible undo record set types. These are stored as 1-byte values on disk;
@@ -39,7 +40,20 @@ typedef enum UndoRecordSetType
 typedef struct UndoRecordSetChunkHeader
 {
 	UndoLogOffset	size;
+
 	UndoRecPtr		previous_chunk;
+
+	/*
+	 * last_rec_applied points to the last undo record of this chunk that has
+	 * already been applied to the database (i.e. the corresponding change was
+	 * undone). If it's InvalidUndoRecPtr (and if the URS should be applied as
+	 * such), apply all records of the chunk.
+	 *
+	 * XXX Shouldn't we instead store the corresponding offset within the
+	 * chunk?
+	 */
+	UndoRecPtr		last_rec_applied;
+
 	uint8			type;
 } UndoRecordSetChunkHeader;
 
@@ -80,10 +94,17 @@ extern UndoRecordSet *UndoCreate(UndoRecordSetType type, char presistence,
 								 char *type_header);
 extern bool UndoPrepareToMarkClosed(UndoRecordSet *urs);
 extern void UndoMarkClosed(UndoRecordSet *urs);
+extern void UndoPrepareToOverwriteChunkData(UndoRecPtr urp, int data_size,
+											char persistence, Buffer *bufs);
 extern UndoRecPtr UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size);
 extern void UndoInsert(UndoRecordSet *urs,
 					   void *record_data,
 					   size_t record_size);
+extern void UndoPrepareToUpdateLastAppliedRecord(UndoRecPtr chunk_hdr,
+												 char persistence, Buffer *bufs);
+extern void UpdateLastAppliedRecord(UndoRecPtr last_rec_applied,
+									UndoRecPtr chunk_hdr, Buffer *bufs,
+									uint8 first_block_id);
 extern void UndoPageSetLSN(UndoRecordSet *urs, XLogRecPtr lsn);
 extern void UndoRelease(UndoRecordSet *urs);
 extern void UndoDestroy(UndoRecordSet *urs);
@@ -94,6 +115,7 @@ extern UndoRecPtr UndoReplay(XLogReaderState *xlog_record,
 							 void *record_data,
 							 size_t record_size);
 extern void CloseDanglingUndoRecordSets(void);
+extern void RecoverUndoRequests(void);
 
 /* transaction integration */
 extern void UndoResetInsertion(void);

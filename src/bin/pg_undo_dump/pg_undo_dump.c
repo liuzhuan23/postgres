@@ -99,23 +99,34 @@ typedef	union
 } TypeHeader;
 
 static void
-print_chunk_info(UndoRecPtr start, UndoRecPtr prev, UndoLogOffset size,
+print_chunk_info(UndoRecPtr start, UndoRecordSetChunkHeader *hdr,
 				 UndoRecordSetType type, TypeHeader *type_header)
 {
 	UndoLogNumber logno = UndoRecPtrGetLogNo(start);
 	UndoLogOffset off = UndoRecPtrGetOffset(start);
 
 	printf("logno: %d, start: %010zX, prev: ", logno, off);
-	if (prev != InvalidUndoRecPtr)
+	if (hdr->previous_chunk != InvalidUndoRecPtr)
 	{
-		UndoLogNumber logno_prev = UndoRecPtrGetLogNo(prev);
-		UndoLogOffset off_prev = UndoRecPtrGetOffset(prev);
+		UndoLogNumber logno_prev = UndoRecPtrGetLogNo(hdr->previous_chunk);
+		UndoLogOffset off_prev = UndoRecPtrGetOffset(hdr->previous_chunk);
 
 		printf("%X.%010zX, ", logno_prev, off_prev);
 	}
 	else
 		printf("<invalid>, ");
-	printf("size: %zu", size);
+	printf("size: %zu, ", hdr->size);
+
+	printf("last_rec_applied: ");
+	if (hdr->last_rec_applied != InvalidUndoRecPtr)
+	{
+		logno = UndoRecPtrGetLogNo(hdr->last_rec_applied);
+		off = UndoRecPtrGetOffset(hdr->last_rec_applied);
+
+		printf("%X.%010zX, ", logno, off);
+	}
+	else
+		printf("<invalid>, ");
 
 	if (type_header)
 	{
@@ -250,7 +261,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 			/* The log should start with a chunk. */
 			if (i == 0 && j == 0)
 			{
-				/* Check as most as we can of the page header. */
+				/* Check as much as we can of the page header. */
 				if (pghdr.ud_first_chunk != SizeOfUndoPageHeaderData)
 				{
 					pg_log_error("the initial segment (\"%s\") does not start with a chunk immediately following the page header",
@@ -387,8 +398,8 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 							}
 						}
 
-						print_chunk_info(current_chunk, chunk_hdr.previous_chunk,
-										 chunk_hdr.size, URST_INVALID, NULL);
+						print_chunk_info(current_chunk, &chunk_hdr,
+										 URST_INVALID, NULL);
 
 						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader;
 
@@ -416,10 +427,7 @@ process_log(const char *dir_path, UndoSegFile *first, int count)
 					/* Have the whole type header? */
 					if (type_hdr_bytes_left == 0)
 					{
-						print_chunk_info(current_chunk,
-										 chunk_hdr.previous_chunk,
-										 chunk_hdr.size,
-										 urs_type,
+						print_chunk_info(current_chunk, &chunk_hdr, urs_type,
 										 &type_hdr);
 
 						chunk_bytes_left = chunk_hdr.size - SizeOfUndoRecordSetChunkHeader -
@@ -594,11 +602,8 @@ cleanup:
 	pfree(segments);
 }
 
-#define	METADATA_SLOTS		0x01
-#define	METADATA_REQUESTS	0x02
-
 static void
-process_metadata(const char *dir_path, int flags)
+process_metadata(const char *dir_path)
 {
 	DIR		   *dir;
 	struct dirent *de;
@@ -606,11 +611,8 @@ process_metadata(const char *dir_path, int flags)
 	int			fd = -1;
 	char		fpath[MAXPGPATH];
 	UndoLogNumber next_logno, num_logs;
-	Size	req_bytes;
 	int	i, nread;
-	Size	ntotal = 0;
 	pg_crc32c	crc;
-	bool	crc_found = false;
 
 	dir = opendir(dir_path);
 	if (dir == NULL)
@@ -662,7 +664,6 @@ process_metadata(const char *dir_path, int flags)
 		pg_log_error("could not read next_logno");
 		exit(1);
 	}
-	ntotal += nread;
 
 	nread = read(fd, &num_logs, sizeof(num_logs));
 	if (nread != sizeof(num_logs))
@@ -670,7 +671,6 @@ process_metadata(const char *dir_path, int flags)
 		pg_log_error("could not read num_logs");
 		exit(1);
 	}
-	ntotal += nread;
 
 	for (i = 0; i < num_logs; i++)
 	{
@@ -690,102 +690,32 @@ process_metadata(const char *dir_path, int flags)
 							 strerror(errno));
 			exit(1);
 		}
-		ntotal += nread;
 
 		/* TODO Print out all the fields. */
-		if (flags & METADATA_SLOTS)
-			printf("logno: %d, discard: " UndoRecPtrFormat
-				   ", insert: " UndoRecPtrFormat ", size: %lu \n",
-				   slot.logno,
-				   MakeUndoRecPtr(slot.logno, slot.discard),
-				   MakeUndoRecPtr(slot.logno, slot.insert),
-				   slot.size);
+		printf("logno: %d, discard: " UndoRecPtrFormat
+			   ", insert: " UndoRecPtrFormat ", size: %lu \n",
+			   slot.logno,
+			   MakeUndoRecPtr(slot.logno, slot.discard),
+			   MakeUndoRecPtr(slot.logno, slot.insert),
+			   slot.size);
 	}
 
-	if ((flags & METADATA_REQUESTS) == 0)
-		exit(1);
-
-	nread = read(fd, &req_bytes, sizeof(req_bytes));
-	if (nread != sizeof(req_bytes))
-	{
-		pg_log_error("could not read the total size of undo requests");
-		exit(1);
-	}
-	ntotal += nread;
-
-	while (true)
-	{
-		UndoRequestData	req;
-		char	*status = "unknown";
-
-		nread = read(fd, &req, sizeof(UndoRequestData));
-		if (nread == 0)
-			break;
-		if (nread != sizeof(UndoRequestData))
-		{
-			if (nread == 0)
-				break;
-			else if (nread == sizeof(pg_crc32c))
-			{
-				memcpy(&crc, &req, sizeof(pg_crc32c));
-				crc_found = true;
-				break;
-			}
-			else
-			{
-				if (nread < 0)
-					pg_log_error("could not read from file %s: %s", fpath,
-								 strerror(errno));
-				else
-					pg_log_error("could only read %d bytes out of %zu from file %s: %s",
-								 nread, sizeof(UndoRequestData), fpath,
-								 strerror(errno));
-
-				exit(1);
-			}
-		}
-
-		switch (req.status)
-		{
-			case UNDO_REQUEST_FREE:
-				Assert(false);
-				status = "free";
-				break;
-			case UNDO_REQUEST_ALLOCATED:
-				status = "allocated";
-				break;
-			case UNDO_REQUEST_READY:
-				status = "ready";
-				break;
-			case UNDO_REQUEST_WAITING:
-				status = "waiting";
-				break;
-			case UNDO_REQUEST_IN_PROGRESS:
-				status = "in progress";
-				break;
-		}
-
-		printf("status: %s, fxid: %u:%u, dbid: %u, size: %zu, start: "
-			   UndoRecPtrFormat ", end: " UndoRecPtrFormat
-			   ", start unlogged: " UndoRecPtrFormat
-			   ", end unlogged: " UndoRecPtrFormat "\n",
-			   status,
-			   EpochFromFullTransactionId(req.fxid),
-			   XidFromFullTransactionId(req.fxid),
-			   req.dbid,
-			   req.size,
-			   req.start_location_logged,
-			   req.end_location_logged,
-			   req.start_location_unlogged,
-			   req.end_location_unlogged);
-	}
-
-	if (!crc_found)
-		/* Should not happen */
-		pg_log_warning("CRC not found");
-	else
+	nread = read(fd, &crc, sizeof(pg_crc32c));
+	if (nread == sizeof(pg_crc32c))
 	{
 		/* TODO Verify CRC. */
+	}
+	else
+	{
+		if (nread < 0)
+			pg_log_error("could not read from file %s: %s", fpath,
+						 strerror(errno));
+		else
+			pg_log_error("could only read %d bytes out of %zu from file %s: %s",
+						 nread, sizeof(pg_crc32c), fpath,
+						 strerror(errno));
+
+		pg_log_warning("CRC not found");
 	}
 
 	close(fd);
@@ -797,8 +727,7 @@ main(int argc, char **argv)
 	char	   *DataDir = NULL;
 
 	bool	show_logs	= false;
-	bool	show_requests	= false;
-	bool	show_slots	= false;
+	bool	show_metadata	= false;
 
 	static struct option long_options[] = {
 		{"pgdata", required_argument, NULL, 'D'},
@@ -829,7 +758,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "D:lrs",
+	while ((option = getopt_long(argc, argv, "D:lm",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -842,12 +771,8 @@ main(int argc, char **argv)
 				show_logs = true;
 				break;
 
-			case 'r':
-				show_requests = true;
-				break;
-
-			case 's':
-				show_slots = true;
+			case 'm':
+				show_metadata = true;
 				break;
 
 			default:
@@ -878,20 +803,14 @@ main(int argc, char **argv)
 	 */
 	if (show_logs)
 	{
-		if (show_slots)
+		if (show_metadata)
 		{
-			pg_log_error("the '-l' and '-s' options are mutually exclusive");
-			exit(1);
-		}
-
-		if (show_requests)
-		{
-			pg_log_error("the '-l' and '-r' options are mutually exclusive");
+			pg_log_error("the '-l' and '-m' options are mutually exclusive");
 			exit(1);
 		}
 	}
 
-	if (!(show_logs || show_requests || show_slots))
+	if (!(show_logs || show_metadata))
 		show_logs = true;
 
 	if (chdir(DataDir) < 0)
@@ -905,16 +824,7 @@ main(int argc, char **argv)
 		/* TODO Process tablespaces too. */
 		process_logs("base/undo");
 	else
-	{
-		int	flags = 0;
-
-		if (show_requests)
-			flags |= METADATA_REQUESTS;
-		if (show_slots)
-			flags |= METADATA_SLOTS;
-
-		process_metadata("pg_undo", flags);
-	}
+		process_metadata("pg_undo");
 
 	return EXIT_SUCCESS;
 

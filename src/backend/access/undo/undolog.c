@@ -2100,7 +2100,7 @@ undolog_redo(XLogReaderState *record)
 		case XLOG_UNDOLOG_TRUNCATE:
 			undolog_xlog_truncate(record);
 			break;
-		case XLOG_UNDOLOG_URS_CLOSE:
+		case XLOG_UNDOLOG_CLOSE_URS:
 			undolog_xlog_urs_close(record);
 			break;
 		default:

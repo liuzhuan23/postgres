@@ -73,6 +73,7 @@
 #include "storage/buf.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
+#include "storage/procarray.h"
 
 /*
  * Per-chunk bookkeeping.
@@ -388,6 +389,48 @@ UndoMarkClosed(UndoRecordSet *urs)
 
 		urs->state = URS_STATE_CLOSED;
 	}
+}
+
+/*
+ * Prepare to update the last_rec_applied field of the URS chunk header.
+ */
+void
+UndoPrepareToUpdateLastAppliedRecord(UndoRecPtr chunk_hdr,
+									 char persistence, Buffer *bufs)
+{
+	RelFileNode	rnode;
+	BlockNumber	block;
+	UndoRecPtr	lra_ptr;
+
+	lra_ptr = chunk_hdr + offsetof(UndoRecordSetChunkHeader,
+								   last_rec_applied);
+	UndoRecPtrAssignRelFileNode(rnode, lra_ptr);
+	block = UndoRecPtrGetBlockNum(lra_ptr);
+
+	bufs[0] = ReadBufferWithoutRelcache(rnode,
+										UndoLogForkNum,
+										block,
+										RBM_NORMAL,
+										NULL,
+										persistence);
+	LockBuffer(bufs[0], BUFFER_LOCK_EXCLUSIVE);
+
+	/*
+	 * Prepare an additional buffer if the data does not fit into the first
+	 * one.
+	 */
+	if ((UndoRecPtrGetOffset(lra_ptr) + sizeof(UndoRecPtr)) >= BLCKSZ)
+	{
+		bufs[1] = ReadBufferWithoutRelcache(rnode,
+											UndoLogForkNum,
+											block + 1,
+											RBM_NORMAL,
+											NULL,
+											persistence);
+		LockBuffer(bufs[1], BUFFER_LOCK_EXCLUSIVE);
+	}
+	else
+		bufs[1] = InvalidBuffer;
 }
 
 /*
@@ -771,7 +814,9 @@ UndoInsert(UndoRecordSet *urs,
 		/* Initialize the chunk header. */
 		chunk_header.size = 0;
 		chunk_header.previous_chunk = InvalidUndoRecPtr;
+		chunk_header.last_rec_applied = InvalidUndoRecPtr;
 		chunk_header.type = urs->type;
+
 		if (urs->nchunks > 1)
 		{
 			UndoRecordSetChunk *prev_chunk;
@@ -916,6 +961,53 @@ UndoInsert(UndoRecordSet *urs,
 }
 
 /*
+ * Write the value of last_rec_updated to the chunk header starting at the
+ * chunk_hdr position of the undo log.
+ *
+ * 'bufs' is an array of pinned and exclusively locked buffers. The expected
+ * size of the array is two, see also the header comment of
+ * UndoPrepareToUpdateLastAppliedRecord.
+ */
+void
+UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
+						Buffer *bufs, uint8 first_block_id)
+{
+	Buffer	buf;
+	UndoRecordSetXLogBufData	bufdata;
+	int	data_off;
+	UndoRecPtr	lra_ptr = chunk_hdr + offsetof(UndoRecordSetChunkHeader,
+											   last_rec_applied);
+
+	memset(&bufdata, 0, sizeof(UndoRecordSetXLogBufData));
+	bufdata.chunk_last_rec_applied = last_rec_applied;
+	bufdata.chunk_lra_page_offset = UndoRecPtrGetPageOffset(lra_ptr);
+	bufdata.flags = URS_XLOG_SET_APPLIED;
+
+	buf = bufs[0];
+	data_off = UndoPageOverwrite(BufferGetPage(buf),
+								 UndoRecPtrGetPageOffset(lra_ptr),
+								 0,
+								 sizeof(UndoRecPtr),
+								 (char *) &last_rec_applied);
+	XLogRegisterBuffer(first_block_id, buf, REGBUF_KEEP_DATA);
+	EncodeUndoRecordSetXLogBufData(&bufdata, first_block_id);
+
+	if (data_off < sizeof(UndoRecPtr))
+	{
+		buf = bufs[1];
+		Assert(buf != InvalidBuffer);
+
+		UndoPageOverwrite(BufferGetPage(buf),
+						  SizeOfUndoPageHeaderData,
+						  data_off,
+						  sizeof(UndoRecPtr),
+						  (char *) &last_rec_applied);
+		XLogRegisterBuffer(first_block_id + 1, buf, REGBUF_KEEP_DATA);
+		EncodeUndoRecordSetXLogBufData(&bufdata, first_block_id + 1);
+	}
+}
+
+/*
  * Insert an undo record and/or replay other undo data modifications that were
  * performed at DO time.  If an undo record was inserted at DO time, the exact
  * same record data and size must be passed in at REDO time.  If no undo
@@ -942,6 +1034,9 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 	bool chunk_size_more = false;
 	size_t chunk_size;
 	int chunk_size_offset = 0;
+	UndoRecPtr	last_rec_applied;
+	bool	lra_more = false;
+	int	lra_offset = 0;
 
 	Assert(InRecovery);
 
@@ -1071,6 +1166,27 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				chunk_size_more = false;
 			}
 
+			if (lra_more)
+			{
+				if (skip)
+				{
+					lra_offset += UndoPageSkipOverwrite(SizeOfUndoPageHeaderData,
+														lra_offset,
+														sizeof(last_rec_applied));
+				}
+				else
+				{
+					lra_offset += UndoPageOverwrite(page,
+													SizeOfUndoPageHeaderData,
+													lra_offset,
+													sizeof(last_rec_applied),
+													(char *) &last_rec_applied);
+					MarkBufferDirty(buffers[nbuffers].buffer);
+				}
+				Assert(lra_offset == sizeof(last_rec_applied));
+				lra_more = false;
+			}
+
 			/* Are we still writing a header that spilled into the next page? */
 			else if (header_more)
 			{
@@ -1153,6 +1269,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				{
 					chunk_header.size = 0;
 					chunk_header.previous_chunk = InvalidUndoRecPtr;
+					chunk_header.last_rec_applied = InvalidUndoRecPtr;
 					chunk_header.type = bufdata->urs_type;
 
 					type_header = bufdata->type_header;
@@ -1192,6 +1309,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				{
 					chunk_header.size = 0;
 					chunk_header.previous_chunk = bufdata->previous_chunk_header_location;
+					chunk_header.last_rec_applied = InvalidUndoRecPtr;
 					chunk_header.type = bufdata->urs_type;
 					type_header = NULL;
 					type_header_size = 0;
@@ -1289,7 +1407,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 
 					/* Determine which type of record closed the record set. */
 					if (rmid != RM_XACT_ID &&
-						!(rmid == RM_UNDOLOG_ID && info == XLOG_UNDOLOG_URS_CLOSE))
+						!(rmid == RM_UNDOLOG_ID && info == XLOG_UNDOLOG_CLOSE_URS))
 						elog(ERROR,
 							 "transaction undo closed by unexpected rmgr %d",
 							 XLogRecGetRmid(xlog_record));
@@ -1316,14 +1434,26 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 					}
 					else
 					{
-						xl_undolog_urs_close	*xlrec;
-
 						/*
-						 * If the undo actions should be executed, the URS
-						 * needs to be treated like with abort.
+						 * The XLOG_UNDOLOG_CLOSE_URS WAL record is used to
+						 * close URSs of transactions which haven't ended by a
+						 * regular commit, so the contained records should be
+						 * executed in general. The code paths other than
+						 * CloseDanglingUndoRecordSets() that produce this WAL
+						 * record do resemble commit, but in those cases the
+						 * URS should already have been be applied (in which
+						 * case we'll eventually skip the UNDO), or empty -
+						 * see the calls of UndoCloseAndDestroyForXactLevel().
+						 *
+						 * A.H. Would it be safer to add "execute" flag to the
+						 * record? We could then mark the URS by setting
+						 * last_rec_applied of the first chunk so it points to
+						 * position lower or equal to the header size, and
+						 * introduce a convention that this is sufficient to
+						 * skip the URS when creating new undo records. Is the
+						 * coding worth?
 						 */
-						xlrec = (xl_undolog_urs_close *) XLogRecGetData(xlog_record);
-						isCommit = !xlrec->execute;
+						isCommit = false;
 					}
 
 					/*
@@ -1356,6 +1486,41 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				if (chunk_size_offset < sizeof(chunk_size))
 				{
 					chunk_size_more = true;
+					nbuffers++;
+					continue;
+				}
+			}
+
+			/* Update the pointer to the last record applied. */
+			if (bufdata->flags & URS_XLOG_SET_APPLIED)
+			{
+				/*
+				 * This flag should only be used during undo execution, so the
+				 * caller should not try to reconstruct the undo log.
+				 */
+				Assert(record_data == NULL);
+
+				last_rec_applied = bufdata->chunk_last_rec_applied;
+
+				if (skip)
+				{
+					lra_offset = UndoPageSkipOverwrite(bufdata->chunk_lra_page_offset,
+													   lra_offset,
+													   sizeof(last_rec_applied));
+				}
+				else
+				{
+					lra_offset =
+						UndoPageOverwrite(page,
+										  bufdata->chunk_lra_page_offset,
+										  0,
+										  sizeof(last_rec_applied),
+										  (char *) &last_rec_applied);
+				}
+
+				if (lra_offset < sizeof(last_rec_applied))
+				{
+					lra_more = true;
 					nbuffers++;
 					continue;
 				}
@@ -1657,17 +1822,14 @@ UndoCloseAndDestroyForXactLevel(int nestingLevel)
 
 	if (needs_work)
 	{
-		xl_undolog_urs_close	xlrec;
-
-		/* Callers of this function only want to close the URS. */
-		xlrec.execute = false;
+		xl_undolog_close_urs	xlrec;
 
 		START_CRIT_SECTION();
 		XLogBeginInsert();
 		UndoMarkClosedForXactLevel(nestingLevel);
 		UndoXLogRegisterBuffersForXactLevel(nestingLevel, 0);
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
-		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_URS_CLOSE);
+		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_CLOSE_URS);
 		UndoPageSetLSNForXactLevel(nestingLevel, lsn);
 		END_CRIT_SECTION();
 	}
@@ -1889,7 +2051,7 @@ CloseDanglingUndoRecordSets(void)
 		uint16 page_offset;
 		uint16 bytes_on_first_page;
 		UndoRecordSetXLogBufData bufdata = {0};
-		xl_undolog_urs_close	xlrec;
+		xl_undolog_close_urs	xlrec;
 		XLogRecPtr lsn;
 
 		/* If the undo is empty, skip. */
@@ -2004,17 +2166,8 @@ CloseDanglingUndoRecordSets(void)
 			XLogRegisterBuffer(1, buffers[1], REGBUF_KEEP_DATA);
 		}
 
-		/*
-		 * The transactions that could not be rolled back due to server crash
-		 * should be rolled back now. This WAL record ensures that those
-		 * transaction rollbacks are retried during crash recovery even if the
-		 * server crashes again between the end of this function and the next
-		 * checkpoint.
-		 */
-		xlrec.execute = true;
-
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
-		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_URS_CLOSE);
+		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_CLOSE_URS);
 		PageSetLSN(BufferGetPage(buffers[0]), lsn);
 		if (buffers[1] != InvalidBuffer)
 			PageSetLSN(BufferGetPage(buffers[1]), lsn);
@@ -2031,6 +2184,358 @@ CloseDanglingUndoRecordSets(void)
 
 		pfree(type_header);
 	}
+}
+
+static int
+logno_comparator(const void *arg1, const void *arg2)
+{
+	UndoLogNumber	logno1 = *(const UndoLogNumber *) arg1;
+	UndoLogNumber	logno2 = *(const UndoLogNumber *) arg2;
+
+	if (logno1 > logno2)
+		return 1;
+	if (logno1 < logno2)
+		return -1;
+	return 0;
+}
+
+/*
+ * Following is a hash table for RecoverUndoRequests() to merge chunks into
+ * undo record sets.
+ */
+typedef struct URSChunkEntry
+{
+	UndoRecPtr	begin;
+	Size	size;
+	char	status;				/* used by simplehash */
+} URSChunkEntry;
+
+#define SH_PREFIX chunktable
+#define SH_ELEMENT_TYPE URSChunkEntry
+#define SH_KEY_TYPE UndoRecPtr
+#define SH_KEY begin
+#define SH_HASH_KEY(tb, key) (key)
+#define SH_EQUAL(tb, a, b) ((a) == (b))
+#define SH_SCOPE static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
+
+/*
+ * Find closed record sets and make sure that undo request exists for those of
+ * aborted transactions. These are the sets that could not be applied due to
+ * crash. The record sets closed earlier by CloseDanglingUndoRecordSets() will
+ * be found again, but that's not a problem: we won't try to register an undo
+ * request for particular transaction multiple times.
+ */
+void
+RecoverUndoRequests(void)
+{
+	UndoLogSlot *slot = NULL;
+	List	*lognos_list = NIL;
+	ListCell	*lc;
+	int	*lognos;
+	int	nlogs, i;
+	UndoRecordSetChunkHeader chunk_header;
+	chunktable_hash	*chunks;
+	chunktable_iterator	iterator;
+	Buffer buffers[2];
+	URSChunkEntry	*entry;
+
+	/*
+	 * When merging the chunks into sets, we assume that the chunks at lower
+	 * addresses are followed by those at higher addresses. Therefore we need
+	 * to scan the slots in the log number order.
+	 */
+	while ((slot = UndoLogGetNextSlot(slot)))
+		lognos_list = lappend_int(lognos_list, slot->logno);
+	nlogs = list_length(lognos_list);
+	lognos = (int *) palloc(nlogs * sizeof(int));
+	i = 0;
+	foreach(lc, lognos_list)
+		lognos[i++] = lfirst_int(lc);
+	qsort(lognos, nlogs, sizeof(int), logno_comparator);
+
+	chunks = chunktable_create(CurrentMemoryContext, 8, NULL);
+
+	for (i = 0; i < nlogs; i++)
+	{
+		UndoLogNumber logno;
+		UndoLogOffset discard;
+		UndoLogOffset insert;
+		UndoLogOffset cur;
+		RelFileNode rnode;
+		UndoRecordSetChunkHeader	chunk_hdr;
+		int	chunk_hdr_offset = 0;
+		BlockNumber blockno_prev = InvalidBlockNumber;
+		Buffer	buffer = InvalidBuffer;
+		Page	page = NULL;
+		UndoRecPtr	begin = InvalidUndoRecPtr;
+		Size	size = 0;
+		bool	found_first_chunk = false;
+
+		slot = UndoLogGetSlot(lognos[i], false);
+		logno = slot->logno;
+		discard = slot->meta.discard;
+		insert = slot->meta.insert;
+
+		/* If the undo is empty, skip. */
+		if (insert == discard)
+			continue;
+		Assert(discard < insert);
+
+		cur = discard;
+
+		UndoRecPtrAssignRelFileNode(rnode, MakeUndoRecPtr(logno, 0));
+
+		/* Scan this log. */
+		while (cur < insert)
+		{
+			BlockNumber blockno;
+			UndoPageHeader	pghdr;
+
+			blockno = cur / BLCKSZ;
+			if (blockno_prev == InvalidBlockNumber ||
+				blockno != blockno_prev)
+			{
+				if (buffer != InvalidBuffer)
+					UnlockReleaseBuffer(buffer);
+
+				buffer = ReadBufferWithoutRelcache(rnode,
+												   MAIN_FORKNUM,
+												   blockno,
+												   RBM_NORMAL,
+												   NULL,
+												   RELPERSISTENCE_PERMANENT);
+
+				/*
+				 * No one else should be accessing the undo buffers right now,
+				 * and we're not changing their contents (in which case we
+				 * would have to lock them to prevent checkpoint from writing
+				 * inconsistent data), so the locking should not be
+				 * necessary. Do it just because it's a good practice?
+				 */
+				LockBuffer(buffer, BUFFER_LOCK_SHARE);
+
+				page = BufferGetPage(buffer);
+
+				/* Make sure cur starts at chunk boundary. */
+				if (!found_first_chunk)
+				{
+					pghdr = (UndoPageHeader) page;
+					if (pghdr->ud_first_chunk > 0)
+					{
+						cur = MakeUndoRecPtr(logno,
+											 blockno * BLCKSZ + pghdr->ud_first_chunk);
+						found_first_chunk = true;
+					}
+					else
+					{
+						/* Advance to the start of the next page; */
+						cur += BLCKSZ - cur % BLCKSZ;
+						blockno_prev = blockno;
+						continue;
+					}
+				}
+
+				blockno_prev = blockno;
+			}
+
+			if (chunk_hdr_offset > 0)
+			{
+				/*
+				 * Read the rest of the header that starts on the previous
+				 * page.
+				 */
+				memcpy((char *) &chunk_hdr + chunk_hdr_offset,
+					   (char *) page + SizeOfUndoPageHeaderData,
+					   SizeOfUndoRecordSetChunkHeader - chunk_hdr_offset);
+
+				Assert(chunk_hdr.size > chunk_hdr_offset);
+				cur += chunk_hdr.size - chunk_hdr_offset;
+				chunk_hdr_offset = 0;
+
+				Assert(begin != InvalidUndoRecPtr && size == 0);
+				size = cur - begin;
+			}
+			else
+			{
+				int	on_this_page;
+
+				/*
+				 * Read the initial part of the chunk header, or the whole
+				 * header.
+				 */
+				on_this_page = Min(BLCKSZ - pghdr->ud_first_chunk,
+								   SizeOfUndoRecordSetChunkHeader);
+
+				Assert(begin == InvalidUndoRecPtr && size == 0);
+				begin = cur;
+
+				memcpy(&chunk_hdr,
+					   (char *) page + pghdr->ud_first_chunk,
+					   on_this_page);
+
+				if (on_this_page >= SizeOfUndoRecordSetChunkHeader)
+				{
+					Assert(chunk_hdr.size > 0);
+					cur += chunk_hdr.size;
+					size = chunk_hdr.size;
+				}
+				else
+				{
+					/*
+					 * Make sure the rest of the header is read from the next
+					 * page.
+					 */
+					chunk_hdr_offset = on_this_page;
+
+					cur += on_this_page;
+					Assert(cur % BLCKSZ == 0);
+				}
+			}
+
+			/* No chunk should end beyond the insert position. */
+			Assert(UndoRecPtrGetOffset(cur) <= insert);
+
+			/* Process the current chunk if we have one. */
+			if (begin != InvalidUndoRecPtr && size > 0)
+			{
+				bool	found;
+				UndoRecPtr	begin_prev = InvalidUndoRecPtr;
+				Size	size_prev = 0;
+
+				/*
+				 * In order to conserve memory, try to merge the chunk with an
+				 * undo record set whose other chunk(s) we've already
+				 * processed.
+				 */
+				if (chunk_hdr.previous_chunk != InvalidUndoRecPtr)
+				{
+					entry = chunktable_lookup(chunks,
+											  chunk_hdr.previous_chunk);
+
+					/* We should have seen the previous chunk already. */
+					Assert(entry != NULL);
+					Assert(entry->begin == chunk_hdr.previous_chunk);
+
+					begin_prev = entry->begin;
+					size_prev = entry->size;
+
+					chunktable_delete(chunks, entry->begin);
+				}
+
+				/*
+				 * Insert a new entry and initialize it so it takes the
+				 * previous one into account.
+				 */
+				entry = chunktable_insert(chunks, begin, &found);
+				Assert(!found);
+
+				if (begin_prev != InvalidUndoRecPtr)
+					entry->begin = begin_prev;
+				else
+					entry->begin = begin;
+				entry->size = size_prev + size;
+
+				/* Get ready for the next entry. */
+				begin = InvalidUndoRecPtr;
+				size = 0;
+			}
+		}
+
+		Assert(buffer != InvalidBuffer);
+		UnlockReleaseBuffer(buffer);
+	}
+
+	for (i = 0; i < lengthof(buffers); ++i)
+		buffers[i] = InvalidBuffer;
+
+	/*
+	 * Now that we have the whole record sets, check if undo requests needs to
+	 * be created for them.
+	 */
+	chunktable_start_iterate(chunks, &iterator);
+	while ((entry = chunktable_iterate(chunks, &iterator)) != NULL)
+	{
+		XactUndoRecordSetHeader	xact_hdr;
+		int	min_size = SizeOfUndoRecordSetChunkHeader +
+			sizeof(XactUndoRecordSetHeader);
+		TransactionId	xid;
+
+		read_undo_header((void *) &chunk_header,
+						 SizeOfUndoRecordSetChunkHeader,
+						 entry->begin,
+						 buffers,
+						 lengthof(buffers));
+		release_buffers(buffers, lengthof(buffers));
+
+		/*
+		 * Chunks with a valid previous_chunk link should have been merged
+		 * into the existing sets.
+		 */
+		Assert(chunk_header.previous_chunk == InvalidUndoRecPtr);
+
+		if (chunk_header.type != URST_TRANSACTION)
+			continue;
+
+		Assert(entry->size >= min_size);
+
+		/* Skip empty sets. */
+		if (entry->size == min_size)
+			continue;
+
+		read_undo_header((void *) &xact_hdr,
+						 sizeof(XactUndoRecordSetHeader),
+						 entry->begin + SizeOfUndoRecordSetChunkHeader,
+						 buffers,
+						 lengthof(buffers));
+		release_buffers(buffers, lengthof(buffers));
+
+		/*
+		 * Was the request already created by CloseDanglingUndoRecordSets() ?
+		 */
+		if (XactUndoRequestExists(xact_hdr.fxid))
+			continue;
+
+		xid = XidFromFullTransactionId(xact_hdr.fxid);
+		if (TransactionIdDidCommit(xid))
+		{
+			/* Nothing needs to be undone. */
+		}
+		else if (TransactionIdDidAbort(xid))
+		{
+			/*
+			 * Create the request for aborted transaction. Note that we don't
+			 * know if the server managed to perform the UNDO for this set or
+			 * for part of it, however as the set tracks the last undo record
+			 * applied, a redundant request shouldn't cause any data
+			 * inconsistency.
+			 */
+			XactUndoCloseRecordSet((void *) &xact_hdr,
+								   entry->begin,
+								   entry->begin + entry->size,
+								   false, false);
+		}
+		else if (TransactionIdIsInProgress(xid))
+		{
+			/*
+			 * Since this function is called before any backend worker could
+			 * create and close its URS, so only prepared transactions should
+			 * be in progress.
+			 *
+			 * TODO Should we check if this set was created by a background
+			 * worker whose start time is < BgWorkerStart_RecoveryFinished?
+			 * How can we do that?
+			 */
+			XactUndoCloseRecordSet((void *) &xact_hdr,
+								   entry->begin,
+								   entry->begin + entry->size,
+								   false, true);
+		}
+	}
+
+	chunktable_destroy(chunks);
 }
 
 /*

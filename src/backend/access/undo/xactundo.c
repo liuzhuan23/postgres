@@ -101,7 +101,7 @@ typedef struct
 {
 	unsigned	nrequests;
 	unsigned	index;
-	UndoRequestData *request_data;
+	UndoRequest *request_data;
 } XactUndoStatusData;
 
 /* Per-subtransaction backend-private undo state. */
@@ -168,41 +168,6 @@ XactUndoShmemInit(void)
 									 capacity, soft_limit);
 	Assert(XactUndo.my_request == NULL);
 	ResetXactUndo();
-}
-
-/*
- * During cluster startup, reinitialize in-memory state from the checkpoint
- * from which we are starting up.
- */
-void
-StartupXactUndo(UndoCheckpointContext *ctx)
-{
-	Size	nbytes;
-
-	ReadUndoCheckpointData(ctx, &nbytes, sizeof(nbytes));
-	if (nbytes > 0)
-	{
-		char *data = palloc(nbytes);
-
-		ReadUndoCheckpointData(ctx, data, nbytes);
-		RestoreUndoRequestData(XactUndo.manager, nbytes, data);
-	}
-}
-
-/*
- * At checkpoint time, save relevant state, so that we can reinitialize it
- * after a restart.
- */
-void
-CheckPointXactUndo(UndoCheckpointContext *ctx)
-{
-	Size	nbytes;
-	char   *data;
-
-	data = SerializeUndoRequestData(XactUndo.manager, &nbytes);
-	WriteUndoCheckpointData(ctx, &nbytes, sizeof(nbytes));
-	if (nbytes > 0)
-		WriteUndoCheckpointData(ctx, data, nbytes);
 }
 
 /*
@@ -362,13 +327,18 @@ CleanupXactUndoInsertion(XactUndoContext *ctx)
 UndoRecPtr
 XactUndoReplay(XLogReaderState *xlog_record, UndoNode *undo_node)
 {
-	StringInfoData data;
+	if (undo_node)
+	{
+		StringInfoData data;
 
-	/* Prepare serialized undo data. */
-	initStringInfo(&data);
-	SerializeUndoData(&data, undo_node);
+		/* Prepare serialized undo data. */
+		initStringInfo(&data);
+		SerializeUndoData(&data, undo_node);
 
-	return UndoReplay(xlog_record, data.data, data.len);
+		return UndoReplay(xlog_record, data.data, data.len);
+	}
+	else
+		return UndoReplay(xlog_record, NULL, 0);
 }
 
 /*
@@ -446,6 +416,19 @@ XactUndoCloseRecordSet(void *type_header, UndoRecPtr begin, UndoRecPtr end,
 	 */
 	if (!isPrepare)
 		PerformUndoInBackground(XactUndo.manager, req, true);
+}
+
+/*
+ * Does an undo request exist for given transaction?
+ */
+bool
+XactUndoRequestExists(FullTransactionId fxid)
+{
+	UndoRequest	*req;
+
+	req = FindUndoRequestByFXID(XactUndo.manager, fxid);
+
+	return req != NULL;
 }
 
 /*
@@ -590,6 +573,8 @@ PerformUndoActions(int nestingLevel)
 
 		{
 			UndoRSReaderState r;
+			UndoRecPtr	last_rec_applied = InvalidUndoRecPtr;
+			UndoRecPtr	curchunkhdr = InvalidUndoRecPtr;
 
 			/* FIXME: provide correct persistence level - also UndoPersistenceLevelString */
 			UndoRSReaderInit(&r, start_location, end_location,
@@ -602,14 +587,44 @@ PerformUndoActions(int nestingLevel)
 				const RmgrUndoHandler* (*rm_undo) (void);
 				const RmgrUndoHandler*	undo_handler;
 
+				/*
+				 * Set or update last_rec_applied if necessary. It has to be
+				 * done on chunk boundary too because all records of the
+				 * previous chunk (i.e. the one with higher URPs) could have
+				 * been skipped and the first record to be applied can be in
+				 * the middle the current chunk.
+				 */
+				if (curchunkhdr == InvalidUndoRecPtr ||
+					r.node.chunk_hdr != curchunkhdr)
+				{
+					UndoRecordSetChunkHeader	hdr;
+
+					resetStringInfo(&r.buf);
+					undo_reader_read_bytes(&r,
+										   r.node.chunk_hdr,
+										   sizeof(UndoRecordSetChunkHeader));
+					memcpy(&hdr, r.buf.data, sizeof(UndoRecordSetChunkHeader));
+
+					last_rec_applied = hdr.last_rec_applied;
+					curchunkhdr = r.node.chunk_hdr;
+				}
+
 				/* FIXME: probably should move checking of type into undo reader */
 				rmgr = &RmgrTable[r.node.n.type];
-				if (rmgr->rm_undo)
+				/*
+				 * Do not try to apply the same undo record if it's already
+				 * been applied - typically during crash recovery.
+				 */
+				if (rmgr->rm_undo &&
+					(r.node.location < last_rec_applied ||
+					 last_rec_applied == InvalidUndoRecPtr))
 				{
 					rm_undo = rmgr->rm_undo;
 					undo_handler = rm_undo();
 					/* XXX: Should we add error check for undo_handler being NULL? */
-					undo_handler->undo(&r.node);
+					undo_handler->undo(&r.node, r.node.chunk_hdr);
+
+					last_rec_applied = r.node.location;
 				}
 			}
 
