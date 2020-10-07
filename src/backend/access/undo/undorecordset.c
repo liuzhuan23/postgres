@@ -2520,13 +2520,12 @@ RecoverUndoRequests(void)
 		else if (TransactionIdIsInProgress(xid))
 		{
 			/*
-			 * Since this function is called before any backend worker could
-			 * create and close its URS, so only prepared transactions should
-			 * be in progress.
-			 *
-			 * TODO Should we check if this set was created by a background
-			 * worker whose start time is < BgWorkerStart_RecoveryFinished?
-			 * How can we do that?
+			 * Since this function is called before any backend or background
+			 * worker could create and close its URS (URS insertions should
+			 * take place in the the same critical section as the
+			 * corresponding WAL insertion, and attempt to write WAL during
+			 * recovery causes ERROR), only prepared transactions should be in
+			 * progress now.
 			 */
 			XactUndoCloseRecordSet((void *) &xact_hdr,
 								   entry->begin,
