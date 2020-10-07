@@ -1574,16 +1574,13 @@ UndoXLogRegisterBuffers(UndoRecordSet *urs, uint8 first_block_id)
 	{
 		UndoBuffer *ubuf = &urs->buffers[i];
 
-		if (URSNeedsWAL(urs))
-		{
-			XLogRegisterBuffer(first_block_id + i,
-							   ubuf->buffer,
-							   (ubuf->is_new ? REGBUF_WILL_INIT : 0) |
-							   REGBUF_KEEP_DATA);
-			if (ubuf->bufdata.flags != 0)
-				EncodeUndoRecordSetXLogBufData(&ubuf->bufdata,
-											   first_block_id + i);
-		}
+		XLogRegisterBuffer(first_block_id + i,
+						   ubuf->buffer,
+						   (ubuf->is_new ? REGBUF_WILL_INIT : 0) |
+						   REGBUF_KEEP_DATA);
+		if (ubuf->bufdata.flags != 0)
+			EncodeUndoRecordSetXLogBufData(&ubuf->bufdata,
+										   first_block_id + i);
 	}
 }
 
