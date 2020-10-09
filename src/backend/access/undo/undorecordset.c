@@ -994,6 +994,7 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 								 0,
 								 sizeof(UndoRecPtr),
 								 (char *) &last_rec_applied);
+	MarkBufferDirty(buf);
 	XLogRegisterBuffer(first_block_id, buf, REGBUF_KEEP_DATA);
 	EncodeUndoRecordSetXLogBufData(&bufdata[0], first_block_id);
 
@@ -1013,6 +1014,7 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 						  data_off,
 						  sizeof(UndoRecPtr),
 						  (char *) &last_rec_applied);
+		MarkBufferDirty(buf);
 		XLogRegisterBuffer(first_block_id + 1, buf, REGBUF_KEEP_DATA);
 		EncodeUndoRecordSetXLogBufData(&bufdata[1], first_block_id + 1);
 	}
@@ -1527,6 +1529,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 										  0,
 										  sizeof(last_rec_applied),
 										  (char *) &last_rec_applied);
+					MarkBufferDirty(buffers[nbuffers].buffer);
 				}
 
 				if (lra_offset < sizeof(last_rec_applied))
