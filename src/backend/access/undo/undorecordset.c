@@ -393,6 +393,10 @@ UndoMarkClosed(UndoRecordSet *urs)
 
 /*
  * Prepare to update the last_rec_applied field of the URS chunk header.
+ *
+ * 'bufs' is an array of two elements. The function will always initialize the
+ * first element, while the 2nd one will only be initialized if the value to
+ * be stored crosses page boundary.
  */
 void
 UndoPrepareToUpdateLastAppliedRecord(UndoRecPtr chunk_hdr,
@@ -973,15 +977,16 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 						Buffer *bufs, uint8 first_block_id)
 {
 	Buffer	buf;
-	UndoRecordSetXLogBufData	bufdata;
+	/* This is static so it survives until the call of XLogInsert(). */
+	static UndoRecordSetXLogBufData	bufdata[2];
 	int	data_off;
 	UndoRecPtr	lra_ptr = chunk_hdr + offsetof(UndoRecordSetChunkHeader,
 											   last_rec_applied);
 
 	memset(&bufdata, 0, sizeof(UndoRecordSetXLogBufData));
-	bufdata.chunk_last_rec_applied = last_rec_applied;
-	bufdata.chunk_lra_page_offset = UndoRecPtrGetPageOffset(lra_ptr);
-	bufdata.flags = URS_XLOG_SET_APPLIED;
+	bufdata[0].chunk_last_rec_applied = last_rec_applied;
+	bufdata[0].chunk_lra_page_offset = UndoRecPtrGetPageOffset(lra_ptr);
+	bufdata[0].flags = URS_XLOG_SET_APPLIED;
 
 	buf = bufs[0];
 	data_off = UndoPageOverwrite(BufferGetPage(buf),
@@ -990,12 +995,18 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 								 sizeof(UndoRecPtr),
 								 (char *) &last_rec_applied);
 	XLogRegisterBuffer(first_block_id, buf, REGBUF_KEEP_DATA);
-	EncodeUndoRecordSetXLogBufData(&bufdata, first_block_id);
+	EncodeUndoRecordSetXLogBufData(&bufdata[0], first_block_id);
 
 	if (data_off < sizeof(UndoRecPtr))
 	{
 		buf = bufs[1];
 		Assert(buf != InvalidBuffer);
+
+		/*
+		 * When replaying the record, we'll only need to set last_rec_applied
+		 * once.
+		 */
+		bufdata[1].flags = 0;
 
 		UndoPageOverwrite(BufferGetPage(buf),
 						  SizeOfUndoPageHeaderData,
@@ -1003,7 +1014,7 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 						  sizeof(UndoRecPtr),
 						  (char *) &last_rec_applied);
 		XLogRegisterBuffer(first_block_id + 1, buf, REGBUF_KEEP_DATA);
-		EncodeUndoRecordSetXLogBufData(&bufdata, first_block_id + 1);
+		EncodeUndoRecordSetXLogBufData(&bufdata[1], first_block_id + 1);
 	}
 }
 
