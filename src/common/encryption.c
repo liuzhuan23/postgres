@@ -202,13 +202,11 @@ encryption_key_from_string(char key_str[ENCRYPTION_KEY_CHARS])
 		if (sscanf(key_str + 2 * i, "%2x", encr_key_int + i) == 0)
 		{
 #ifdef FRONTEND
-			pg_log_fatal("invalid character in encryption key at position %d",
-						 2 * i);
+			pg_log_fatal("the encryption key may only contain hexadecimal digits");
 			exit(EXIT_FAILURE);
 #else
 			ereport(FATAL,
-					(errmsg("invalid character in encryption key at position %d",
-							2 * i)));
+					(errmsg("the encryption key may only contain hexadecimal digits")));
 #endif	/* FRONTEND */
 		}
 	}
