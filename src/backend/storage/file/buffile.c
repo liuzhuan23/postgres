@@ -178,7 +178,7 @@ static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
 static void BufFileDumpBufferEncrypted(BufFile *file);
-static int	BufFileFlush(BufFile *file);
+static void	BufFileFlush(BufFile *file);
 static File MakeNewSharedSegment(BufFile *file, int segment);
 
 static void BufFileTweak(char *tweak, BufFileCommon *file, bool is_transient);
@@ -638,7 +638,14 @@ BufFileLoadBuffer(BufFile *file)
 								   file->common.curOffset,
 								   WAIT_EVENT_BUFFILE_READ);
 	if (file->common.nbytes < 0)
+	{
 		file->common.nbytes = 0;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m",
+						FilePathName(thisfile))));
+	}
+
 	/* we choose not to advance curOffset here */
 
 	if (data_encrypted && file->common.nbytes > 0)
@@ -743,7 +750,11 @@ BufFileDumpBuffer(BufFile *file)
 								 file->common.curOffset,
 								 WAIT_EVENT_BUFFILE_WRITE);
 		if (bytestowrite <= 0)
-			return;				/* failed to write */
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write to file \"%s\": %m",
+							FilePathName(thisfile))));
+
 		file->common.curOffset += bytestowrite;
 		wpos += bytestowrite;
 
@@ -852,7 +863,10 @@ BufFileDumpBufferEncrypted(BufFile *file)
 							 file->common.curOffset,
 							 WAIT_EVENT_BUFFILE_WRITE);
 	if (bytestowrite <= 0 || bytestowrite != BLCKSZ)
-		return;				/* failed to write */
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to file \"%s\": %m",
+						FilePathName(thisfile))));
 
 	file->common.curOffset += bytestowrite;
 	pgBufferUsage.temp_blks_written++;
@@ -898,7 +912,10 @@ BufFileDumpBufferEncrypted(BufFile *file)
 									file->common.curOffset,
 									WAIT_EVENT_BUFFILE_WRITE);
 			if (bytes_extra != sizeof(useful))
-				return;		/* failed to write */
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not write to file \"%s\": %m",
+								FilePathName(thisfile))));
 		}
 	}
 	file->common.dirty = false;
@@ -938,7 +955,8 @@ BufFileDumpBufferEncrypted(BufFile *file)
 /*
  * BufFileRead
  *
- * Like fread() except we assume 1-byte element size.
+ * Like fread() except we assume 1-byte element size and report I/O errors via
+ * ereport().
  */
 size_t
 BufFileRead(BufFile *file, void *ptr, size_t size)
@@ -949,7 +967,8 @@ BufFileRead(BufFile *file, void *ptr, size_t size)
 /*
  * BufFileWrite
  *
- * Like fwrite() except we assume 1-byte element size.
+ * Like fwrite() except we assume 1-byte element size and report errors via
+ * ereport().
  */
 size_t
 BufFileWrite(BufFile *file, void *ptr, size_t size)
@@ -960,9 +979,9 @@ BufFileWrite(BufFile *file, void *ptr, size_t size)
 /*
  * BufFileFlush
  *
- * Like fflush()
+ * Like fflush(), except that I/O errors are reported with ereport().
  */
-static int
+static void
 BufFileFlush(BufFile *file)
 {
 	if (file->common.dirty)
@@ -971,11 +990,9 @@ BufFileFlush(BufFile *file)
 			BufFileDumpBuffer(file);
 		else
 			BufFileDumpBufferEncrypted(file);
-		if (file->common.dirty)
-			return EOF;
 	}
 
-	return 0;
+	Assert(!file->common.dirty);
 }
 
 /*
@@ -984,6 +1001,7 @@ BufFileFlush(BufFile *file)
  * Like fseek(), except that target position needs two values in order to
  * work when logical filesize exceeds maximum value representable by off_t.
  * We do not support relative seeks across more than that, however.
+ * I/O errors are reported by ereport().
  *
  * Result is 0 if OK, EOF if not.  Logical position is not moved if an
  * impossible seek is attempted.
@@ -1041,8 +1059,7 @@ BufFileSeek(BufFile *file, int fileno, off_t offset, int whence)
 		return 0;
 	}
 	/* Otherwise, must reposition buffer, so flush any dirty data */
-	if (BufFileFlush(file) != 0)
-		return EOF;
+	BufFileFlush(file);
 
 	/*
 	 * At this point and no sooner, check for seek past last segment. The
@@ -1618,12 +1635,10 @@ BufFileLoadBufferTransient(TransientBufFile *file)
 	/* See comments in BufFileLoadBuffer(). */
 	if (data_encrypted)
 		MemSet(file->common.buffer.data, 0, BLCKSZ);
-retry:
 
 	/*
 	 * Read whatever we can get, up to a full bufferload.
 	 */
-	errno = 0;
 	file->common.nbytes = FileRead(file->vfd,
 								   file->common.buffer.data,
 								   sizeof(file->common.buffer),
@@ -1631,31 +1646,10 @@ retry:
 								   WAIT_EVENT_BUFFILE_READ);
 
 	if (file->common.nbytes < 0)
-	{
-		/*
-		 * See comments in FileRead()
-		 */
-#ifdef WIN32
-		DWORD		error = GetLastError();
-
-		switch (error)
-		{
-			case ERROR_NO_SYSTEM_RESOURCES:
-				pg_usleep(1000L);
-				errno = EINTR;
-				break;
-			default:
-				_dosmaperr(error);
-				break;
-		}
-#endif
-
-		/* OK to retry if interrupted */
-		if (errno == EINTR)
-			goto retry;
-
-		return;
-	}
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m",
+						FilePathName(file->vfd))));
 	/* we choose not to advance offset here */
 
 	if (data_encrypted && file->common.nbytes > 0)
@@ -1748,8 +1742,7 @@ BufFileDumpBufferTransient(TransientBufFile *file)
 		write_ptr = encrypt_buf.data;
 		bytestowrite = BLCKSZ;
 	}
-retry:
-	errno = 0;
+
 	nwritten = FileWrite(file->vfd,
 						 write_ptr,
 						 bytestowrite,
@@ -1757,35 +1750,11 @@ retry:
 						 WAIT_EVENT_BUFFILE_WRITE);
 
 	/* if write didn't set errno, assume problem is no disk space */
-	if (nwritten != bytestowrite && errno == 0)
-		errno = ENOSPC;
-
-	if (nwritten < 0)
-	{
-		/*
-		 * See comments in FileRead()
-		 */
-#ifdef WIN32
-		DWORD		error = GetLastError();
-
-		switch (error)
-		{
-			case ERROR_NO_SYSTEM_RESOURCES:
-				pg_usleep(1000L);
-				errno = EINTR;
-				break;
-			default:
-				_dosmaperr(error);
-				break;
-		}
-#endif
-
-		/* OK to retry if interrupted */
-		if (errno == EINTR)
-			goto retry;
-
-		return;					/* failed to write */
-	}
+	if (nwritten != bytestowrite)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to file \"%s\": %m",
+						FilePathName(file->vfd))));
 
 	file->common.curOffset += nwritten;
 
@@ -1819,7 +1788,10 @@ retry:
 									file->common.curOffset,
 									WAIT_EVENT_BUFFILE_WRITE);
 			if (bytes_extra != sizeof(useful))
-				return;			/* failed to write */
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not write to file \"%s\": %m",
+								FilePathName(file->vfd))));
 		}
 	}
 
@@ -1859,18 +1831,7 @@ BufFileReadCommon(BufFileCommon *file, void *ptr, size_t size,
 	size_t		nread = 0;
 	size_t		nthistime;
 
-	if (file->dirty)
-	{
-		/*
-		 * Transient file currently does not allow both read and write access,
-		 * so this function should not see dirty buffer.
-		 */
-		Assert(!is_transient);
-
-		if (BufFileFlush((BufFile *) file) != 0)
-			return 0;			/* could not flush... */
-		Assert(!file->dirty);
-	}
+	BufFileFlush((BufFile *) file);
 
 	while (size > 0)
 	{
@@ -2025,9 +1986,6 @@ BufFileWriteCommon(BufFileCommon *file, void *ptr, size_t size,
 				}
 				else
 					BufFileDumpBufferTransient((TransientBufFile *) file);
-
-				if (file->dirty)
-					break;		/* I/O error */
 			}
 			else
 			{
