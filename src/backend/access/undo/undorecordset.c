@@ -2216,7 +2216,8 @@ logno_comparator(const void *arg1, const void *arg2)
  */
 typedef struct URSChunkEntry
 {
-	UndoRecPtr	begin;
+	UndoRecPtr	chunk_start;
+	UndoRecPtr	begin;			/* where the whole URS starts. */
 	Size	size;
 	char	status;				/* used by simplehash */
 } URSChunkEntry;
@@ -2224,7 +2225,7 @@ typedef struct URSChunkEntry
 #define SH_PREFIX chunktable
 #define SH_ELEMENT_TYPE URSChunkEntry
 #define SH_KEY_TYPE UndoRecPtr
-#define SH_KEY begin
+#define SH_KEY chunk_start
 #define SH_HASH_KEY(tb, key) (key)
 #define SH_EQUAL(tb, a, b) ((a) == (b))
 #define SH_SCOPE static inline
@@ -2281,7 +2282,7 @@ RecoverUndoRequests(void)
 		BlockNumber blockno_prev = InvalidBlockNumber;
 		Buffer	buffer = InvalidBuffer;
 		Page	page = NULL;
-		UndoRecPtr	begin = InvalidUndoRecPtr;
+		UndoRecPtr	chunk_start = InvalidUndoRecPtr;
 		Size	size = 0;
 		bool	found_first_chunk = false;
 
@@ -2333,6 +2334,12 @@ RecoverUndoRequests(void)
 				/* Make sure cur starts at chunk boundary. */
 				if (!found_first_chunk)
 				{
+					/*
+					 * XXX Shouldn't we assume that the hole chunk is always
+					 * discarded, and therefore the page containing the
+					 * discard pointer should always have non-zero
+					 * ud_first_chunk?
+					 */
 					pghdr = (UndoPageHeader) page;
 					if (pghdr->ud_first_chunk > 0)
 					{
@@ -2362,12 +2369,16 @@ RecoverUndoRequests(void)
 					   (char *) page + SizeOfUndoPageHeaderData,
 					   SizeOfUndoRecordSetChunkHeader - chunk_hdr_offset);
 
+				/*
+				 * 'cur' should be at the page boundary, do not add the part
+				 * of the chunk located on the previous page.
+				 */
 				Assert(chunk_hdr.size > chunk_hdr_offset);
 				cur += chunk_hdr.size - chunk_hdr_offset;
 				chunk_hdr_offset = 0;
 
-				Assert(begin != InvalidUndoRecPtr && size == 0);
-				size = cur - begin;
+				Assert(chunk_start != InvalidUndoRecPtr && size == 0);
+				size = cur - chunk_start;
 			}
 			else
 			{
@@ -2380,8 +2391,8 @@ RecoverUndoRequests(void)
 				on_this_page = Min(BLCKSZ - pghdr->ud_first_chunk,
 								   SizeOfUndoRecordSetChunkHeader);
 
-				Assert(begin == InvalidUndoRecPtr && size == 0);
-				begin = cur;
+				Assert(chunk_start == InvalidUndoRecPtr && size == 0);
+				chunk_start = cur;
 
 				memcpy(&chunk_hdr,
 					   (char *) page + pghdr->ud_first_chunk,
@@ -2410,10 +2421,10 @@ RecoverUndoRequests(void)
 			Assert(UndoRecPtrGetOffset(cur) <= insert);
 
 			/* Process the current chunk if we have one. */
-			if (begin != InvalidUndoRecPtr && size > 0)
+			if (chunk_start != InvalidUndoRecPtr && size > 0)
 			{
 				bool	found;
-				UndoRecPtr	begin_prev = InvalidUndoRecPtr;
+				UndoRecPtr	begin;
 				Size	size_prev = 0;
 
 				/*
@@ -2428,29 +2439,38 @@ RecoverUndoRequests(void)
 
 					/* We should have seen the previous chunk already. */
 					Assert(entry != NULL);
-					Assert(entry->begin == chunk_hdr.previous_chunk);
+					Assert(entry->chunk_start == chunk_hdr.previous_chunk);
 
-					begin_prev = entry->begin;
+					/*
+					 * Retrieve the useful information before deleting the
+					 * entry.
+					 */
+					begin = entry->begin;
 					size_prev = entry->size;
 
-					chunktable_delete(chunks, entry->begin);
+					/*
+					 * The entry will be replaced with one for the current
+					 * chunk.
+					 */
+					chunktable_delete(chunks, chunk_hdr.previous_chunk);
+				}
+				else
+				{
+					/* The first chunk of the URS. */
+					begin = chunk_start;
 				}
 
 				/*
-				 * Insert a new entry and initialize it so it takes the
-				 * previous one into account.
+				 * Insert a new entry that takes the previous one into
+				 * account.
 				 */
-				entry = chunktable_insert(chunks, begin, &found);
+				entry = chunktable_insert(chunks, chunk_start, &found);
 				Assert(!found);
-
-				if (begin_prev != InvalidUndoRecPtr)
-					entry->begin = begin_prev;
-				else
-					entry->begin = begin;
+				entry->begin = begin;
 				entry->size = size_prev + size;
 
 				/* Get ready for the next entry. */
-				begin = InvalidUndoRecPtr;
+				chunk_start = InvalidUndoRecPtr;
 				size = 0;
 			}
 		}
@@ -2514,20 +2534,6 @@ RecoverUndoRequests(void)
 		{
 			/* Nothing needs to be undone. */
 		}
-		else if (TransactionIdDidAbort(xid))
-		{
-			/*
-			 * Create the request for aborted transaction. Note that we don't
-			 * know if the server managed to perform the UNDO for this set or
-			 * for part of it, however as the set tracks the last undo record
-			 * applied, a redundant request shouldn't cause any data
-			 * inconsistency.
-			 */
-			XactUndoCloseRecordSet((void *) &xact_hdr,
-								   entry->begin,
-								   entry->begin + entry->size,
-								   false, false);
-		}
 		else if (TransactionIdIsInProgress(xid))
 		{
 			/*
@@ -2542,6 +2548,23 @@ RecoverUndoRequests(void)
 								   entry->begin,
 								   entry->begin + entry->size,
 								   false, true);
+		}
+		else
+		{
+			/*
+			 * Transaction rolled back explicitly or failed to complete due to
+			 * server crash.
+			 *
+			 * Create the request for aborted transaction. Note that we don't
+			 * know if the server managed to perform the UNDO for this set or
+			 * for part of it, however as the set tracks the last undo record
+			 * applied, a redundant request shouldn't cause any data
+			 * inconsistency.
+			 */
+			XactUndoCloseRecordSet((void *) &xact_hdr,
+								   entry->begin,
+								   entry->begin + entry->size,
+								   false, false);
 		}
 	}
 
