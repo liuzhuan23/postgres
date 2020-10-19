@@ -2485,6 +2485,9 @@ RecoverUndoRequests(void)
 	/*
 	 * Now that we have the whole record sets, check if undo requests needs to
 	 * be created for them.
+	 *
+	 * TODO If there are multiple per-subtransaction URSs (i.e. they have the
+	 * same XID) make sure they are processed in the correct order.
 	 */
 	chunktable_start_iterate(chunks, &iterator);
 	while ((entry = chunktable_iterate(chunks, &iterator)) != NULL)
@@ -2530,9 +2533,17 @@ RecoverUndoRequests(void)
 			continue;
 
 		xid = XidFromFullTransactionId(xact_hdr.fxid);
+
+		/* URST_TRANSACTION header should always contain the XID. */
+		Assert(TransactionIdIsValid(xid));
+
 		if (TransactionIdDidCommit(xid))
 		{
-			/* Nothing needs to be undone. */
+			/*
+			 * Nothing needs to be undone. If the transaction has aborted
+			 * subtransactions, those should have been undone before the
+			 * commit.
+			 */
 		}
 		else if (TransactionIdIsInProgress(xid))
 		{

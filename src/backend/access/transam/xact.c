@@ -1273,6 +1273,12 @@ RecordTransactionCommit(void)
 		 * we must properly close it. This could piggyback on the record we're
 		 * emitting in LogStandbyInvalidations, above, but it's unclear that
 		 * the two cases would ever happen in the same transaction.
+		 *
+		 * Like in RecordTransactionAbort(), no URST_TRANSACTION set should be
+		 * found here. Either the owning transaction has the XID assigned, so
+		 * this code path is not reached at all, or we're called at the end of
+		 * the undo stage, in which case the URSs should have been already
+		 * closed.
 		 */
 		if (UndoCloseAndDestroyForXactLevel(1))
 			wrote_xlog = true;
@@ -1660,7 +1666,13 @@ RecordTransactionAbort(int nestingLevel)
 	 */
 	if (!TransactionIdIsValid(xid))
 	{
-		/* No abort record, so emit separate WAL for open UndoRecordSets. */
+		/*
+		 * No abort record, so emit separate WAL for open UndoRecordSets.
+		 *
+		 * No URST_TRANSACTION set should be found here because the owning
+		 * transaction should always have XID assigned, and so this code path
+		 * should not be reached.
+		 */
 		UndoCloseAndDestroyForXactLevel(nestingLevel);
 
 		/* Reset XactLastRecEnd until the next transaction writes something */
