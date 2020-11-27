@@ -44,15 +44,11 @@ typedef struct UndoRecordSetChunkHeader
 	UndoRecPtr		previous_chunk;
 
 	/*
-	 * last_rec_applied points to the last undo record of this chunk that has
+	 * last_rec_applied points at the last undo record of this chunk that has
 	 * already been applied to the database (i.e. the corresponding change was
-	 * undone). If it's InvalidUndoRecPtr (and if the URS should be applied as
-	 * such), apply all records of the chunk.
-	 *
-	 * XXX Shouldn't we instead store the corresponding offset within the
-	 * chunk?
+	 * undone). It is zero until the first record of the chunk is applied.
 	 */
-	UndoRecPtr		last_rec_applied;
+	UndoLogOffset	last_rec_applied;
 
 	uint8			type;
 } UndoRecordSetChunkHeader;
@@ -102,7 +98,7 @@ extern void UndoInsert(UndoRecordSet *urs,
 					   size_t record_size);
 extern void UndoPrepareToUpdateLastAppliedRecord(UndoRecPtr chunk_hdr,
 												 char persistence, Buffer *bufs);
-extern void UpdateLastAppliedRecord(UndoRecPtr last_rec_applied,
+extern void UpdateLastAppliedRecord(UndoLogOffset last_rec_applied,
 									UndoRecPtr chunk_hdr, Buffer *bufs,
 									uint8 first_block_id);
 extern void UndoPageSetLSN(UndoRecordSet *urs, XLogRecPtr lsn);

@@ -573,7 +573,7 @@ PerformUndoActions(int nestingLevel)
 
 		{
 			UndoRSReaderState r;
-			UndoRecPtr	last_rec_applied = InvalidUndoRecPtr;
+			UndoLogOffset	last_rec_applied = 0;
 			UndoRecPtr	curchunkhdr = InvalidUndoRecPtr;
 
 			/* FIXME: provide correct persistence level - also UndoPersistenceLevelString */
@@ -587,13 +587,7 @@ PerformUndoActions(int nestingLevel)
 				const RmgrUndoHandler* (*rm_undo) (void);
 				const RmgrUndoHandler*	undo_handler;
 
-				/*
-				 * Set or update last_rec_applied if necessary. It has to be
-				 * done on chunk boundary too because all records of the
-				 * previous chunk (i.e. the one with higher URPs) could have
-				 * been skipped and the first record to be applied can be in
-				 * the middle the current chunk.
-				 */
+				/* Set or update last_rec_applied. */
 				if (curchunkhdr == InvalidUndoRecPtr ||
 					r.node.chunk_hdr != curchunkhdr)
 				{
@@ -617,13 +611,18 @@ PerformUndoActions(int nestingLevel)
 				 */
 				if (rmgr->rm_undo &&
 					(r.node.location < last_rec_applied ||
-					 last_rec_applied == InvalidUndoRecPtr))
+					 last_rec_applied == 0))
 				{
 					rm_undo = rmgr->rm_undo;
 					undo_handler = rm_undo();
 					/* XXX: Should we add error check for undo_handler being NULL? */
 					undo_handler->undo(&r.node, r.node.chunk_hdr);
 
+					/*
+					 * The undo handler should have updated the chunk header
+					 * too, but we maintain a local copy of the pointer so
+					 * that we don't have to read the header each time.
+					 */
 					last_rec_applied = r.node.location;
 				}
 			}

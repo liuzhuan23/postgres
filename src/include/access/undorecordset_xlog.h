@@ -116,7 +116,7 @@ typedef struct UndoRecordSetXLogBufData
 	 * pointer to the last record applied so far. See also the comments for
 	 * last_rec_applied in UndoRecordSetChunkHeader.
 	 */
-	UndoRecPtr		chunk_last_rec_applied;
+	UndoLogOffset	chunk_last_rec_applied;
 	/* Where should chunk_last_rec_applied be written.  */
 	uint16			chunk_lra_page_offset;
 } UndoRecordSetXLogBufData;

@@ -117,16 +117,7 @@ print_chunk_info(UndoRecPtr start, UndoRecordSetChunkHeader *hdr,
 		printf("<invalid>, ");
 	printf("size: %zu, ", hdr->size);
 
-	printf("last_rec_applied: ");
-	if (hdr->last_rec_applied != InvalidUndoRecPtr)
-	{
-		logno = UndoRecPtrGetLogNo(hdr->last_rec_applied);
-		off = UndoRecPtrGetOffset(hdr->last_rec_applied);
-
-		printf("%X.%010zX, ", logno, off);
-	}
-	else
-		printf("<invalid>, ");
+	printf("last_rec_applied: %010zX, ", hdr->last_rec_applied);
 
 	if (type_header)
 	{

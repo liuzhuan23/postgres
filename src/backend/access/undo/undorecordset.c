@@ -423,7 +423,7 @@ UndoPrepareToUpdateLastAppliedRecord(UndoRecPtr chunk_hdr,
 	 * Prepare an additional buffer if the data does not fit into the first
 	 * one.
 	 */
-	if ((UndoRecPtrGetOffset(lra_ptr) + sizeof(UndoRecPtr)) >= BLCKSZ)
+	if ((UndoRecPtrGetOffset(lra_ptr) + sizeof(UndoLogOffset)) >= BLCKSZ)
 	{
 		bufs[1] = ReadBufferWithoutRelcache(rnode,
 											UndoLogForkNum,
@@ -818,7 +818,7 @@ UndoInsert(UndoRecordSet *urs,
 		/* Initialize the chunk header. */
 		chunk_header.size = 0;
 		chunk_header.previous_chunk = InvalidUndoRecPtr;
-		chunk_header.last_rec_applied = InvalidUndoRecPtr;
+		chunk_header.last_rec_applied = 0;
 		chunk_header.type = urs->type;
 
 		if (urs->nchunks > 1)
@@ -973,7 +973,7 @@ UndoInsert(UndoRecordSet *urs,
  * UndoPrepareToUpdateLastAppliedRecord.
  */
 void
-UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
+UpdateLastAppliedRecord(UndoLogOffset last_rec_applied, UndoRecPtr chunk_hdr,
 						Buffer *bufs, uint8 first_block_id)
 {
 	Buffer	buf;
@@ -998,7 +998,7 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 	XLogRegisterBuffer(first_block_id, buf, REGBUF_KEEP_DATA);
 	EncodeUndoRecordSetXLogBufData(&bufdata[0], first_block_id);
 
-	if (data_off < sizeof(UndoRecPtr))
+	if (data_off < sizeof(UndoLogOffset))
 	{
 		buf = bufs[1];
 		Assert(buf != InvalidBuffer);
@@ -1012,7 +1012,7 @@ UpdateLastAppliedRecord(UndoRecPtr last_rec_applied, UndoRecPtr chunk_hdr,
 		UndoPageOverwrite(BufferGetPage(buf),
 						  SizeOfUndoPageHeaderData,
 						  data_off,
-						  sizeof(UndoRecPtr),
+						  sizeof(UndoLogOffset),
 						  (char *) &last_rec_applied);
 		MarkBufferDirty(buf);
 		XLogRegisterBuffer(first_block_id + 1, buf, REGBUF_KEEP_DATA);
@@ -1047,7 +1047,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 	bool chunk_size_more = false;
 	size_t chunk_size;
 	int chunk_size_offset = 0;
-	UndoRecPtr	last_rec_applied;
+	UndoLogOffset	last_rec_applied;
 	bool	lra_more = false;
 	int	lra_offset = 0;
 
@@ -1282,7 +1282,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				{
 					chunk_header.size = 0;
 					chunk_header.previous_chunk = InvalidUndoRecPtr;
-					chunk_header.last_rec_applied = InvalidUndoRecPtr;
+					chunk_header.last_rec_applied = 0;
 					chunk_header.type = bufdata->urs_type;
 
 					type_header = bufdata->type_header;
@@ -1322,7 +1322,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				{
 					chunk_header.size = 0;
 					chunk_header.previous_chunk = bufdata->previous_chunk_header_location;
-					chunk_header.last_rec_applied = InvalidUndoRecPtr;
+					chunk_header.last_rec_applied = 0;
 					chunk_header.type = bufdata->urs_type;
 					type_header = NULL;
 					type_header_size = 0;
