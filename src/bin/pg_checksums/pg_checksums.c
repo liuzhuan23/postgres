@@ -4,6 +4,7 @@
  *	  Checks, enables or disables page level checksums for an offline
  *	  cluster
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -117,6 +118,9 @@ static const struct exclude_list_item skip[] = {
 #ifdef EXEC_BACKEND
 	{"config_exec_params", true},
 #endif
+#ifdef USE_ENCRYPTION
+	{"kdf_params", false},
+#endif
 	{NULL, false}
 };
 
@@ -229,8 +233,11 @@ scan_file(const char *fn, BlockNumber segmentno)
 		}
 		blocks++;
 
-		/* New pages have no checksum yet */
-		if (PageIsNew(header))
+		/*
+		 * New pages have no checksum yet, unless it's encrypted - see
+		 * PageSetChecksumCopy() for explanation.
+		 */
+		if (ControlFile->data_cipher == PG_CIPHER_NONE && PageIsNew(header))
 			continue;
 
 		csum = pg_checksum_page(buf.data, blockno + segmentno * RELSEG_SIZE);
@@ -635,7 +642,7 @@ main(int argc, char *argv[])
 		if (mode == PG_MODE_CHECK)
 		{
 			printf(_("Bad checksums:  %s\n"), psprintf(INT64_FORMAT, badblocks));
-			printf(_("Data checksum version: %d\n"), ControlFile->data_checksum_version);
+			printf(_("Data checksum version: %u\n"), ControlFile->data_checksum_version);
 
 			if (badblocks > 0)
 				exit(1);
@@ -662,7 +669,7 @@ main(int argc, char *argv[])
 		update_controlfile(DataDir, ControlFile, do_sync);
 
 		if (verbose)
-			printf(_("Data checksum version: %d\n"), ControlFile->data_checksum_version);
+			printf(_("Data checksum version: %u\n"), ControlFile->data_checksum_version);
 		if (mode == PG_MODE_ENABLE)
 			printf(_("Checksums enabled in cluster\n"));
 		else

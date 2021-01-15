@@ -339,6 +339,19 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-y</option></term>
+      <term><option>--decrypt</option></term>
+      <listitem>
+       <para>
+        If the cluster is encrypted (see <xref linkend="encryption"/>), this
+        option can be passed to tell the server that the data should be
+        decrypted before it's sent
+        to <application>pg_basebackup</application>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-z</option></term>
       <term><option>--gzip</option></term>
       <listitem>

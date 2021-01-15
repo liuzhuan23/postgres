@@ -1,4 +1,5 @@
 # Files generated during build
+/encryption.c
 /xlogreader.c
 /pg_rewind
 

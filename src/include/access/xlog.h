@@ -3,6 +3,7 @@
  *
  * PostgreSQL write-ahead log manager
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -19,6 +20,7 @@
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "storage/fd.h"
+#include "storage/encryption.h"
 
 
 /* Sync methods */
@@ -196,8 +198,9 @@ extern PGDLLIMPORT int wal_level;
  * Normally, we don't WAL-log hint bit updates, but if checksums are enabled,
  * we have to protect them against torn page writes.  When you only set
  * individual bits on a page, it's still consistent no matter what combination
- * of the bits make it to disk, but the checksum wouldn't match.  Also WAL-log
- * them if forced by wal_log_hints=on.
+ * of the bits make it to disk, but the checksum wouldn't match.
+ *
+ * Also WAL-log the hint bits if forced by wal_log_hints=on.
  */
 #define XLogHintBitIsNeeded() (DataChecksumsEnabled() || wal_log_hints)
 

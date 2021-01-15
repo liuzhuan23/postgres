@@ -3,6 +3,7 @@
  * pg_rewind.c
  *	  Synchronizes a PostgreSQL data directory to a new timeline
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  *-------------------------------------------------------------------------
@@ -23,6 +24,7 @@
 #include "common/file_utils.h"
 #include "common/restricted_token.h"
 #include "common/string.h"
+#include "fe_utils/encryption.h"
 #include "fe_utils/recovery_gen.h"
 #include "fetch.h"
 #include "file_ops.h"
@@ -30,6 +32,7 @@
 #include "getopt_long.h"
 #include "pg_rewind.h"
 #include "storage/bufpage.h"
+#include "storage/encryption.h"
 
 static void usage(const char *progname);
 
@@ -83,6 +86,10 @@ usage(const char *progname)
 	printf(_("  -D, --target-pgdata=DIRECTORY  existing data directory to modify\n"));
 	printf(_("      --source-pgdata=DIRECTORY  source data directory to synchronize with\n"));
 	printf(_("      --source-server=CONNSTR    source server to synchronize with\n"));
+#ifdef	USE_ENCRYPTION
+	printf(_("  -K, --encryption-key-command=COMMAND\n"
+			 "                                 command that returns encryption key\n"));
+#endif							/* USE_ENCRYPTION */
 	printf(_("  -n, --dry-run                  stop before modifying anything\n"));
 	printf(_("  -N, --no-sync                  do not wait for changes to be written\n"
 			 "                                 safely to disk\n"));
@@ -114,6 +121,9 @@ main(int argc, char **argv)
 		{"no-sync", no_argument, NULL, 'N'},
 		{"progress", no_argument, NULL, 'P'},
 		{"debug", no_argument, NULL, 3},
+#ifdef	USE_ENCRYPTION
+		{"encryption-key-command", required_argument, NULL, 'K'},
+#endif							/* USE_ENCRYPTION */
 		{NULL, 0, NULL, 0}
 	};
 	int			option_index;
@@ -151,7 +161,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "cD:nNPR", long_options, &option_index)) != -1)
+	while ((c = getopt_long(argc, argv, "cD:K:nNPR", long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{
@@ -199,6 +209,12 @@ main(int argc, char **argv)
 			case 4:
 				no_ensure_shutdown = true;
 				break;
+
+#ifdef	USE_ENCRYPTION
+			case 'K':
+				encryption_key_command = strdup(optarg);
+				break;
+#endif							/* USE_ENCRYPTION */
 		}
 	}
 
@@ -306,6 +322,48 @@ main(int argc, char **argv)
 	pg_free(buffer);
 
 	sanityChecks();
+
+	/*
+	 * Setup encryption if it's obvious that we'll have to deal with encrypted
+	 * XLOG.
+	 */
+	if (ControlFile_target.data_cipher > PG_CIPHER_NONE)
+#ifdef USE_ENCRYPTION
+	{
+		/*
+		 * Try to retrieve the command from environment variable. We do this
+		 * primarily to make automated tests work for encrypted cluster w/o
+		 * changing the scripts. XXX Not sure the variable should be
+		 * documented. If we do, then pg_ctl should probably accept it too.
+		 */
+		if (encryption_key_command == NULL)
+		{
+			encryption_key_command = getenv("PGENCRKEYCMD");
+			if (encryption_key_command && strlen(encryption_key_command) == 0)
+				encryption_key_command = NULL;
+		}
+
+		if (encryption_key_command == NULL)
+		{
+			pg_log_error("-K option must be passed for encrypted cluster");
+			exit(EXIT_FAILURE);
+		}
+
+		/*
+		 * It should not matter whether we pass the source or target data
+		 * directory. It should have been checked earlier that both clusters
+		 * are encrypted using the same key.
+		 */
+		run_encryption_key_command(datadir_source);
+		setup_encryption();
+		data_encrypted = true;
+	}
+#else
+	{
+		pg_log_error(ENCRYPTION_NOT_SUPPORTED_MSG);
+		exit(EXIT_FAILURE);
+	}
+#endif	/* USE_ENCRYPTION */
 
 	/*
 	 * If both clusters are already on the same timeline, there's nothing to
@@ -513,6 +571,24 @@ sanityChecks(void)
 		ControlFile_source.state != DB_SHUTDOWNED &&
 		ControlFile_source.state != DB_SHUTDOWNED_IN_RECOVERY)
 		pg_fatal("source data directory must be shut down cleanly");
+
+	/*
+	 * Since slave receives XLOG stream encrypted by master, handling
+	 * differently encrypted clusters is not the typical use case for
+	 * pg_rewind. Yet we should check the encryption.
+	 */
+	if (ControlFile_source.data_cipher > PG_CIPHER_NONE ||
+		ControlFile_target.data_cipher > PG_CIPHER_NONE)
+	{
+		if (ControlFile_source.data_cipher !=
+			ControlFile_target.data_cipher)
+			pg_fatal("source and target server must be both unencrypted or both encrypted\n");
+
+		if (memcmp(ControlFile_source.encryption_verification,
+				   ControlFile_target.encryption_verification,
+				   ENCRYPTION_SAMPLE_SIZE))
+			pg_fatal("both source and target server must use the same encryption key");
+	}
 }
 
 /*

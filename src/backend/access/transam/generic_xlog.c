@@ -332,7 +332,7 @@ GenericXLogRegisterBuffer(GenericXLogState *state, Buffer buffer, int flags)
 XLogRecPtr
 GenericXLogFinish(GenericXLogState *state)
 {
-	XLogRecPtr	lsn;
+	XLogRecPtr	lsn = InvalidXLogRecPtr;
 	int			i;
 
 	if (state->isLogged)
@@ -411,6 +411,9 @@ GenericXLogFinish(GenericXLogState *state)
 	}
 	else
 	{
+		if (data_encrypted)
+			lsn = get_lsn_for_encryption();
+
 		/* Unlogged relation: skip xlog-related stuff */
 		START_CRIT_SECTION();
 		for (i = 0; i < MAX_GENERIC_XLOG_PAGES; i++)
@@ -419,10 +422,15 @@ GenericXLogFinish(GenericXLogState *state)
 
 			if (BufferIsInvalid(pageData->buffer))
 				continue;
+
+			/* We don't worry about zeroing the "hole" in this case */
 			memcpy(BufferGetPage(pageData->buffer),
 				   pageData->image,
 				   BLCKSZ);
-			/* We don't worry about zeroing the "hole" in this case */
+
+			if (data_encrypted)
+				PageSetLSN(BufferGetPage(pageData->buffer), lsn);
+
 			MarkBufferDirty(pageData->buffer);
 		}
 		END_CRIT_SECTION();

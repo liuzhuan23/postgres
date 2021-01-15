@@ -2017,7 +2017,7 @@ The commands accepted in replication mode are:
   </varlistentry>
 
   <varlistentry>
-    <term><literal>START_REPLICATION</literal> [ <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ] [ <literal>PHYSICAL</literal> ] <replaceable class="parameter">XXX/XXX</replaceable> [ <literal>TIMELINE</literal> <replaceable class="parameter">tli</replaceable> ]
+    <term><literal>START_REPLICATION</literal> [ <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ] [ <literal>PHYSICAL</literal> ] <replaceable class="parameter">XXX/XXX</replaceable> [ <literal>TIMELINE</literal> <replaceable class="parameter">tli</replaceable> ] [ <literal>DECRYPT</literal> ]
      <indexterm><primary>START_REPLICATION</primary></indexterm>
     </term>
     <listitem>
@@ -2070,6 +2070,11 @@ The commands accepted in replication mode are:
       an ErrorResponse message if it encounters a failure after beginning
       to stream.)  The payload of each CopyData message from server to the
       client contains a message of one of the following formats:
+     </para>
+
+     <para>
+      If the server is encrypted, the <literal>DECRYPT</literal> option can be
+      passed to tell the server that the WAL stream should be sent in decrypted form.
      </para>
 
      <para>
@@ -2469,7 +2474,7 @@ The commands accepted in replication mode are:
   </varlistentry>
 
   <varlistentry id="protocol-replication-base-backup" xreflabel="BASE_BACKUP">
-    <term><literal>BASE_BACKUP</literal> [ <literal>LABEL</literal> <replaceable>'label'</replaceable> ] [ <literal>PROGRESS</literal> ] [ <literal>FAST</literal> ] [ <literal>WAL</literal> ] [ <literal>NOWAIT</literal> ] [ <literal>MAX_RATE</literal> <replaceable>rate</replaceable> ] [ <literal>TABLESPACE_MAP</literal> ] [ <literal>NOVERIFY_CHECKSUMS</literal> ] [ <literal>MANIFEST</literal> <replaceable>manifest_option</replaceable> ] [ <literal>MANIFEST_CHECKSUMS</literal> <replaceable>checksum_algorithm</replaceable> ]
+    <term><literal>BASE_BACKUP</literal> [ <literal>LABEL</literal> <replaceable>'label'</replaceable> ] [ <literal>PROGRESS</literal> ] [ <literal>FAST</literal> ] [ <literal>WAL</literal> ] [ <literal>NOWAIT</literal> ] [ <literal>MAX_RATE</literal> <replaceable>rate</replaceable> ] [ <literal>TABLESPACE_MAP</literal> ] [ <literal>NOVERIFY_CHECKSUMS</literal> ] [ <literal>MANIFEST</literal> <replaceable>manifest_option</replaceable> ] [ <literal>MANIFEST_CHECKSUMS</literal> <replaceable>checksum_algorithm</replaceable> ] [ <literal>DECRYPT</literal> ]
      <indexterm><primary>BASE_BACKUP</primary></indexterm>
     </term>
     <listitem>
@@ -2611,6 +2616,22 @@ The commands accepted in replication mode are:
           <literal>SHA224</literal>, <literal>SHA256</literal>,
           <literal>SHA384</literal>, and <literal>SHA512</literal>.
           The default is <literal>CRC32C</literal>.
+         </para>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry>
+        <term><literal>DECRYPT</literal></term>
+        <listitem>
+         <para>
+          If the cluster is encrypted and this option is passed, the relation
+          files and WAL files are decrypted before they are sent to the
+          client. In addition, the <literal>Data encryption</literal> field of
+          the control file is set to <literal>off</literal>. This option also
+          ensures that the <filename>global/kdf_params</filename> file
+          (containing parameters of the key derivation function, which is used
+          to derive the encryption key from the password) is not sent to the
+          client.
          </para>
         </listitem>
        </varlistentry>

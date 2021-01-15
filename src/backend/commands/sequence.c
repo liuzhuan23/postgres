@@ -407,6 +407,8 @@ fill_seq_with_data(Relation rel, HeapTuple tuple)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -811,6 +813,8 @@ nextval_internal(Oid relid, bool check_permissions)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	/* Now update sequence tuple to the intended final state */
 	seq->last_value = last;		/* last fetched number */
@@ -1006,6 +1010,8 @@ do_setval(Oid relid, int64 next, bool iscalled)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(BufferGetPage(buf));
 
 	END_CRIT_SECTION();
 

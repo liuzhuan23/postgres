@@ -162,6 +162,8 @@ gistvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	vstate.callback_state = callback_state;
 	if (RelationNeedsWAL(rel))
 		vstate.startNSN = GetInsertRecPtr();
+	else if (data_encrypted)
+		vstate.startNSN = get_lsn_for_encryption();
 	else
 		vstate.startNSN = gistGetFakeLSN(rel);
 
@@ -357,6 +359,8 @@ restart:
 										NULL, 0, InvalidBuffer);
 				PageSetLSN(page, recptr);
 			}
+			else if (data_encrypted)
+				set_page_lsn_for_encryption(page);
 			else
 				PageSetLSN(page, gistGetFakeLSN(rel));
 
@@ -647,6 +651,8 @@ gistdeletepage(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
 	if (RelationNeedsWAL(info->index))
 		recptr = gistXLogPageDelete(leafBuffer, txid, parentBuffer, downlink);
+	else if (data_encrypted)
+		recptr = get_lsn_for_encryption();
 	else
 		recptr = gistGetFakeLSN(info->index);
 	PageSetLSN(parentPage, recptr);

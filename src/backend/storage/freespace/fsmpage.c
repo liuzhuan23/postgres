@@ -22,6 +22,7 @@
  */
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "storage/bufmgr.h"
 #include "storage/fsm_internals.h"
 
@@ -284,6 +285,13 @@ restart:
 				exclusive_lock_held = true;
 			}
 			fsm_rebuild_page(page);
+
+			/*
+			 * No need to care about enforcing LSN for encryption IV -
+			 * MarkBufferDirtyHint() will take care.
+			 */
+			Assert(!InRecovery);
+
 			MarkBufferDirtyHint(buf, false);
 			goto restart;
 		}

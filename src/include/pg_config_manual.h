@@ -6,6 +6,7 @@
  * for developers.  If you edit any of these, be sure to do a *full*
  * rebuild (and an initdb if noted).
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -181,6 +182,13 @@
  */
 #ifdef USE_OPENSSL
 #define USE_SSL
+#endif
+
+/*
+ * OpenSSL is currently the only implementation of encryption we use.
+ */
+#ifdef USE_OPENSSL
+#define USE_ENCRYPTION
 #endif
 
 /*

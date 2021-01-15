@@ -37,6 +37,7 @@
  * record, wait for it to be replicated to the standby, and then exit.
  *
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
@@ -77,6 +78,7 @@
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
 #include "storage/condition_variable.h"
+#include "storage/encryption.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
@@ -560,6 +562,8 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	pq_endmessage(&buf);
 }
 
+static bool decrypt_stream = false;
+
 /*
  * Handle START_REPLICATION command.
  *
@@ -742,6 +746,20 @@ StartReplication(StartReplicationCmd *cmd)
 		/* Main loop of walsender */
 		replication_active = true;
 
+		if (cmd->decrypt)
+		{
+			if (data_encrypted)
+				decrypt_stream = true;
+			else
+			{
+				ereport(NOTICE,
+						(errmsg("decryption requested but the cluster is not encrypted")));
+				decrypt_stream = false;
+			}
+		}
+		else
+			decrypt_stream = false;
+
 		WalSndLoop(XLogSendPhysical);
 
 		replication_active = false;
@@ -845,7 +863,8 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 				 state->seg.ws_tli, /* Pass the current TLI because only
 									 * WalSndSegmentOpen controls whether new
 									 * TLI is needed. */
-				 &errinfo))
+				 &errinfo,
+				 data_encrypted))
 		WALReadRaiseError(&errinfo);
 
 	/*
@@ -2760,7 +2779,8 @@ retry:
 				 xlogreader->seg.ws_tli,	/* Pass the current TLI because
 											 * only WalSndSegmentOpen controls
 											 * whether new TLI is needed. */
-				 &errinfo))
+				 &errinfo,
+				 decrypt_stream))
 		WALReadRaiseError(&errinfo);
 
 	/* See logical_read_xlog_page(). */

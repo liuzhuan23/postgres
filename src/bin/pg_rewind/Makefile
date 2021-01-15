@@ -2,6 +2,7 @@
 #
 # Makefile for src/bin/pg_rewind
 #
+# Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
 # Portions Copyright (c) 2013-2020, PostgreSQL Global Development Group
 #
 # src/bin/pg_rewind/Makefile
@@ -22,6 +23,7 @@ OBJS = \
 	$(WIN32RES) \
 	copy_fetch.o \
 	datapagemap.o \
+	encryption.o \
 	fetch.o \
 	file_ops.o \
 	filemap.o \
@@ -41,6 +43,9 @@ pg_rewind: $(OBJS) | submake-libpq submake-libpgport
 xlogreader.c: % : $(top_srcdir)/src/backend/access/transam/%
 	rm -f $@ && $(LN_S) $< .
 
+encryption.c: % : $(top_srcdir)/src/backend/storage/file/%
+	rm -f $@ && $(LN_S) $< .
+
 install: all installdirs
 	$(INSTALL_PROGRAM) pg_rewind$(X) '$(DESTDIR)$(bindir)/pg_rewind$(X)'
 
@@ -51,7 +56,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/pg_rewind$(X)'
 
 clean distclean maintainer-clean:
-	rm -f pg_rewind$(X) $(OBJS) xlogreader.c
+	rm -f pg_rewind$(X) $(OBJS) xlogreader.c encryption.c
 	rm -rf tmp_check
 
 check:

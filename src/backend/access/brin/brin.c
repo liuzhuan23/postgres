@@ -674,6 +674,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	BrinBuildState *state;
 	Buffer		meta;
 	BlockNumber pagesPerRange;
+	Page		page;
 
 	/*
 	 * We expect to be called exactly once for any index relation.
@@ -695,11 +696,11 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 					   BRIN_CURRENT_VERSION);
 	MarkBufferDirty(meta);
 
+	page = BufferGetPage(meta);
 	if (RelationNeedsWAL(index))
 	{
 		xl_brin_createidx xlrec;
 		XLogRecPtr	recptr;
-		Page		page;
 
 		xlrec.version = BRIN_CURRENT_VERSION;
 		xlrec.pagesPerRange = BrinGetPagesPerRange(index);
@@ -710,9 +711,10 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 		recptr = XLogInsert(RM_BRIN_ID, XLOG_BRIN_CREATE_INDEX);
 
-		page = BufferGetPage(meta);
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	UnlockReleaseBuffer(meta);
 
@@ -1145,7 +1147,8 @@ terminate_brin_buildstate(BrinBuildState *state)
 		blk = BufferGetBlockNumber(state->bs_currentInsertBuf);
 		ReleaseBuffer(state->bs_currentInsertBuf);
 		RecordPageWithFreeSpace(state->bs_irel, blk, freespace);
-		FreeSpaceMapVacuumRange(state->bs_irel, blk, blk + 1);
+		FreeSpaceMapVacuumRange(state->bs_irel, blk, blk + 1,
+								InvalidXLogRecPtr);
 	}
 
 	brin_free_desc(state->bs_bdesc);

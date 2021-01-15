@@ -700,6 +700,8 @@ ginUpdateStats(Relation index, const GinStatsData *stats, bool is_build)
 		recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_UPDATE_META_PAGE);
 		PageSetLSN(metapage, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(metapage);
 
 	UnlockReleaseBuffer(metabuffer);
 

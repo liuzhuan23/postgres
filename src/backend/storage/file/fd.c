@@ -1910,6 +1910,15 @@ FileClose(File file)
 }
 
 /*
+ * The FileIsNotOpen macro for external callers.
+ */
+extern bool
+FileIsClosed(File file)
+{
+	return FileIsNotOpen(file);
+}
+
+/*
  * FilePrefetch - initiate asynchronous read of a given range of the file.
  *
  * Currently the only implementation of this function is using posix_fadvise

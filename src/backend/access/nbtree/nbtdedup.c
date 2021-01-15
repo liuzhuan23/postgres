@@ -300,6 +300,9 @@ _bt_dedup_one_page(Relation rel, Buffer buf, Relation heapRel,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
+
 
 	END_CRIT_SECTION();
 

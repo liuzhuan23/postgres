@@ -1044,6 +1044,26 @@ err:
 
 #endif							/* FRONTEND */
 
+static int
+WALReadBuffer(WALOpenSegment *seg, char *buf, int nbytes, int startoff)
+{
+	int			readbytes;
+
+#ifndef FRONTEND
+	pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
+#endif
+
+	/* Reset errno first; eases reporting non-errno-affecting errors */
+	errno = 0;
+	readbytes = pg_pread(seg->ws_file, buf, nbytes, (off_t) startoff);
+
+#ifndef FRONTEND
+	pgstat_report_wait_end();
+#endif
+
+	return readbytes;
+}
+
 /*
  * Helper function to ease writing of XLogRoutine->page_read callbacks.
  * If this function is used, caller must supply a segment_open callback in
@@ -1061,7 +1081,7 @@ err:
 bool
 WALRead(XLogReaderState *state,
 		char *buf, XLogRecPtr startptr, Size count, TimeLineID tli,
-		WALReadError *errinfo)
+		WALReadError *errinfo, bool decrypt)
 {
 	char	   *p;
 	XLogRecPtr	recptr;
@@ -1075,7 +1095,7 @@ WALRead(XLogReaderState *state,
 	{
 		uint32		startoff;
 		int			segbytes;
-		int			readbytes;
+		int			readbytes, readbytes_last;
 
 		startoff = XLogSegmentOffset(recptr, state->segcxt.ws_segsize);
 
@@ -1104,32 +1124,115 @@ WALRead(XLogReaderState *state,
 			state->seg.ws_segno = nextSegNo;
 		}
 
+		/* Caller should not request decryption of unencrypted data. */
+		Assert(!(decrypt && !data_encrypted));
+
 		/* How many bytes are within this segment? */
 		if (nbytes > (state->segcxt.ws_segsize - startoff))
 			segbytes = state->segcxt.ws_segsize - startoff;
 		else
 			segbytes = nbytes;
 
-#ifndef FRONTEND
-		pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
-#endif
-
-		/* Reset errno first; eases reporting non-errno-affecting errors */
-		errno = 0;
-		readbytes = pg_pread(state->seg.ws_file, p, segbytes, (off_t) startoff);
-
-#ifndef FRONTEND
-		pgstat_report_wait_end();
-#endif
-
-		if (readbytes <= 0)
+		if (data_encrypted && decrypt)
 		{
-			errinfo->wre_errno = errno;
-			errinfo->wre_req = segbytes;
-			errinfo->wre_read = readbytes;
-			errinfo->wre_off = startoff;
-			errinfo->wre_seg = state->seg;
-			return false;
+			int			pageoff = startoff % XLOG_BLCKSZ;
+			uint32		pagebase = startoff - pageoff;
+			int			bufbytes,
+						bufend,
+						i;
+			char		tweak[TWEAK_SIZE];
+
+			/*
+			 * Only accept as much data as can fit into the buffer.
+			 */
+			if (segbytes > (ENCRYPT_BUF_XLOG_SIZE - pageoff))
+				bufbytes = ENCRYPT_BUF_XLOG_SIZE - pageoff;
+			else
+				bufbytes = segbytes;
+			bufend = pageoff + bufbytes;
+
+			/*
+			 * Read the data, including the leading part of the page which
+			 * caller is not interested in (this is not included in
+			 * bufbytes). The tweak we passed to encrypt_block() for
+			 * encryption was for the beginning of the block, so it'd be hard
+			 * to start decryption anywhere else.
+			 */
+			readbytes = 0;
+			while (readbytes < bufend)
+			{
+				readbytes_last = WALReadBuffer(&state->seg,
+											   encrypt_buf_xlog + readbytes,
+											   bufend - readbytes,
+											   pagebase + readbytes);
+
+				if (readbytes_last <= 0)
+				{
+					errinfo->wre_errno = errno;
+					errinfo->wre_req = bufend - readbytes;
+					errinfo->wre_read = readbytes_last;
+					errinfo->wre_off = pagebase + readbytes;
+					errinfo->wre_seg = state->seg;
+					return false;
+				}
+
+				readbytes += readbytes_last;
+			}
+
+			/*
+			 * Decrypt the data one page at a time (the tweak is only valid
+			 * for particular page).
+			 */
+			for (i = 0; i < readbytes; i += XLOG_BLCKSZ)
+			{
+				Size		nencrypt;
+
+				XLogEncryptionTweak(tweak,
+									state->seg.ws_tli,
+									state->seg.ws_segno,
+									pagebase + i);
+
+				/*
+				 * If the last page is not complete, only decrypt the used
+				 * part.
+				 */
+				if ((bufend - i) < XLOG_BLCKSZ)
+					nencrypt = bufend - i;
+				else
+					nencrypt = XLOG_BLCKSZ;
+
+				decrypt_block(encrypt_buf_xlog + i,
+							  encrypt_buf_xlog + i,
+							  nencrypt,
+							  tweak,
+							  InvalidBlockNumber,
+							  EDK_REL_WAL);
+			}
+
+			/*
+			 * Caller does not care that we possibly had to read pageoff bytes
+			 * in addition (because we cannot decrypt trailing part of the
+			 * page alone). This overhead must not affect the accounting.
+			 */
+			readbytes = bufbytes;
+
+			/* Copy the data to the output buffer. */
+			memcpy(p, encrypt_buf_xlog + pageoff, bufbytes);
+		}
+		else
+		{
+			readbytes_last = WALReadBuffer(&state->seg, p, segbytes, startoff);
+
+			if (readbytes_last <= 0)
+			{
+				errinfo->wre_errno = errno;
+				errinfo->wre_req = segbytes;
+				errinfo->wre_read = readbytes_last;
+				errinfo->wre_off = startoff;
+				errinfo->wre_seg = state->seg;
+				return false;
+			}
+			readbytes = readbytes_last;
 		}
 
 		/* Update state for read */

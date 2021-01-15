@@ -138,7 +138,8 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 				brin_initialize_empty_new_buffer(idxrel, newbuf);
 			UnlockReleaseBuffer(newbuf);
 			if (extended)
-				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1);
+				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1,
+										InvalidXLogRecPtr);
 		}
 		return false;
 	}
@@ -159,7 +160,8 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 				brin_initialize_empty_new_buffer(idxrel, newbuf);
 			UnlockReleaseBuffer(newbuf);
 			if (extended)
-				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1);
+				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1,
+										InvalidXLogRecPtr);
 		}
 		return false;
 	}
@@ -200,6 +202,8 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 
 			PageSetLSN(oldpage, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(oldpage);
 
 		END_CRIT_SECTION();
 
@@ -212,7 +216,8 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 				brin_initialize_empty_new_buffer(idxrel, newbuf);
 			UnlockReleaseBuffer(newbuf);
 			if (extended)
-				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1);
+				FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1,
+										InvalidXLogRecPtr);
 		}
 
 		return true;
@@ -300,6 +305,9 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 			PageSetLSN(newpage, recptr);
 			PageSetLSN(BufferGetPage(revmapbuf), recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption3(oldpage, newpage,
+										 BufferGetPage(revmapbuf));
 
 		END_CRIT_SECTION();
 
@@ -310,7 +318,8 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 		if (extended)
 		{
 			RecordPageWithFreeSpace(idxrel, newblk, freespace);
-			FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1);
+			FreeSpaceMapVacuumRange(idxrel, newblk, newblk + 1,
+									InvalidXLogRecPtr);
 		}
 
 		return true;
@@ -448,6 +457,8 @@ brin_doinsert(Relation idxrel, BlockNumber pagesPerRange,
 		PageSetLSN(page, recptr);
 		PageSetLSN(BufferGetPage(revmapbuf), recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption2(page, BufferGetPage(revmapbuf));
 
 	END_CRIT_SECTION();
 
@@ -461,7 +472,8 @@ brin_doinsert(Relation idxrel, BlockNumber pagesPerRange,
 	if (extended)
 	{
 		RecordPageWithFreeSpace(idxrel, blk, freespace);
-		FreeSpaceMapVacuumRange(idxrel, blk, blk + 1);
+		FreeSpaceMapVacuumRange(idxrel, blk, blk + 1,
+								InvalidXLogRecPtr);
 	}
 
 	return off;
@@ -782,7 +794,8 @@ brin_getinsertbuffer(Relation irel, Buffer oldbuf, Size itemsz,
 
 				if (*extended)
 				{
-					FreeSpaceMapVacuumRange(irel, newblk, newblk + 1);
+					FreeSpaceMapVacuumRange(irel, newblk, newblk + 1,
+											InvalidXLogRecPtr);
 					/* shouldn't matter, but don't confuse caller */
 					*extended = false;
 				}

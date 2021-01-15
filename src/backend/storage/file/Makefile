@@ -17,6 +17,7 @@ OBJS = \
 	copydir.o \
 	fd.o \
 	reinit.o \
-	sharedfileset.o
+	sharedfileset.o \
+	encryption.o
 
 include $(top_srcdir)/src/backend/common.mk

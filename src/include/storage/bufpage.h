@@ -4,6 +4,7 @@
  *	  Standard POSTGRES buffer page definitions.
  *
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -436,7 +437,8 @@ StaticAssertDecl(BLCKSZ == ((BLCKSZ / sizeof(size_t)) * sizeof(size_t)),
 
 extern void PageInit(Page page, Size pageSize, Size specialSize);
 extern bool PageIsVerified(Page page, BlockNumber blkno);
-extern bool PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags);
+extern bool PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags,
+								   Page page_encr);
 extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
 										OffsetNumber offsetNumber, int flags);
 extern Page PageGetTempPage(Page page);

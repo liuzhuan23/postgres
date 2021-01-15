@@ -2,6 +2,7 @@
  * reorderbuffer.h
  *	  PostgreSQL logical replay/reorder buffer management.
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Copyright (c) 2012-2020, PostgreSQL Global Development Group
  *
  * src/include/replication/reorderbuffer.h
@@ -406,10 +407,6 @@ struct ReorderBuffer
 	MemoryContext tup_context;
 
 	XLogRecPtr	current_restart_decoding_lsn;
-
-	/* buffer for disk<->memory conversions */
-	char	   *outbuf;
-	Size		outbufsize;
 
 	/* memory accounting */
 	Size		size;

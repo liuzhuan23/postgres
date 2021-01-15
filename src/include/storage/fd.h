@@ -80,6 +80,7 @@ extern File PathNameOpenFile(const char *fileName, int fileFlags);
 extern File PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode);
 extern File OpenTemporaryFile(bool interXact);
 extern void FileClose(File file);
+extern bool FileIsClosed(File file);
 extern int	FilePrefetch(File file, off_t offset, int amount, uint32 wait_event_info);
 extern int	FileRead(File file, char *buffer, int amount, off_t offset, uint32 wait_event_info);
 extern int	FileWrite(File file, char *buffer, int amount, off_t offset, uint32 wait_event_info);

@@ -2,6 +2,7 @@
  *
  * pg_ctl --- start/stops/restarts the PostgreSQL server
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  * src/bin/pg_ctl/pg_ctl.c
@@ -25,9 +26,11 @@
 
 #include "catalog/pg_control.h"
 #include "common/controldata_utils.h"
+#include "common/encryption.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
 #include "common/string.h"
+#include "fe_utils/encryption.h"
 #include "getopt_long.h"
 #include "utils/pidfile.h"
 
@@ -107,6 +110,21 @@ static char logrotate_file[MAXPGPATH];
 
 static volatile pgpid_t postmasterPID = -1;
 
+/*
+ * Define encryption_key locally rather that linking to storage/encryption.c
+ * only because of this one variable.
+ */
+extern unsigned char encryption_key[ENCRYPTION_KEY_LENGTH];
+#ifndef HAVE_UNIX_SOCKETS
+/*
+ * Port at which postmaster listens for encryption key message.
+ *
+ * This is only useful for pg_upgrade which starts the cluster on a port
+ * different from that in configuration file.
+ */
+static char *encr_key_port = NULL;
+#endif
+
 #ifdef WIN32
 static DWORD pgctl_start_type = SERVICE_AUTO_START;
 static SERVICE_STATUS status;
@@ -134,6 +152,11 @@ static void do_logrotate(void);
 static void do_kill(pgpid_t pid);
 static void print_msg(const char *msg);
 static void adjust_data_dir(void);
+static char *get_config_variable(const char *var_name, size_t res_size);
+#ifdef USE_ENCRYPTION
+static char *get_first_csv_item(char *csv_list);
+static void get_postmaster_address(char **host_p, char **port_str_p);
+#endif	/* USE_ENCRYPTION */
 
 #ifdef WIN32
 #include <versionhelpers.h>
@@ -829,6 +852,23 @@ static void
 do_init(void)
 {
 	char		cmd[MAXPGPATH];
+	char *encr_opt_str;
+
+	/* Prepare the -K option for initdb. */
+	if (encryption_key_command)
+	{
+		size_t		len;
+
+		len = strlen(encryption_key_command) + 5;
+		encr_opt_str = (char *) pg_malloc(len);
+		snprintf(encr_opt_str, len, " -K %s",
+				 encryption_key_command);
+	}
+	else
+	{
+		encr_opt_str = (char *) pg_malloc(1);
+		encr_opt_str[0] = '\0';
+	}
 
 	if (exec_path == NULL)
 		exec_path = find_other_exec_or_die(argv0, "initdb", "initdb (PostgreSQL) " PG_VERSION "\n");
@@ -840,11 +880,11 @@ do_init(void)
 		post_opts = "";
 
 	if (!silent_mode)
-		snprintf(cmd, MAXPGPATH, "\"%s\" %s%s",
-				 exec_path, pgdata_opt, post_opts);
+		snprintf(cmd, MAXPGPATH, "\"%s\" %s%s%s",
+				 exec_path, pgdata_opt, post_opts, encr_opt_str);
 	else
-		snprintf(cmd, MAXPGPATH, "\"%s\" %s%s > \"%s\"",
-				 exec_path, pgdata_opt, post_opts, DEVNULL);
+		snprintf(cmd, MAXPGPATH, "\"%s\" %s%s%s > \"%s\"",
+				 exec_path, pgdata_opt, post_opts, encr_opt_str, DEVNULL);
 
 	if (system(cmd) != 0)
 	{
@@ -858,6 +898,9 @@ do_start(void)
 {
 	pgpid_t		old_pid = 0;
 	pgpid_t		pm_pid;
+#ifdef USE_ENCRYPTION
+	SendKeyArgs	sk_args;
+#endif	/* USE_ENCRYPTION */
 
 	if (ctl_command != RESTART_COMMAND)
 	{
@@ -897,7 +940,74 @@ do_start(void)
 	}
 #endif
 
+	if (encryption_key_command)
+#ifdef USE_ENCRYPTION
+	{
+		/*
+		 * If encryption key is needed, retrieve it before trying to start
+		 * postmaster.
+		 */
+		run_encryption_key_command(pg_data);
+	}
+#else
+	{
+		/* User should not be able to enable encryption. */
+		Assert(false);
+	}
+#endif	/* USE_ENCRYPTION */
+
 	pm_pid = start_postmaster();
+#ifdef WIN32
+	sk_args.pmProcess = postmasterProcess;
+#endif
+
+#ifdef USE_ENCRYPTION
+	sk_args.pm_pid = pm_pid;
+	if (encryption_key_command)
+	{
+		char	*keycmd_conf_file;
+
+		sk_args.encryption_key = encryption_key;
+
+		/* Is the key command also configured in postgresql.conf ? */
+		keycmd_conf_file = get_config_variable("encryption_key_command",
+											   MAXPGPATH);
+
+		if (keycmd_conf_file)
+			print_msg(_("ignoring the -K option due to presence of encryption_key_command in configuration file\n"));
+	}
+	else
+	{
+		/*
+		 * An empty key message should be sent if no key command was
+		 * passed. It's more user friendly to let startup fail immediately
+		 * than to let postmaster wait until MAX_WAIT_FOR_KEY_SECS has elapsed
+		 * and then fail.
+		 */
+		sk_args.encryption_key = NULL;
+	}
+
+	/*
+	 * Send the key to the postmaster, or an empty message if we have no
+	 * key. The latter means that postmaster should have tried to get the key
+	 * using a command that it might find in postgresql.conf, so we shouldn't
+	 * send it again.
+	 */
+	get_postmaster_address(&sk_args.host, &sk_args.port);
+#ifndef HAVE_UNIX_SOCKETS
+	if (encr_key_port)
+		sk_args.port = encr_key_port;
+#endif
+	sk_args.error_msg = NULL;
+	if (!send_key_to_postmaster(&sk_args))
+	{
+		write_stderr(_("%s: could not send encryption key to postmaster\n"),
+					 progname);
+		if (sk_args.error_msg)
+			write_stderr("%s\n", sk_args.error_msg);
+		exit(1);
+	}
+#endif	/* USE_ENCRYPTION */
 
 	if (do_wait)
 	{
@@ -2032,10 +2142,10 @@ do_help(void)
 	printf(_("%s is a utility to initialize, start, stop, or control a PostgreSQL server.\n\n"), progname);
 	printf(_("Usage:\n"));
 	printf(_("  %s init[db]   [-D DATADIR] [-s] [-o OPTIONS]\n"), progname);
-	printf(_("  %s start      [-D DATADIR] [-l FILENAME] [-W] [-t SECS] [-s]\n"
+	printf(_("  %s start      [-D DATADIR] [-l FILENAME] [-W] [-t SECS] [-K KEY-CMD] [-s]\n"
 			 "                    [-o OPTIONS] [-p PATH] [-c]\n"), progname);
 	printf(_("  %s stop       [-D DATADIR] [-m SHUTDOWN-MODE] [-W] [-t SECS] [-s]\n"), progname);
-	printf(_("  %s restart    [-D DATADIR] [-m SHUTDOWN-MODE] [-W] [-t SECS] [-s]\n"
+	printf(_("  %s restart    [-D DATADIR] [-m SHUTDOWN-MODE] [-W] [-t SECS] [-K KEY-CMD] [-s]\n"
 			 "                    [-o OPTIONS] [-c]\n"), progname);
 	printf(_("  %s reload     [-D DATADIR] [-s]\n"), progname);
 	printf(_("  %s status     [-D DATADIR]\n"), progname);
@@ -2053,6 +2163,10 @@ do_help(void)
 #ifdef WIN32
 	printf(_("  -e SOURCE              event source for logging when running as a service\n"));
 #endif
+#ifdef	USE_ENCRYPTION
+	printf(_("  -K, --encryption-key-command\n"
+			 "                         command that returns encryption key\n\n"));
+#endif	/* USE_ENCRYPTION */
 	printf(_("  -s, --silent           only print errors, no informational messages\n"));
 	printf(_("  -t, --timeout=SECS     seconds to wait when using -w option\n"));
 	printf(_("  -V, --version          output version information, then exit\n"));
@@ -2181,28 +2295,46 @@ set_starttype(char *starttypeopt)
 static void
 adjust_data_dir(void)
 {
-	char		cmd[MAXPGPATH],
-				filename[MAXPGPATH],
-			   *my_exec_path;
-	FILE	   *fd;
+	char conf_path[MAXPGPATH];
+	char	*filename;
+	FILE	*fd;
 
 	/* do nothing if we're working without knowledge of data dir */
 	if (pg_config == NULL)
 		return;
 
-	/* If there is no postgresql.conf, it can't be a config-only dir */
+	/* If PG_VERSION exists, it can't be a config-only dir */
+	snprintf(conf_path, sizeof(conf_path), "%s/PG_VERSION", pg_config);
+	if ((fd = fopen(conf_path, "r")) != NULL)
+		return;
+
+	filename = get_config_variable("data_directory", MAXPGPATH);
+
+	if (filename)
+	{
+		free(pg_data);
+		pg_data = filename;
+		canonicalize_path(pg_data);
+	}
+}
+
+/*
+ * Retrieve value of configuration variable from configuration file.
+ */
+static char *
+get_config_variable(const char *var_name, size_t res_size)
+{
+	char		cmd[MAXPGPATH],
+				filename[MAXPGPATH],
+			   *my_exec_path;
+	char	*result;
+	FILE	   *fd;
+
+	/* If there is no postgresql.conf, the data dir is not useful. */
 	snprintf(filename, sizeof(filename), "%s/postgresql.conf", pg_config);
 	if ((fd = fopen(filename, "r")) == NULL)
-		return;
+		return NULL;
 	fclose(fd);
-
-	/* If PG_VERSION exists, it can't be a config-only dir */
-	snprintf(filename, sizeof(filename), "%s/PG_VERSION", pg_config);
-	if ((fd = fopen(filename, "r")) != NULL)
-	{
-		fclose(fd);
-		return;
-	}
 
 	/* Must be a configuration directory, so find the data directory */
 
@@ -2213,28 +2345,101 @@ adjust_data_dir(void)
 		my_exec_path = pg_strdup(exec_path);
 
 	/* it's important for -C to be the first option, see main.c */
-	snprintf(cmd, MAXPGPATH, "\"%s\" -C data_directory %s%s",
+	snprintf(cmd, MAXPGPATH, "\"%s\" -C %s %s%s",
 			 my_exec_path,
+			 var_name,
 			 pgdata_opt ? pgdata_opt : "",
 			 post_opts ? post_opts : "");
 
+	result = pg_malloc(res_size);
 	fd = popen(cmd, "r");
-	if (fd == NULL || fgets(filename, sizeof(filename), fd) == NULL)
+	if (fd == NULL || fgets(result, res_size, fd) == NULL)
 	{
-		write_stderr(_("%s: could not determine the data directory using command \"%s\"\n"), progname, cmd);
+		write_stderr(_("%s: could not determine the value of \"%s\" \"%s\"\n"),
+					 progname, var_name, cmd);
+		free(result);
 		exit(1);
 	}
 	pclose(fd);
 	free(my_exec_path);
 
 	/* strip trailing newline and carriage return */
-	(void) pg_strip_crlf(filename);
+	(void) pg_strip_crlf(result);
 
 	free(pg_data);
 	pg_data = pg_strdup(filename);
 	canonicalize_path(pg_data);
+
+	if (strlen(result) == 0)
+	{
+		pg_free(result);
+		result = NULL;
+	}
+
+	return result;
 }
 
+#ifdef USE_ENCRYPTION
+/*
+ * Get the first item of comma-separated list or NULL if there's no valid
+ * item.
+ */
+static char *
+get_first_csv_item(char *csv_list)
+{
+	char	*start, *end, *result;
+
+	start = csv_list;
+	/* First, skip the leading space. */
+	while (isspace(*start))
+		start++;
+	if (*start == '\0')
+		return NULL;
+
+	end = start;
+	while (*end != '\0' && *end != ',' && !isspace(*end))
+		end++;
+	if (end == start)
+		return NULL;
+
+	result = pg_strdup(start);
+
+	/* Trim the string if needed. */
+	if (*end != '\0')
+		result[end - start] = '\0';
+
+	return result;
+}
+
+/*
+ * Retrieve host name and port to which the encryption key should be sent.
+ */
+static void
+get_postmaster_address(char **host_p, char **port_str_p)
+{
+	char	*socket_dirs;
+
+	/* First, try to connect via the unix socket. */
+	socket_dirs = get_config_variable("unix_socket_directories",
+									  MAXPGPATH);
+	if (socket_dirs)
+	{
+		/* If there are multiple sockets, use the first one. */
+		*host_p = get_first_csv_item(socket_dirs);
+	}
+	else
+	{
+		/* Let libpq use the default value.*/
+		*host_p = NULL;
+	}
+
+	/*
+	 * The maximum length of the port number is 5 characters for the port
+	 * number (65535 at maximum) + '\n' + terminating '\0'.
+	 */
+	*port_str_p = get_config_variable("port", 7);
+}
+#endif	/* USE_ENCRYPTION */
 
 static DBState
 get_control_dbstate(void)
@@ -2267,6 +2472,12 @@ main(int argc, char **argv)
 		{"options", required_argument, NULL, 'o'},
 		{"silent", no_argument, NULL, 's'},
 		{"timeout", required_argument, NULL, 't'},
+#ifdef USE_ENCRYPTION
+		{"encryption-key-command", required_argument, NULL, 'K'},
+#ifndef HAVE_UNIX_SOCKETS
+		{"encryption-key-port", required_argument, NULL, 1},
+#endif	/* HAVE_UNIX_SOCKETS */
+#endif	/* USE_ENCRYPTION */
 		{"core-files", no_argument, NULL, 'c'},
 		{"wait", no_argument, NULL, 'w'},
 		{"no-wait", no_argument, NULL, 'W'},
@@ -2337,7 +2548,7 @@ main(int argc, char **argv)
 	/* process command-line options */
 	while (optind < argc)
 	{
-		while ((c = getopt_long(argc, argv, "cD:e:l:m:N:o:p:P:sS:t:U:wW",
+		while ((c = getopt_long(argc, argv, "cD:e:K:l:m:N:o:p:P:sS:t:U:wW",
 								long_options, &option_index)) != -1)
 		{
 			switch (c)
@@ -2363,6 +2574,11 @@ main(int argc, char **argv)
 				case 'e':
 					event_source = pg_strdup(optarg);
 					break;
+#ifdef USE_ENCRYPTION
+				case 'K':
+					encryption_key_command = pg_strdup(optarg);
+					break;
+#endif	/* USE_ENCRYPTION */
 				case 'l':
 					log_file = pg_strdup(optarg);
 					break;
@@ -2422,6 +2638,11 @@ main(int argc, char **argv)
 				case 'c':
 					allow_core_files = true;
 					break;
+#ifndef HAVE_UNIX_SOCKETS
+				case 1:
+					encr_key_port = pg_strdup(optarg);
+					break;
+#endif
 				default:
 					/* getopt_long already issued a suitable error message */
 					do_advice();
@@ -2538,6 +2759,11 @@ main(int argc, char **argv)
 		if (GetDataDirectoryCreatePerm(pg_data))
 			umask(pg_mode_mask);
 	}
+
+	if (encryption_key_command && ctl_command !=
+		START_COMMAND && ctl_command != RESTART_COMMAND &&
+		ctl_command != INIT_COMMAND)
+		write_stderr(_("%s: ignoring the -K option, it's only useful for start or restart commands\n"), progname);
 
 	switch (ctl_command)
 	{

@@ -390,6 +390,16 @@
    </varlistentry>
 
    <varlistentry>
+    <term><acronym>KDF</acronym></term>
+    <listitem>
+     <para>
+      <ulink url="https://en.wikipedia.org/wiki/Key_derivation_function">Key
+      Derivation Function</ulink>
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><acronym>LDAP</acronym></term>
     <listitem>
      <para>

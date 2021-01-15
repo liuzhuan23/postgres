@@ -2,6 +2,7 @@
 #
 # Makefile for src/bin/initdb
 #
+# Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
 # Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
@@ -35,7 +36,8 @@ OBJS = \
 	$(WIN32RES) \
 	findtimezone.o \
 	initdb.o \
-	localtime.o
+	localtime.o \
+	encryption.o
 
 all: initdb
 
@@ -44,6 +46,9 @@ initdb: $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
 
 # We must pull in localtime.c from src/timezones
 localtime.c: % : $(top_srcdir)/src/timezone/%
+	rm -f $@ && $(LN_S) $< .
+
+encryption.c: % : $(top_srcdir)/src/backend/storage/file/%
 	rm -f $@ && $(LN_S) $< .
 
 install: all installdirs
@@ -56,7 +61,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/initdb$(X)'
 
 clean distclean maintainer-clean:
-	rm -f initdb$(X) $(OBJS) localtime.c
+	rm -f initdb$(X) $(OBJS) localtime.c encryption.c
 	rm -rf tmp_check
 
 # ensure that changes in datadir propagate into object file

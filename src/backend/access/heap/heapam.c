@@ -1973,6 +1973,8 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(BufferGetPage(buffer));
 
 	END_CRIT_SECTION();
 
@@ -2295,6 +2297,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 
 		END_CRIT_SECTION();
 
@@ -2757,6 +2761,8 @@ l1:
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -3458,6 +3464,8 @@ l2:
 			recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(page);
 
 		END_CRIT_SECTION();
 
@@ -3679,6 +3687,14 @@ l2:
 			PageSetLSN(BufferGetPage(newbuf), recptr);
 		}
 		PageSetLSN(BufferGetPage(buffer), recptr);
+	}
+	else if (data_encrypted)
+	{
+		if (newbuf != buffer)
+			set_page_lsn_for_encryption2(BufferGetPage(newbuf),
+										 BufferGetPage(buffer));
+		else
+			set_page_lsn_for_encryption(BufferGetPage(buffer));
 	}
 
 	END_CRIT_SECTION();
@@ -4589,6 +4605,8 @@ failed:
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5341,6 +5359,8 @@ l4:
 
 			PageSetLSN(page, recptr);
 		}
+		else if (data_encrypted)
+			set_page_lsn_for_encryption(BufferGetPage(buf));
 
 		END_CRIT_SECTION();
 
@@ -5499,6 +5519,8 @@ heap_finish_speculative(Relation relation, ItemPointer tid)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5642,6 +5664,8 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 
@@ -5749,6 +5773,8 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
 
 		PageSetLSN(page, recptr);
 	}
+	else if (data_encrypted)
+		set_page_lsn_for_encryption(page);
 
 	END_CRIT_SECTION();
 

@@ -8,6 +8,7 @@
  * None of this code is used during normal system operation.
  *
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -944,7 +945,7 @@ read_local_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr,
 	 * zero-padded up to the page boundary if it's incomplete.
 	 */
 	if (!WALRead(state, cur_page, targetPagePtr, XLOG_BLCKSZ, tli,
-				 &errinfo))
+				 &errinfo, data_encrypted))
 		WALReadRaiseError(&errinfo);
 
 	/* number of valid bytes in the buffer */

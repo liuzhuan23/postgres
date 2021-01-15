@@ -112,7 +112,8 @@ for my $scenario (@scenario)
 		$master->command_ok(
 			[
 				'pg_basebackup', '-D', $backup_path, '--no-sync',
-				'-T', "${source_ts_path}=${backup_ts_path}"
+				'-T', "${source_ts_path}=${backup_ts_path}",
+				'--decrypt'
 			],
 			"base backup ok");
 		command_ok([ 'pg_verifybackup', $backup_path ],

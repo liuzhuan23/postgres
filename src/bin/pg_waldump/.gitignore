@@ -5,6 +5,7 @@
 /clogdesc.c
 /committsdesc.c
 /dbasedesc.c
+/encryption.c
 /genericdesc.c
 /gindesc.c
 /gistdesc.c

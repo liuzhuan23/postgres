@@ -419,6 +419,21 @@ found:
 
 		PageSetLSN(BufferGetPage(metabuf), recptr);
 	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
+
+		PageSetLSN(BufferGetPage(ovflbuf), recptr);
+		PageSetLSN(BufferGetPage(buf), recptr);
+
+		if (BufferIsValid(mapbuf))
+			PageSetLSN(BufferGetPage(mapbuf), recptr);
+
+		if (BufferIsValid(newmapbuf))
+			PageSetLSN(BufferGetPage(newmapbuf), recptr);
+
+		PageSetLSN(BufferGetPage(metabuf), recptr);
+	}
 
 	END_CRIT_SECTION();
 
@@ -710,6 +725,23 @@ _hash_freeovflpage(Relation rel, Buffer bucketbuf, Buffer ovflbuf,
 		if (update_metap)
 			PageSetLSN(BufferGetPage(metabuf), recptr);
 	}
+	else if (data_encrypted)
+	{
+		XLogRecPtr	recptr = get_lsn_for_encryption();
+
+		PageSetLSN(BufferGetPage(wbuf), recptr);
+		PageSetLSN(BufferGetPage(ovflbuf), recptr);
+
+		if (BufferIsValid(prevbuf) && !(wbuf == prevbuf))
+			PageSetLSN(BufferGetPage(prevbuf), recptr);
+		if (BufferIsValid(nextbuf))
+			PageSetLSN(BufferGetPage(nextbuf), recptr);
+
+		PageSetLSN(BufferGetPage(mapbuf), recptr);
+
+		if (update_metap)
+			PageSetLSN(BufferGetPage(metabuf), recptr);
+	}
 
 	END_CRIT_SECTION();
 
@@ -980,6 +1012,9 @@ readpage:
 						PageSetLSN(BufferGetPage(wbuf), recptr);
 						PageSetLSN(BufferGetPage(rbuf), recptr);
 					}
+					else if (data_encrypted)
+						set_page_lsn_for_encryption2(BufferGetPage(wbuf),
+													 BufferGetPage(rbuf));
 
 					END_CRIT_SECTION();
 

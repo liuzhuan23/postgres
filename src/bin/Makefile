@@ -2,6 +2,7 @@
 #
 # Makefile for src/bin (client programs)
 #
+# Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
 # Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
@@ -22,6 +23,7 @@ SUBDIRS = \
 	pg_controldata \
 	pg_ctl \
 	pg_dump \
+	pg_keytool \
 	pg_resetwal \
 	pg_rewind \
 	pg_test_fsync \

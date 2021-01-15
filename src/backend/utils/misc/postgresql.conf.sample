@@ -111,6 +111,9 @@
 #ssl_passphrase_command = ''
 #ssl_passphrase_command_supports_reload = off
 
+# - Encryption -
+
+#encryption_key_command = ''
 
 #------------------------------------------------------------------------------
 # RESOURCE USAGE (except WAL)

@@ -5,6 +5,7 @@
  *
  * All the actual insertion logic is in spgdoinsert.c.
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -141,6 +142,8 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 						  0, RelationGetNumberOfBlocks(index),
 						  true);
 	}
+	else if (data_encrypted)
+		newpage_range_set_lsn(index, 0, RelationGetNumberOfBlocks(index));
 
 	result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));
 	result->heap_tuples = reltuples;
@@ -169,6 +172,14 @@ spgbuildempty(Relation index)
 	 * replayed.
 	 */
 	PageSetChecksumInplace(page, SPGIST_METAPAGE_BLKNO);
+	/*
+	 * On encryption: LSN is used as the encryption IV, but all the three
+	 * pages created here have initially invalid LSN. Since no user data will
+	 * be written so far, it doesn't seem worth the complexity to generate
+	 * either regular or fake LSN (depending on relperistence) and to encrypt
+	 * the pages before they are logged. Let's just leave them unencrypted
+	 * until any data is added to the index.
+	 */
 	smgrwrite(index->rd_smgr, INIT_FORKNUM, SPGIST_METAPAGE_BLKNO,
 			  (char *) page, true);
 	log_newpage(&index->rd_smgr->smgr_rnode.node, INIT_FORKNUM,

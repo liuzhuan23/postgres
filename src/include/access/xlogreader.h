@@ -291,7 +291,7 @@ typedef struct WALReadError
 
 extern bool WALRead(XLogReaderState *state,
 					char *buf, XLogRecPtr startptr, Size count,
-					TimeLineID tli, WALReadError *errinfo);
+					TimeLineID tli, WALReadError *errinfo, bool decrypt);
 
 /* Functions for decoding an XLogRecord */
 

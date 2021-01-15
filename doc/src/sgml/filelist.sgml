@@ -48,6 +48,7 @@
 <!ENTITY wal           SYSTEM "wal.sgml">
 <!ENTITY logical-replication    SYSTEM "logical-replication.sgml">
 <!ENTITY jit    SYSTEM "jit.sgml">
+<!ENTITY encryption    SYSTEM "encryption.sgml">
 
 <!-- programmer's guide -->
 <!ENTITY bgworker   SYSTEM "bgworker.sgml">
@@ -126,6 +127,7 @@
 <!ENTITY intagg          SYSTEM "intagg.sgml">
 <!ENTITY intarray        SYSTEM "intarray.sgml">
 <!ENTITY isn             SYSTEM "isn.sgml">
+<!ENTITY keycmd          SYSTEM "keycmd.sgml">
 <!ENTITY lo              SYSTEM "lo.sgml">
 <!ENTITY ltree           SYSTEM "ltree.sgml">
 <!ENTITY oid2name        SYSTEM "oid2name.sgml">

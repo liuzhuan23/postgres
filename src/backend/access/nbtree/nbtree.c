@@ -8,6 +8,7 @@
  *	  This file contains only the public interface routines.
  *
  *
+ * Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -175,6 +176,7 @@ btbuildempty(Relation index)
 	 * this even when wal_level=minimal.
 	 */
 	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
+	/* Encryption: no-op, the page has no LSN (i.e. IV) yet. */
 	smgrwrite(index->rd_smgr, INIT_FORKNUM, BTREE_METAPAGE,
 			  (char *) metapage, true);
 	log_newpage(&index->rd_smgr->smgr_rnode.node, INIT_FORKNUM,

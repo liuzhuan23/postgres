@@ -2,6 +2,7 @@
 #
 # Makefile for src/bin/pg_ctl
 #
+# Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
 # Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
@@ -20,9 +21,9 @@ include $(top_builddir)/src/Makefile.global
 # but let's not pull that in on platforms where we don't need it.
 ifeq ($(PORTNAME), win32)
 override CPPFLAGS := -I$(libpq_srcdir) $(CPPFLAGS)
-LDFLAGS_INTERNAL += $(libpq_pgport)
 SUBMAKE_LIBPQ := submake-libpq
 endif
+LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport)
 
 OBJS = \
 	$(WIN32RES) \

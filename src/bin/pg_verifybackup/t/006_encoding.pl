@@ -16,7 +16,8 @@ $master->command_ok(
 	[
 		'pg_basebackup', '-D',
 		$backup_path,    '--no-sync',
-		'--manifest-force-encode'
+		'--manifest-force-encode',
+		'--decrypt'
 	],
 	"backup ok with forced hex encoding");
 

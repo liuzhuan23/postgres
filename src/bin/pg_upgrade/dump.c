@@ -3,6 +3,7 @@
  *
  *	dump functions
  *
+ *	Portions Copyright (c) 2019-2021, CYBERTEC PostgreSQL International GmbH
  *	Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/dump.c
  */
@@ -20,7 +21,7 @@ generate_old_dump(void)
 	prep_status("Creating dump of global objects");
 
 	/* run new pg_dumpall binary for globals */
-	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+	exec_prog(UTILITY_LOG_FILE, NULL, true, true, NULL,
 			  "\"%s/pg_dumpall\" %s --globals-only --quote-all-identifiers "
 			  "--binary-upgrade %s -f %s",
 			  new_cluster.bindir, cluster_conn_opts(&old_cluster),
