@@ -22,6 +22,7 @@
 #include "fe_utils/simple_list.h"
 #include "getopt_long.h"
 #include "parse_manifest.h"
+#include "storage/encryption.h"
 
 /*
  * For efficiency, we'd like our hash table containing information about the
@@ -57,14 +58,6 @@ typedef struct manifest_file
 	bool		matched;
 	bool		bad;
 } manifest_file;
-
-#ifdef	USE_ENCRYPTION
-/*
- * -K option needs these variables.
- */
-static bool data_encrypted;
-static char *encryption_key_command;
-#endif
 
 /*
  * Define a hash table which we can use to store information about the files
@@ -811,36 +804,36 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 				   char *wal_directory, manifest_wal_range *first_wal_range)
 {
 	manifest_wal_range *this_wal_range = first_wal_range;
+	char *encr_opt_str = NULL;
+
+	/* Prepare the -K option for the backend. */
+	if (encryption_key_command)
+	{
+		size_t		len;
+
+		len = strlen(encryption_key_command) + 4;
+		encr_opt_str = (char *) pg_malloc(len);
+		snprintf(encr_opt_str, len, "-K %s",
+				 encryption_key_command);
+	}
+	else
+	{
+		encr_opt_str = (char *) pg_malloc(1);
+		encr_opt_str[0] = '\0';
+	}
 
 	while (this_wal_range != NULL)
 	{
 		char	   *pg_waldump_cmd;
 
-#ifdef	USE_ENCRYPTION
-		if (data_encrypted)
-			pg_waldump_cmd = psprintf("\"%s\" --quiet --path=\"%s\" --timeline=%u --start=%X/%X --end=%X/%X" \
-									  " -K %s\n",
-									  pg_waldump_path, wal_directory, this_wal_range->tli,
-									  (uint32) (this_wal_range->start_lsn >> 32),
-									  (uint32) this_wal_range->start_lsn,
-									  (uint32) (this_wal_range->end_lsn >> 32),
-									  (uint32) this_wal_range->end_lsn,
-									  encryption_key_command);
-		else
-			pg_waldump_cmd = psprintf("\"%s\" --quiet --path=\"%s\" --timeline=%u --start=%X/%X --end=%X/%X\n",
-									  pg_waldump_path, wal_directory, this_wal_range->tli,
-									  (uint32) (this_wal_range->start_lsn >> 32),
-									  (uint32) this_wal_range->start_lsn,
-									  (uint32) (this_wal_range->end_lsn >> 32),
-									  (uint32) this_wal_range->end_lsn);
-#else
-		pg_waldump_cmd = psprintf("\"%s\" --quiet --path=\"%s\" --timeline=%u --start=%X/%X --end=%X/%X\n",
+		pg_waldump_cmd = psprintf("\"%s\" --quiet --path=\"%s\" --timeline=%u --start=%X/%X --end=%X/%X %s\n",
 								  pg_waldump_path, wal_directory, this_wal_range->tli,
 								  (uint32) (this_wal_range->start_lsn >> 32),
 								  (uint32) this_wal_range->start_lsn,
 								  (uint32) (this_wal_range->end_lsn >> 32),
-								  (uint32) this_wal_range->end_lsn);
-#endif
+								  (uint32) this_wal_range->end_lsn,
+								  encr_opt_str);
+
 		if (system(pg_waldump_cmd) != 0)
 			report_backup_error(context,
 								"WAL parsing failed for timeline %u",
@@ -848,6 +841,9 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 
 		this_wal_range = this_wal_range->next;
 	}
+
+	if (encr_opt_str)
+		pg_free(encr_opt_str);
 }
 
 /*
@@ -938,7 +934,7 @@ usage(void)
 	printf(_("  -n, --no-parse-wal          do not try to parse WAL files\n"));
 #ifdef	USE_ENCRYPTION
 	printf(_("  -K, --encryption-key-command=COMMAND\n"
-			 "                         command that returns encryption key\n"));
+			 "                              command that returns encryption key\n"));
 #endif							/* USE_ENCRYPTION */
 	printf(_("  -q, --quiet                 do not print any output, except for errors\n"));
 	printf(_("  -s, --skip-checksums        skip checksum verification\n"));
