@@ -31,6 +31,9 @@
 #include "access/timeline.h"
 #include "access/transam.h"
 #include "access/twophase.h"
+#include "access/undo.h"
+#include "access/undolog.h"
+#include "access/undorecordset.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
@@ -1418,6 +1421,7 @@ checkXLogConsistency(XLogReaderState *record)
 	ForkNumber	forknum;
 	BlockNumber blkno;
 	int			block_id;
+	SmgrId		smgrid;
 
 	/* Records with no backup blocks have no need for consistency checks. */
 	if (!XLogRecHasAnyBlockRefs(record))
@@ -1430,7 +1434,8 @@ checkXLogConsistency(XLogReaderState *record)
 		Buffer		buf;
 		Page		page;
 
-		if (!XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno))
+		if (!XLogRecGetBlockTag(record, block_id, &smgrid, &rnode, &forknum,
+								&blkno))
 		{
 			/*
 			 * WAL record doesn't contain a block reference with the given id.
@@ -1455,7 +1460,7 @@ checkXLogConsistency(XLogReaderState *record)
 		 * Read the contents from the current buffer and store it in a
 		 * temporary page.
 		 */
-		buf = XLogReadBufferExtended(rnode, forknum, blkno,
+		buf = XLogReadBufferExtended(smgrid, rnode, forknum, blkno,
 									 RBM_NORMAL_NO_LOG);
 		if (!BufferIsValid(buf))
 			continue;
@@ -3795,8 +3800,8 @@ XLogFileReadAnyTLI(XLogSegNo segno, int emode, XLogSource source)
 	 * however, unless we actually find a valid segment.  That way if there is
 	 * neither a timeline history file nor a WAL segment in the archive, and
 	 * streaming replication is set up, we'll read the timeline history file
-	 * streamed from the primary when we start streaming, instead of recovering
-	 * with a dummy history generated here.
+	 * streamed from the primary when we start streaming, instead of
+	 * recovering with a dummy history generated here.
 	 */
 	if (expectedTLEs)
 		tles = expectedTLEs;
@@ -5279,6 +5284,7 @@ BootStrapXLOG(void)
 	checkPoint.newestCommitTsXid = InvalidTransactionId;
 	checkPoint.time = (pg_time_t) time(NULL);
 	checkPoint.oldestActiveXid = InvalidTransactionId;
+	checkPoint.oldestFullXidHavingUndo = 0;
 
 	ShmemVariableCache->nextXid = checkPoint.nextXid;
 	ShmemVariableCache->nextOid = checkPoint.nextOid;
@@ -6827,6 +6833,9 @@ StartupXLOG(void)
 			(errmsg_internal("commit timestamp Xid oldest/newest: %u/%u",
 							 checkPoint.oldestCommitTsXid,
 							 checkPoint.newestCommitTsXid)));
+	ereport(DEBUG1,
+			(errmsg_internal("oldest xid with epoch having undo: " UINT64_FORMAT,
+							 checkPoint.oldestFullXidHavingUndo)));
 	if (!TransactionIdIsNormal(XidFromFullTransactionId(checkPoint.nextXid)))
 		ereport(PANIC,
 				(errmsg("invalid next transaction ID")));
@@ -6842,6 +6851,10 @@ StartupXLOG(void)
 	SetCommitTsLimit(checkPoint.oldestCommitTsXid,
 					 checkPoint.newestCommitTsXid);
 	XLogCtl->ckptFullXid = checkPoint.nextXid;
+
+	/* Read oldest xid having undo from checkpoint and set in proc global. */
+	pg_atomic_write_u64(&ProcGlobal->oldestFullXidHavingUndo,
+						checkPoint.oldestFullXidHavingUndo);
 
 	/*
 	 * Initialize replication slots, before there's a chance to remove
@@ -6905,11 +6918,11 @@ StartupXLOG(void)
 	 * ourselves - the history file of the recovery target timeline covers all
 	 * the previous timelines in the history too - a cascading standby server
 	 * might be interested in them. Or, if you archive the WAL from this
-	 * server to a different archive than the primary, it'd be good for all the
-	 * history files to get archived there after failover, so that you can use
-	 * one of the old timelines as a PITR target. Timeline history files are
-	 * small, so it's better to copy them unnecessarily than not copy them and
-	 * regret later.
+	 * server to a different archive than the primary, it'd be good for all
+	 * the history files to get archived there after failover, so that you can
+	 * use one of the old timelines as a PITR target. Timeline history files
+	 * are small, so it's better to copy them unnecessarily than not copy them
+	 * and regret later.
 	 */
 	restoreTimeLineHistoryFiles(ThisTimeLineID, recoveryTargetTLI);
 
@@ -6951,6 +6964,12 @@ StartupXLOG(void)
 		/* force recovery due to presence of recovery signal file */
 		InRecovery = true;
 	}
+
+	/*
+	 * Recover undo log meta data corresponding to this checkpoint.  We must
+	 * do this after setting the correct value of InRecovery.
+	 */
+	StartupUndo(ControlFile->checkPointCopy.redo);
 
 	/* REDO */
 	if (InRecovery)
@@ -7334,8 +7353,7 @@ StartupXLOG(void)
 				error_context_stack = &errcallback;
 
 				/*
-				 * ShmemVariableCache->nextXid must be beyond record's
-				 * xid.
+				 * ShmemVariableCache->nextXid must be beyond record's xid.
 				 */
 				AdvanceNextFullTransactionIdPastXid(record->xl_xid);
 
@@ -7561,6 +7579,20 @@ StartupXLOG(void)
 	 */
 	if (InRecovery)
 		ResetUnloggedRelations(UNLOGGED_RELATION_INIT);
+
+	/*
+	 * If we have reset any unlogged relations, then there must be no
+	 * remaining references pointing to unlogged undo logs, so reset those
+	 * too.
+	 */
+	if (InRecovery)
+		ResetUndoLogs(RELPERSISTENCE_UNLOGGED);
+
+	/*
+	 * We always blow away temporary undo logs, because there can be no
+	 * remaining references to them after a restart.
+	 */
+	ResetUndoLogs(RELPERSISTENCE_TEMP);
 
 	/*
 	 * We don't need the latch anymore. It's not strictly necessary to disown
@@ -7995,6 +8027,19 @@ StartupXLOG(void)
 	CompleteCommitTsInitialization();
 
 	/*
+	 * Now that WAL inserts are enabled, we can also probe all undo logs to
+	 * find out if there are any UndoRecordSet chunks that were left open by
+	 * an earlier crash, and tidy up.
+	 */
+	CloseDanglingUndoRecordSets();
+
+	/*
+	 * The undo logs are consistent now, so check all undo record sets and
+	 * apply those belonging to aborted (or not finished) transactions.
+	 */
+	ApplyPendingUndo();
+
+	/*
 	 * All done with end-of-recovery actions.
 	 *
 	 * Now allow backends to write WAL and update the control file status in
@@ -8027,10 +8072,10 @@ StartupXLOG(void)
 	WalSndWakeup();
 
 	/*
-	 * If this was a promotion, request an (online) checkpoint now. This
-	 * isn't required for consistency, but the last restartpoint might be far
-	 * back, and in case of a crash, recovering from it might take a longer
-	 * than is appropriate now that we're not in standby mode anymore.
+	 * If this was a promotion, request an (online) checkpoint now. This isn't
+	 * required for consistency, but the last restartpoint might be far back,
+	 * and in case of a crash, recovering from it might take a longer than is
+	 * appropriate now that we're not in standby mode anymore.
 	 */
 	if (promoted)
 		RequestCheckpoint(CHECKPOINT_FORCE);
@@ -9034,6 +9079,9 @@ CreateCheckPoint(int flags)
 		checkPoint.nextOid += ShmemVariableCache->oidCount;
 	LWLockRelease(OidGenLock);
 
+	checkPoint.oldestFullXidHavingUndo =
+		pg_atomic_read_u64(&ProcGlobal->oldestFullXidHavingUndo);
+
 	MultiXactGetCheckptMulti(shutdown,
 							 &checkPoint.nextMulti,
 							 &checkPoint.nextMultiOffset,
@@ -9302,6 +9350,7 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_START(flags);
 	CheckpointStats.ckpt_write_t = GetCurrentTimestamp();
 	CheckPointCLOG();
+	CheckPointUndo(checkPointRedo, ControlFile->checkPointCopy.redo);
 	CheckPointCommitTs();
 	CheckPointSUBTRANS();
 	CheckPointMultiXact();
@@ -10067,6 +10116,10 @@ xlog_redo(XLogReaderState *record)
 		MultiXactAdvanceOldest(checkPoint.oldestMulti,
 							   checkPoint.oldestMultiDB);
 
+
+		pg_atomic_write_u64(&ProcGlobal->oldestFullXidHavingUndo,
+							checkPoint.oldestFullXidHavingUndo);
+
 		/*
 		 * No need to set oldestClogXid here as well; it'll be set when we
 		 * redo an xl_clog_truncate if it changed since initialization.
@@ -10125,6 +10178,8 @@ xlog_redo(XLogReaderState *record)
 		/* ControlFile->checkPointCopy always tracks the latest ckpt XID */
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
+		ControlFile->checkPointCopy.oldestFullXidHavingUndo =
+			checkPoint.oldestFullXidHavingUndo;
 		LWLockRelease(ControlFileLock);
 
 		/* Update shared-memory copy of checkpoint XID/epoch */
@@ -10170,6 +10225,9 @@ xlog_redo(XLogReaderState *record)
 		/* Handle multixact */
 		MultiXactAdvanceNextMXact(checkPoint.nextMulti,
 								  checkPoint.nextMultiOffset);
+
+		pg_atomic_write_u64(&ProcGlobal->oldestFullXidHavingUndo,
+							checkPoint.oldestFullXidHavingUndo);
 
 		/*
 		 * NB: This may perform multixact truncation when replaying WAL
@@ -10395,7 +10453,7 @@ xlog_block_info(StringInfo buf, XLogReaderState *record)
 		if (!XLogRecHasBlockRef(record, block_id))
 			continue;
 
-		XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blk);
+		XLogRecGetBlockTag(record, block_id, NULL, &rnode, &forknum, &blk);
 		if (forknum != MAIN_FORKNUM)
 			appendStringInfo(buf, "; blkref #%u: rel %u/%u/%u, fork %u, blk %u",
 							 block_id,
@@ -12076,8 +12134,8 @@ retry:
 	Assert(readFile != -1);
 
 	/*
-	 * If the current segment is being streamed from the primary, calculate how
-	 * much of the current page we have received already. We know the
+	 * If the current segment is being streamed from the primary, calculate
+	 * how much of the current page we have received already. We know the
 	 * requested record has been received, but this is for the benefit of
 	 * future calls, to allow quick exit at the top of this function.
 	 */
@@ -12138,12 +12196,13 @@ retry:
 	 * and replay reaches a record that's split across two WAL segments. The
 	 * first page is only available locally, in pg_wal, because it's already
 	 * been recycled on the primary. The second page, however, is not present
-	 * in pg_wal, and we should stream it from the primary. There is a recycled
-	 * WAL segment present in pg_wal, with garbage contents, however. We would
-	 * read the first page from the local WAL segment, but when reading the
-	 * second page, we would read the bogus, recycled, WAL segment. If we
-	 * didn't catch that case here, we would never recover, because
-	 * ReadRecord() would retry reading the whole record from the beginning.
+	 * in pg_wal, and we should stream it from the primary. There is a
+	 * recycled WAL segment present in pg_wal, with garbage contents, however.
+	 * We would read the first page from the local WAL segment, but when
+	 * reading the second page, we would read the bogus, recycled, WAL
+	 * segment. If we didn't catch that case here, we would never recover,
+	 * because ReadRecord() would retry reading the whole record from the
+	 * beginning.
 	 *
 	 * Of course, this only catches errors in the page header, which is what
 	 * happens in the case of a recycled WAL segment. Other kinds of errors or
@@ -12298,15 +12357,15 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * Failure while streaming. Most likely, we got here
 					 * because streaming replication was terminated, or
 					 * promotion was triggered. But we also get here if we
-					 * find an invalid record in the WAL streamed from the primary,
-					 * in which case something is seriously wrong. There's
-					 * little chance that the problem will just go away, but
-					 * PANIC is not good for availability either, especially
-					 * in hot standby mode. So, we treat that the same as
-					 * disconnection, and retry from archive/pg_wal again. The
-					 * WAL in the archive should be identical to what was
-					 * streamed, so it's unlikely that it helps, but one can
-					 * hope...
+					 * find an invalid record in the WAL streamed from the
+					 * primary, in which case something is seriously wrong.
+					 * There's little chance that the problem will just go
+					 * away, but PANIC is not good for availability either,
+					 * especially in hot standby mode. So, we treat that the
+					 * same as disconnection, and retry from archive/pg_wal
+					 * again. The WAL in the archive should be identical to
+					 * what was streamed, so it's unlikely that it helps, but
+					 * one can hope...
 					 */
 
 					/*

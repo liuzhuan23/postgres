@@ -389,3 +389,4 @@
  * Enable tracing of syncscan operations (see also the trace_syncscan GUC var).
  */
 /* #define TRACE_SYNCSCAN */
+/* #define UNDO_DEBUG */
