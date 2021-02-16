@@ -803,6 +803,19 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 	manifest_wal_range *this_wal_range = first_wal_range;
 	char *encr_opt_str = NULL;
 
+	/*
+	 * Try to retrieve the command from environment variable. We do this
+	 * primarily to use encrypted clusters during automated tests. XXX Not
+	 * sure the variable should be documented. If we do, then pg_ctl should
+	 * probably accept it too.
+	 */
+	if (encryption_key_command == NULL)
+	{
+		encryption_key_command = getenv("PGENCRKEYCMD");
+		if (encryption_key_command && strlen(encryption_key_command) == 0)
+			encryption_key_command = NULL;
+	}
+
 	/* Prepare the -K option for the backend. */
 	if (encryption_key_command)
 	{
