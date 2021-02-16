@@ -1399,7 +1399,7 @@ project_aggregates(AggState *aggstate)
 }
 
 /*
- * Walk tlist and qual to find referenced colnos, dividing them into
+ * Find input-tuple columns that are needed, dividing them into
  * aggregated and unaggregated sets.
  */
 static void
@@ -1412,8 +1412,14 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 	context.aggregated = NULL;
 	context.unaggregated = NULL;
 
+	/* Examine tlist and quals */
 	(void) find_cols_walker((Node *) agg->plan.targetlist, &context);
 	(void) find_cols_walker((Node *) agg->plan.qual, &context);
+
+	/* In some cases, grouping columns will not appear in the tlist */
+	for (int i = 0; i < agg->numCols; i++)
+		context.unaggregated = bms_add_member(context.unaggregated,
+											  agg->grpColIdx[i]);
 
 	*aggregated = context.aggregated;
 	*unaggregated = context.unaggregated;
@@ -1758,9 +1764,15 @@ hashagg_recompile_expressions(AggState *aggstate, bool minslot, bool nullcheck)
 		const TupleTableSlotOps *outerops = aggstate->ss.ps.outerops;
 		bool		outerfixed = aggstate->ss.ps.outeropsfixed;
 		bool		dohash = true;
-		bool		dosort;
+		bool		dosort = false;
 
-		dosort = aggstate->aggstrategy == AGG_MIXED ? true : false;
+		/*
+		 * If minslot is true, that means we are processing a spilled batch
+		 * (inside agg_refill_hash_table()), and we must not advance the
+		 * sorted grouping sets.
+		 */
+		if (aggstate->aggstrategy == AGG_MIXED && !minslot)
+			dosort = true;
 
 		/* temporarily change the outerops while compiling the expression */
 		if (minslot)
@@ -2601,11 +2613,15 @@ agg_refill_hash_table(AggState *aggstate)
 						batch->used_bits, &aggstate->hash_mem_limit,
 						&aggstate->hash_ngroups_limit, NULL);
 
-	/* there could be residual pergroup pointers; clear them */
-	for (int setoff = 0;
-		 setoff < aggstate->maxsets + aggstate->num_hashes;
-		 setoff++)
-		aggstate->all_pergroups[setoff] = NULL;
+	/*
+	 * Each batch only processes one grouping set; set the rest to NULL so
+	 * that advance_aggregates() knows to ignore them. We don't touch
+	 * pergroups for sorted grouping sets here, because they will be needed if
+	 * we rescan later. The expressions for sorted grouping sets will not be
+	 * evaluated after we recompile anyway.
+	 */
+	MemSet(aggstate->hash_pergroup, 0,
+		   sizeof(AggStatePerGroup) * aggstate->num_hashes);
 
 	/* free memory and reset hash tables */
 	ReScanExprContext(aggstate->hashcontext);
@@ -3665,7 +3681,11 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 							&aggstate->hash_ngroups_limit,
 							&aggstate->hash_planned_partitions);
 		find_hash_columns(aggstate);
-		build_hash_tables(aggstate);
+
+		/* Skip massive memory allocation if we are just doing EXPLAIN */
+		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+			build_hash_tables(aggstate);
+
 		aggstate->table_filled = false;
 
 		/* Initialize this to 1, meaning nothing spilled, yet */

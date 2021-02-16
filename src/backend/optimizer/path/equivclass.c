@@ -32,6 +32,10 @@
 #include "utils/lsyscache.h"
 
 
+/* source-code-compatibility hacks for pull_varnos() API change */
+#define pull_varnos(a,b) pull_varnos_new(a,b)
+#define make_restrictinfo(a,b,c,d,e,f,g,h,i) make_restrictinfo_new(a,b,c,d,e,f,g,h,i)
+
 static EquivalenceMember *add_eq_member(EquivalenceClass *ec,
 										Expr *expr, Relids relids, Relids nullable_relids,
 										bool is_child, Oid datatype);
@@ -195,7 +199,8 @@ process_equivalence(PlannerInfo *root,
 			ntest->location = -1;
 
 			*p_restrictinfo =
-				make_restrictinfo((Expr *) ntest,
+				make_restrictinfo(root,
+								  (Expr *) ntest,
 								  restrictinfo->is_pushed_down,
 								  restrictinfo->outerjoin_delayed,
 								  restrictinfo->pseudoconstant,
@@ -713,7 +718,7 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 	/*
 	 * Get the precise set of nullable relids appearing in the expression.
 	 */
-	expr_relids = pull_varnos((Node *) expr);
+	expr_relids = pull_varnos(root, (Node *) expr);
 	nullable_relids = bms_intersect(nullable_relids, expr_relids);
 
 	newem = add_eq_member(newec, copyObject(expr), expr_relids,
@@ -795,12 +800,15 @@ find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel)
 }
 
 /*
- * Find an equivalence class member expression that can be safely used by a
- * sort node on top of the provided relation. The rules here must match those
- * applied in prepare_sort_from_pathkeys.
+ * Find an equivalence class member expression that can be safely used to build
+ * a sort node using the provided relation. The rules are a subset of those
+ * applied in prepare_sort_from_pathkeys since that function deals with sorts
+ * that must be delayed until the last stages of query execution, while here
+ * we only care about proactive sorts.
  */
 Expr *
-find_em_expr_usable_for_sorting_rel(EquivalenceClass *ec, RelOptInfo *rel)
+find_em_expr_usable_for_sorting_rel(PlannerInfo *root, EquivalenceClass *ec,
+									RelOptInfo *rel, bool require_parallel_safe)
 {
 	ListCell   *lc_em;
 
@@ -812,8 +820,6 @@ find_em_expr_usable_for_sorting_rel(EquivalenceClass *ec, RelOptInfo *rel)
 	{
 		EquivalenceMember *em = lfirst(lc_em);
 		Expr	   *em_expr = em->em_expr;
-		PathTarget *target = rel->reltarget;
-		ListCell   *lc_target_expr;
 
 		/*
 		 * We shouldn't be trying to sort by an equivalence class that
@@ -831,33 +837,30 @@ find_em_expr_usable_for_sorting_rel(EquivalenceClass *ec, RelOptInfo *rel)
 			continue;
 
 		/*
+		 * If requested, reject expressions that are not parallel-safe.
+		 */
+		if (require_parallel_safe && !is_parallel_safe(root, (Node *) em_expr))
+			continue;
+
+		/*
+		 * Disallow SRFs so that all of them can be evaluated at the correct
+		 * time as determined by make_sort_input_target.
+		 */
+		if (IS_SRF_CALL((Node *) em_expr))
+			continue;
+
+		/*
 		 * As long as the expression isn't volatile then
 		 * prepare_sort_from_pathkeys is able to generate a new target entry,
 		 * so there's no need to verify that one already exists.
+		 *
+		 * While prepare_sort_from_pathkeys has to be concerned about matching
+		 * up a volatile expression to the proper tlist entry, it doesn't seem
+		 * valuable here to expend the work trying to find a match in the
+		 * target's exprs since such a sort will have to be postponed anyway.
 		 */
 		if (!ec->ec_has_volatile)
 			return em->em_expr;
-
-		/*
-		 * If, however, it's volatile, we have to verify that the
-		 * equivalence member's expr is already generated in the
-		 * relation's target (we do strip relabels first from both
-		 * expressions, which is cheap and might allow us to match
-		 * more expressions).
-		 */
-		while (em_expr && IsA(em_expr, RelabelType))
-			em_expr = ((RelabelType *) em_expr)->arg;
-
-		foreach(lc_target_expr, target->exprs)
-		{
-			Expr	   *target_expr = lfirst(lc_target_expr);
-
-			while (target_expr && IsA(target_expr, RelabelType))
-				target_expr = ((RelabelType *) target_expr)->arg;
-
-			if (equal(target_expr, em_expr))
-				return em->em_expr;
-		}
 	}
 
 	/* We didn't find any suitable equivalence class expression */
@@ -1663,7 +1666,8 @@ create_join_clause(PlannerInfo *root,
 	 */
 	oldcontext = MemoryContextSwitchTo(root->planner_cxt);
 
-	rinfo = build_implied_join_equality(opno,
+	rinfo = build_implied_join_equality(root,
+										opno,
 										ec->ec_collation,
 										leftem->em_expr,
 										rightem->em_expr,
@@ -1963,7 +1967,8 @@ reconsider_outer_join_clause(PlannerInfo *root, RestrictInfo *rinfo,
 											 cur_em->em_datatype);
 			if (!OidIsValid(eq_op))
 				continue;		/* can't generate equality */
-			newrinfo = build_implied_join_equality(eq_op,
+			newrinfo = build_implied_join_equality(root,
+												   eq_op,
 												   cur_ec->ec_collation,
 												   innervar,
 												   cur_em->em_expr,
@@ -2106,7 +2111,8 @@ reconsider_full_join_clause(PlannerInfo *root, RestrictInfo *rinfo)
 											 cur_em->em_datatype);
 			if (OidIsValid(eq_op))
 			{
-				newrinfo = build_implied_join_equality(eq_op,
+				newrinfo = build_implied_join_equality(root,
+													   eq_op,
 													   cur_ec->ec_collation,
 													   leftvar,
 													   cur_em->em_expr,
@@ -2121,7 +2127,8 @@ reconsider_full_join_clause(PlannerInfo *root, RestrictInfo *rinfo)
 											 cur_em->em_datatype);
 			if (OidIsValid(eq_op))
 			{
-				newrinfo = build_implied_join_equality(eq_op,
+				newrinfo = build_implied_join_equality(root,
+													   eq_op,
 													   cur_ec->ec_collation,
 													   rightvar,
 													   cur_em->em_expr,

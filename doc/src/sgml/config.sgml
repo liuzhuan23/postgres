@@ -263,8 +263,9 @@ shared_buffers = 128MB
      <listitem>
      <para>
       The <xref linkend="sql-show"/> command allows inspection of the
-      current value of all parameters.  The corresponding function is
-      <function>current_setting(setting_name text)</function>.
+      current value of any parameter.  The corresponding SQL function is
+      <function>current_setting(setting_name text)</function>
+      (see <xref linkend="functions-admin-set"/>).
      </para>
      </listitem>
 
@@ -273,8 +274,9 @@ shared_buffers = 128MB
        The <xref linkend="sql-set"/> command allows modification of the
        current value of those parameters that can be set locally to a
        session; it has no effect on other sessions.
-       The corresponding function is
-       <function>set_config(setting_name, new_value, is_local)</function>.
+       The corresponding SQL function is
+       <function>set_config(setting_name, new_value, is_local)</function>
+       (see <xref linkend="functions-admin-set"/>).
       </para>
      </listitem>
     </itemizedlist>
@@ -1035,10 +1037,16 @@ include_dir 'conf.d'
       </term>
       <listitem>
        <para>
-        Sets the location of the Kerberos server key file. See
-        <xref linkend="gssapi-auth"/>
-        for details. This parameter can only be set in the
+        Sets the location of the server's Kerberos key file.  The default is
+        <filename>FILE:/usr/local/pgsql/etc/krb5.keytab</filename>
+        (where the directory part is whatever was specified
+        as <varname>sysconfdir</varname> at build time; use
+        <literal>pg_config --sysconfdir</literal> to determine that).
+        If this parameter is set to an empty string, it is ignored and a
+        system-dependent default is used.
+        This parameter can only be set in the
         <filename>postgresql.conf</filename> file or on the server command line.
+        See <xref linkend="gssapi-auth"/> for more information.
        </para>
       </listitem>
      </varlistentry>
@@ -2093,8 +2101,11 @@ include_dir 'conf.d'
       There is a separate server
       process called the <firstterm>background writer</firstterm>, whose function
       is to issue writes of <quote>dirty</quote> (new or modified) shared
-      buffers.  It writes shared buffers so server processes handling
-      user queries seldom or never need to wait for a write to occur.
+      buffers.  When the number of clean shared buffers appears to be
+      insufficient, the background writer writes some dirty buffers to the
+      file system and marks them as clean.  This reduces the likelihood
+      that server processes handling user queries will be unable to find
+      clean buffers and have to write dirty buffers themselves.
       However, the background writer does cause a net overall
       increase in I/O load, because while a repeatedly-dirtied page might
       otherwise be written only once per checkpoint interval, the
