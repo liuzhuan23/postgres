@@ -223,8 +223,6 @@ main(int argc, char **argv)
 	simple_string_list_append(&context.ignore_list, "recovery.signal");
 	simple_string_list_append(&context.ignore_list, "standby.signal");
 
-	data_encrypted = false;
-
 #ifdef	USE_ENCRYPTION
 	while ((c = getopt_long(argc, argv, "ei:m:K:nqsw:", long_options, NULL)) != -1)
 #else
@@ -254,7 +252,6 @@ main(int argc, char **argv)
 #ifdef	USE_ENCRYPTION
 			case 'K':
 				encryption_key_command = pg_strdup(optarg);
-				data_encrypted = true;
 				break;
 #endif							/* USE_ENCRYPTION */
 			case 'q':

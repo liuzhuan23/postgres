@@ -15,16 +15,12 @@ LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport)
 OBJS = \
 	$(WIN32RES) \
 	parse_manifest.o \
-	pg_verifybackup.o \
-	encryption.o
+	pg_verifybackup.o
 
 all: pg_verifybackup
 
 pg_verifybackup: $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
-
-encryption.c: % : $(top_srcdir)/src/backend/storage/file/%
-	rm -f $@ && $(LN_S) $< .
 
 install: all installdirs
 	$(INSTALL_PROGRAM) pg_verifybackup$(X) '$(DESTDIR)$(bindir)/pg_verifybackup$(X)'
@@ -36,7 +32,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/pg_verifybackup$(X)'
 
 clean distclean maintainer-clean:
-	rm -f pg_verifybackup$(X) $(OBJS) encryption.c
+	rm -f pg_verifybackup$(X) $(OBJS)
 	rm -rf tmp_check
 
 check:
