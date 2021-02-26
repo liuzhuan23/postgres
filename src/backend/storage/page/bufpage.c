@@ -64,6 +64,19 @@ PageInit(Page page, Size pageSize, Size specialSize)
 
 /*
  * PageIsVerified
+ *		Utility wrapper for PageIsVerifiedExtended().
+ */
+bool
+PageIsVerified(Page page, BlockNumber blkno)
+{
+	return PageIsVerifiedExtended(page, blkno,
+								  PIV_LOG_WARNING | PIV_REPORT_STAT,
+								  NULL);
+}
+
+
+/*
+ * PageIsVerifiedExtended
  *		Check that the page header and checksum (if any) appear valid.
  *
  * This is called when a page has just been read in from disk.  The idea is
@@ -83,9 +96,15 @@ PageInit(Page page, Size pageSize, Size specialSize)
  * If "page_encr" is passed, it points to encrypted page and "page" is its
  * plain form. The point is that checksum needs to be verified before
  * decryption, but other fields must be checked after that.
+ *
+ * If flag PIV_LOG_WARNING is set, a WARNING is logged in the event of
+ * a checksum failure.
+ *
+ * If flag PIV_REPORT_STAT is set, a checksum failure is reported directly
+ * to pgstat.
  */
 bool
-PageIsVerified(Page page, BlockNumber blkno, Page page_encr)
+PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags, Page page_encr)
 {
 	PageHeader	p = (PageHeader) page;
 	bool		checksum_failure = false;
@@ -147,12 +166,14 @@ PageIsVerified(Page page, BlockNumber blkno, Page page_encr)
 	 */
 	if (checksum_failure)
 	{
-		ereport(WARNING,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("page verification failed, calculated checksum %u but expected %u",
-						checksum, p->pd_checksum)));
+		if ((flags & PIV_LOG_WARNING) != 0)
+			ereport(WARNING,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("page verification failed, calculated checksum %u but expected %u",
+							checksum, p->pd_checksum)));
 
-		pgstat_report_checksum_failure();
+		if ((flags & PIV_REPORT_STAT) != 0)
+			pgstat_report_checksum_failure();
 
 		if (header_sane && ignore_checksum_failure)
 			return true;

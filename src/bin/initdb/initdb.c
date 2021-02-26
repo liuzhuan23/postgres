@@ -3193,8 +3193,7 @@ main(int argc, char *argv[])
 	}
 
 	/* process command-line options */
-
-	while ((c = getopt_long(argc, argv, "dD:E:kK:L:nNU:WA:sST:X:g", long_options, &option_index)) != -1)
+	while ((c = getopt_long(argc, argv, "A:dD:E:gK:kL:nNsST:U:WX:", long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{

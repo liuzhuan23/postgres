@@ -387,6 +387,8 @@ static bool ConstraintImpliedByRelConstraint(Relation scanrel,
 											 List *testConstraint, List *provenConstraint);
 static ObjectAddress ATExecColumnDefault(Relation rel, const char *colName,
 										 Node *newDefault, LOCKMODE lockmode);
+static ObjectAddress ATExecCookedColumnDefault(Relation rel, AttrNumber attnum,
+											   Node *newDefault);
 static ObjectAddress ATExecAddIdentity(Relation rel, const char *colName,
 									   Node *def, LOCKMODE lockmode);
 static ObjectAddress ATExecSetIdentity(Relation rel, const char *colName,
@@ -1345,6 +1347,17 @@ RemoveRelations(DropStmt *drop)
 			flags |= PERFORM_DELETION_CONCURRENTLY;
 		}
 
+		/*
+		 * Concurrent index drop cannot be used with partitioned indexes,
+		 * either.
+		 */
+		if ((flags & PERFORM_DELETION_CONCURRENTLY) != 0 &&
+			get_rel_relkind(relOid) == RELKIND_PARTITIONED_INDEX)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot drop partitioned index \"%s\" concurrently",
+							rel->relname)));
+
 		/* OK, we're ready to delete this one */
 		obj.classId = RelationRelationId;
 		obj.objectId = relOid;
@@ -2010,8 +2023,8 @@ storage_name(char c)
  * 'schema' is the column/attribute definition for the table. (It's a list
  *		of ColumnDef's.) It is destructively changed.
  * 'supers' is a list of OIDs of parent relations, already locked by caller.
- * 'relpersistence' is a persistence type of the table.
- * 'is_partition' tells if the table is a partition
+ * 'relpersistence' is the persistence type of the table.
+ * 'is_partition' tells if the table is a partition.
  *
  * Output arguments:
  * 'supconstr' receives a list of constraints belonging to the parents,
@@ -2176,7 +2189,11 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 		TupleDesc	tupleDesc;
 		TupleConstr *constr;
 		AttrNumber *newattno;
+		List	   *inherited_defaults;
+		List	   *cols_with_defaults;
 		AttrNumber	parent_attno;
+		ListCell   *lc1;
+		ListCell   *lc2;
 
 		/* caller already got lock */
 		relation = table_open(parent, NoLock);
@@ -2263,6 +2280,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 		newattno = (AttrNumber *)
 			palloc0(tupleDesc->natts * sizeof(AttrNumber));
 
+		/* We can't process inherited defaults until newattno[] is complete. */
+		inherited_defaults = cols_with_defaults = NIL;
+
 		for (parent_attno = 1; parent_attno <= tupleDesc->natts;
 			 parent_attno++)
 		{
@@ -2318,7 +2338,7 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 									   get_collation_name(defCollId),
 									   get_collation_name(attribute->attcollation))));
 
-				/* Copy storage parameter */
+				/* Copy/check storage parameter */
 				if (def->storage == 0)
 					def->storage = attribute->attstorage;
 				else if (def->storage != attribute->attstorage)
@@ -2369,7 +2389,7 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 			}
 
 			/*
-			 * Copy default if any
+			 * Locate default if any
 			 */
 			if (attribute->atthasdef)
 			{
@@ -2391,23 +2411,59 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 				Assert(this_default != NULL);
 
 				/*
-				 * If default expr could contain any vars, we'd need to fix
-				 * 'em, but it can't; so default is ready to apply to child.
-				 *
-				 * If we already had a default from some prior parent, check
-				 * to see if they are the same.  If so, no problem; if not,
-				 * mark the column as having a bogus default. Below, we will
-				 * complain if the bogus default isn't overridden by the child
-				 * schema.
+				 * If it's a GENERATED default, it might contain Vars that
+				 * need to be mapped to the inherited column(s)' new numbers.
+				 * We can't do that till newattno[] is ready, so just remember
+				 * all the inherited default expressions for the moment.
 				 */
-				Assert(def->raw_default == NULL);
-				if (def->cooked_default == NULL)
-					def->cooked_default = this_default;
-				else if (!equal(def->cooked_default, this_default))
-				{
-					def->cooked_default = &bogus_marker;
-					have_bogus_defaults = true;
-				}
+				inherited_defaults = lappend(inherited_defaults, this_default);
+				cols_with_defaults = lappend(cols_with_defaults, def);
+			}
+		}
+
+		/*
+		 * Now process any inherited default expressions, adjusting attnos
+		 * using the completed newattno[] map.
+		 */
+		forboth(lc1, inherited_defaults, lc2, cols_with_defaults)
+		{
+			Node	   *this_default = (Node *) lfirst(lc1);
+			ColumnDef  *def = (ColumnDef *) lfirst(lc2);
+			bool		found_whole_row;
+
+			/* Adjust Vars to match new table's column numbering */
+			this_default = map_variable_attnos(this_default,
+											   1, 0,
+											   newattno, tupleDesc->natts,
+											   InvalidOid, &found_whole_row);
+
+			/*
+			 * For the moment we have to reject whole-row variables.  We could
+			 * convert them, if we knew the new table's rowtype OID, but that
+			 * hasn't been assigned yet.  (A variable could only appear in a
+			 * generation expression, so the error message is correct.)
+			 */
+			if (found_whole_row)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert whole-row table reference"),
+						 errdetail("Generation expression for column \"%s\" contains a whole-row reference to table \"%s\".",
+								   def->colname,
+								   RelationGetRelationName(relation))));
+
+			/*
+			 * If we already had a default from some prior parent, check to
+			 * see if they are the same.  If so, no problem; if not, mark the
+			 * column as having a bogus default.  Below, we will complain if
+			 * the bogus default isn't overridden by the child schema.
+			 */
+			Assert(def->raw_default == NULL);
+			if (def->cooked_default == NULL)
+				def->cooked_default = this_default;
+			else if (!equal(def->cooked_default, this_default))
+			{
+				def->cooked_default = &bogus_marker;
+				have_bogus_defaults = true;
 			}
 		}
 
@@ -2625,7 +2681,6 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 					def->raw_default = newdef->raw_default;
 					def->cooked_default = newdef->cooked_default;
 				}
-
 			}
 			else
 			{
@@ -3729,6 +3784,7 @@ AlterTableGetLockLevel(List *cmds)
 				 * Theoretically, these could be ShareRowExclusiveLock.
 				 */
 			case AT_ColumnDefault:
+			case AT_CookedColumnDefault:
 			case AT_AlterConstraint:
 			case AT_AddIndex:	/* from ADD CONSTRAINT */
 			case AT_AddIndexConstraint:
@@ -3982,6 +4038,13 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 			/* No command-specific prep needed */
 			pass = cmd->def ? AT_PASS_ADD_CONSTR : AT_PASS_DROP;
 			break;
+		case AT_CookedColumnDefault:	/* add a pre-cooked default */
+			/* This is currently used only in CREATE TABLE */
+			/* (so the permission check really isn't necessary) */
+			ATSimplePermissions(rel, ATT_TABLE | ATT_FOREIGN_TABLE);
+			/* This command never recurses */
+			pass = AT_PASS_ADD_CONSTR;
+			break;
 		case AT_AddIdentity:
 			ATSimplePermissions(rel, ATT_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE);
 			/* This command never recurses */
@@ -4174,6 +4237,8 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 		case AT_DisableTrigAll:
 		case AT_DisableTrigUser:
 			ATSimplePermissions(rel, ATT_TABLE | ATT_FOREIGN_TABLE);
+			if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+				ATSimpleRecursion(wqueue, rel, cmd, recurse, lockmode);
 			pass = AT_PASS_MISC;
 			break;
 		case AT_EnableRule:		/* ENABLE/DISABLE RULE variants */
@@ -4315,6 +4380,9 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			break;
 		case AT_ColumnDefault:	/* ALTER COLUMN DEFAULT */
 			address = ATExecColumnDefault(rel, cmd->name, cmd->def, lockmode);
+			break;
+		case AT_CookedColumnDefault:	/* add a pre-cooked default */
+			address = ATExecCookedColumnDefault(rel, cmd->num, cmd->def);
 			break;
 		case AT_AddIdentity:
 			address = ATExecAddIdentity(rel, cmd->name, cmd->def, lockmode);
@@ -5339,14 +5407,10 @@ ATSimpleRecursion(List **wqueue, Relation rel,
 				  AlterTableCmd *cmd, bool recurse, LOCKMODE lockmode)
 {
 	/*
-	 * Propagate to children if desired.  Only plain tables, foreign tables
-	 * and partitioned tables have children, so no need to search for other
-	 * relkinds.
+	 * Propagate to children, if desired and if there are (or might be) any
+	 * children.
 	 */
-	if (recurse &&
-		(rel->rd_rel->relkind == RELKIND_RELATION ||
-		 rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE ||
-		 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE))
+	if (recurse && rel->rd_rel->relhassubclass)
 	{
 		Oid			relid = RelationGetRelid(rel);
 		ListCell   *child;
@@ -6321,6 +6385,41 @@ ATPrepSetNotNull(List **wqueue, Relation rel,
 		return;
 
 	/*
+	 * If the target column is already marked NOT NULL, we can skip recursing
+	 * to children, because their columns should already be marked NOT NULL as
+	 * well.  But there's no point in checking here unless the relation has
+	 * some children; else we can just wait till execution to check.  (If it
+	 * does have children, however, this can save taking per-child locks
+	 * unnecessarily.  This greatly improves concurrency in some parallel
+	 * restore scenarios.)
+	 *
+	 * Unfortunately, we can only apply this optimization to partitioned
+	 * tables, because traditional inheritance doesn't enforce that child
+	 * columns be NOT NULL when their parent is.  (That's a bug that should
+	 * get fixed someday.)
+	 */
+	if (rel->rd_rel->relhassubclass &&
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		HeapTuple	tuple;
+		bool		attnotnull;
+
+		tuple = SearchSysCacheAttName(RelationGetRelid(rel), cmd->name);
+
+		/* Might as well throw the error now, if name is bad */
+		if (!HeapTupleIsValid(tuple))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" of relation \"%s\" does not exist",
+							cmd->name, RelationGetRelationName(rel))));
+
+		attnotnull = ((Form_pg_attribute) GETSTRUCT(tuple))->attnotnull;
+		ReleaseSysCache(tuple);
+		if (attnotnull)
+			return;
+	}
+
+	/*
 	 * If we have ALTER TABLE ONLY ... SET NOT NULL on a partitioned table,
 	 * apply ALTER TABLE ... CHECK NOT NULL to every child.  Otherwise, use
 	 * normal recursion logic.
@@ -6558,6 +6657,35 @@ ATExecColumnDefault(Relation rel, const char *colName,
 		AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
 								  false, true, false, NULL);
 	}
+
+	ObjectAddressSubSet(address, RelationRelationId,
+						RelationGetRelid(rel), attnum);
+	return address;
+}
+
+/*
+ * Add a pre-cooked default expression.
+ *
+ * Return the address of the affected column.
+ */
+static ObjectAddress
+ATExecCookedColumnDefault(Relation rel, AttrNumber attnum,
+						  Node *newDefault)
+{
+	ObjectAddress address;
+
+	/* We assume no checking is required */
+
+	/*
+	 * Remove any old default for the column.  We use RESTRICT here for
+	 * safety, but at present we do not expect anything to depend on the
+	 * default.  (In ordinary cases, there could not be a default in place
+	 * anyway, but it's possible when combining LIKE with inheritance.)
+	 */
+	RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT, false,
+					  true);
+
+	(void) StoreAttrDefault(rel, attnum, newDefault, true, false);
 
 	ObjectAddressSubSet(address, RelationRelationId,
 						RelationGetRelid(rel), attnum);
@@ -12710,6 +12838,10 @@ ATExecSetTableSpaceNoStorage(Relation rel, Oid newTableSpace)
 	/* update the pg_class row */
 	rd_rel->reltablespace = (newTableSpace == MyDatabaseTableSpace) ? InvalidOid : newTableSpace;
 	CatalogTupleUpdate(pg_class, &tuple->t_self, tuple);
+
+	/* Record dependency on tablespace */
+	changeDependencyOnTablespace(RelationRelationId,
+								 reloid, rd_rel->reltablespace);
 
 	InvokeObjectPostAlterHook(RelationRelationId, reloid, 0);
 

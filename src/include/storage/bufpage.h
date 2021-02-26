@@ -411,8 +411,14 @@ do { \
  *		extern declarations
  * ----------------------------------------------------------------
  */
+
+/* flags for PageAddItemExtended() */
 #define PAI_OVERWRITE			(1 << 0)
 #define PAI_IS_HEAP				(1 << 1)
+
+/* flags for PageIsVerifiedExtended() */
+#define PIV_LOG_WARNING			(1 << 0)
+#define PIV_REPORT_STAT			(1 << 1)
 
 #define PageAddItem(page, item, size, offsetNumber, overwrite, is_heap) \
 	PageAddItemExtended(page, item, size, offsetNumber, \
@@ -420,7 +426,8 @@ do { \
 						((is_heap) ? PAI_IS_HEAP : 0))
 
 extern void PageInit(Page page, Size pageSize, Size specialSize);
-extern bool PageIsVerified(Page page, BlockNumber blkno, Page page_encr);
+extern bool PageIsVerified(Page page, BlockNumber blkno);
+extern bool PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags, Page page_encr);
 extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
 										OffsetNumber offsetNumber, int flags);
 extern Page PageGetTempPage(Page page);

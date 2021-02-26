@@ -666,14 +666,16 @@
 
       <row>
        <entry> <literal>!</literal> </entry>
-       <entry>factorial</entry>
+       <entry>factorial
+        (deprecated, use <function>factorial()</function> instead)</entry>
        <entry><literal>5 !</literal></entry>
        <entry><literal>120</literal></entry>
       </row>
 
       <row>
        <entry> <literal>!!</literal> </entry>
-       <entry>factorial (prefix operator)</entry>
+       <entry>factorial as a prefix operator
+        (deprecated, use <function>factorial()</function> instead)</entry>
        <entry><literal>!! 5</literal></entry>
        <entry><literal>120</literal></entry>
       </row>
@@ -854,6 +856,19 @@
        <entry>exponential</entry>
        <entry><literal>exp(1.0)</literal></entry>
        <entry><literal>2.71828182845905</literal></entry>
+      </row>
+
+      <row>
+       <entry>
+        <indexterm>
+         <primary>factorial</primary>
+        </indexterm>
+        <literal><function>factorial(<type>bigint</type>)</function></literal>
+       </entry>
+       <entry><type>numeric</type></entry>
+       <entry>factorial</entry>
+       <entry><literal>factorial(5)</literal></entry>
+       <entry><literal>120</literal></entry>
       </row>
 
       <row>
@@ -5982,7 +5997,7 @@ SELECT regexp_match('abc01234xyz', '(?:(.*?)(\d+)(.*)){1,1}');
 <!-- end re_syntax.n man page -->
 
    <sect3 id="posix-vs-xquery">
-   <title>Differences From XQuery (<literal>LIKE_REGEX</literal>)</title>
+   <title>Differences from XQuery (<literal>LIKE_REGEX</literal>)</title>
 
    <indexterm zone="posix-vs-xquery">
     <primary><literal>LIKE_REGEX</literal></primary>
@@ -6670,10 +6685,19 @@ SELECT regexp_match('abc01234xyz', '(?:(.*?)(\d+)(.*)){1,1}');
      <listitem>
       <para>
        In <function>to_timestamp</function> and <function>to_date</function>,
-       if the year format specification is less than four digits, e.g.
+       if the year format specification is less than four digits, e.g.,
        <literal>YYY</literal>, and the supplied year is less than four digits,
-       the year will be adjusted to be nearest to the year 2020, e.g.
+       the year will be adjusted to be nearest to the year 2020, e.g.,
        <literal>95</literal> becomes 1995.
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       In <function>to_timestamp</function> and <function>to_date</function>,
+       negative years are treated as signifying BC.  If you write both a
+       negative year and an explicit <literal>BC</literal> field, you get AD
+       again.  An input of year zero is treated as 1 BC.
       </para>
      </listitem>
 
@@ -7222,13 +7246,29 @@ SELECT regexp_match('abc01234xyz', '(?:(.*?)(\d+)(.*)){1,1}');
   </para>
 
   <para>
+   In addition, the usual comparison operators shown in
+   <xref linkend="functions-comparison-op-table"/> are available for the
+   date/time types.  Dates and timestamps (with or without time zone) are
+   all comparable, while times (with or without time zone) and intervals
+   can only be compared to other values of the same data type.  When
+   comparing a timestamp without time zone to a timestamp with time zone,
+   the former value is assumed to be given in the time zone specified by
+   the <xref linkend="guc-timezone"/> configuration parameter, and is
+   rotated to UTC for comparison to the latter value (which is already
+   in UTC internally).  Similarly, a date value is assumed to represent
+   midnight in the <varname>TimeZone</varname> zone when comparing it
+   to a timestamp.
+  </para>
+
+  <para>
    All the functions and operators described below that take <type>time</type> or <type>timestamp</type>
    inputs actually come in two variants: one that takes <type>time with time zone</type> or <type>timestamp
    with time zone</type>, and one that takes <type>time without time zone</type> or <type>timestamp without time zone</type>.
    For brevity, these variants are not shown separately.  Also, the
    <literal>+</literal> and <literal>*</literal> operators come in commutative pairs (for
-   example both date + integer and integer + date); we show only one of each
-   such pair.
+   example both <type>date</type> <literal>+</literal> <type>integer</type>
+   and <type>integer</type> <literal>+</literal> <type>date</type>); we show
+   only one of each such pair.
   </para>
 
     <table id="operators-datetime-table">
@@ -8067,9 +8107,11 @@ SELECT EXTRACT(DOY FROM TIMESTAMP '2001-02-16 20:38:40');
       <listitem>
        <para>
         For <type>timestamp with time zone</type> values, the
-        number of seconds since 1970-01-01 00:00:00 UTC (can be negative);
+        number of seconds since 1970-01-01 00:00:00 UTC (negative for
+        timestamps before that);
         for <type>date</type> and <type>timestamp</type> values, the
-        number of seconds since 1970-01-01 00:00:00 local time;
+        nominal number of seconds since 1970-01-01 00:00:00,
+        without regard to timezone or daylight-savings rules;
         for <type>interval</type> values, the total number
         of seconds in the interval
        </para>
@@ -8078,18 +8120,29 @@ SELECT EXTRACT(DOY FROM TIMESTAMP '2001-02-16 20:38:40');
 SELECT EXTRACT(EPOCH FROM TIMESTAMP WITH TIME ZONE '2001-02-16 20:38:40.12-08');
 <lineannotation>Result: </lineannotation><computeroutput>982384720.12</computeroutput>
 
+SELECT EXTRACT(EPOCH FROM TIMESTAMP '2001-02-16 20:38:40.12');
+<lineannotation>Result: </lineannotation><computeroutput>982355920.12</computeroutput>
+
 SELECT EXTRACT(EPOCH FROM INTERVAL '5 days 3 hours');
 <lineannotation>Result: </lineannotation><computeroutput>442800</computeroutput>
 </screen>
 
        <para>
-        You can convert an epoch value back to a time stamp
+        You can convert an epoch value back to a <type>timestamp with time zone</type>
         with <function>to_timestamp</function>:
        </para>
 <screen>
 SELECT to_timestamp(982384720.12);
 <lineannotation>Result: </lineannotation><computeroutput>2001-02-17 04:38:40.12+00</computeroutput>
 </screen>
+
+       <para>
+        Beware that applying <function>to_timestamp</function> to an epoch
+        extracted from a <type>date</type> or <type>timestamp</type> value
+        could produce a misleading result: the result will effectively
+        assume that the original value had been given in UTC, which might
+        not be the case.
+       </para>
       </listitem>
      </varlistentry>
 
@@ -8703,20 +8756,22 @@ now()
 <programlisting>
 SELECT CURRENT_TIMESTAMP;
 SELECT now();
-SELECT TIMESTAMP 'now';  -- incorrect for use with DEFAULT
+SELECT TIMESTAMP 'now';  -- but see tip below
 </programlisting>
    </para>
 
     <tip>
      <para>
-      You do not want to use the third form when specifying a <literal>DEFAULT</literal>
-      clause while creating a table.  The system will convert <literal>now</literal>
+      Do not use the third form when specifying a value to be evaluated later,
+      for example in a <literal>DEFAULT</literal> clause for a table column.
+      The system will convert <literal>now</literal>
       to a <type>timestamp</type> as soon as the constant is parsed, so that when
       the default value is needed,
       the time of the table creation would be used!  The first two
       forms will not be evaluated until the default value is used,
       because they are function calls.  Thus they will give the desired
       behavior of defaulting to the time of row insertion.
+      (See also <xref linkend="datatype-datetime-special-values"/>.)
      </para>
     </tip>
   </sect2>
@@ -10158,7 +10213,7 @@ CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple
           <literal>"string"</literal> (to include all string values), <literal>"numeric"</literal> (to include all numeric values in the string format),
           <literal>"boolean"</literal> (to include all Boolean values in the string format <literal>"true"</literal>/<literal>"false"</literal>),
           <literal>"key"</literal> (to include all keys) or <literal>"all"</literal> (to include all above). These values
-          can be combined together to include, e.g. all string and numeric values.
+          can be combined together to include, e.g., all string and numeric values.
         </entry>
         <entry><literal>json_to_tsvector('english', '{"a": "The Fat Rats", "b": 123}'::json, '["string", "numeric"]')</literal></entry>
         <entry><literal>'123':5 'fat':2 'rat':3</literal></entry>
@@ -11899,10 +11954,13 @@ table2-mapping
 
   <note>
    <para>
-    The <literal>||</literal> operator concatenates the elements at the top level of
-    each of its operands. It does not operate recursively. For example, if
-    both operands are objects with a common key field name, the value of the
-    field in the result will just be the value from the right hand operand.
+    The <literal>||</literal> operator concatenates two JSON objects by
+    generating an object containing the union of their keys, taking the
+    second object's value when there are duplicate keys.  All other cases
+    produce a JSON array: first, any non-array input is converted into a
+    single-element array, and then the two arrays are concatenated.
+    It does not operate recursively; only the top-level array or object
+    structure is merged.
    </para>
   </note>
 
@@ -13091,6 +13149,24 @@ table2-mapping
 </programlisting>
    </para>
 
+   <para>
+    The <literal>.**</literal> accessor can lead to surprising results
+    when using the lax mode. For instance, the following query selects every
+    <literal>HR</literal> value twice:
+<programlisting>
+lax $.**.HR
+</programlisting>
+    This happens because the <literal>.**</literal> accessor selects both
+    the <literal>segments</literal> array and each of its elements, while
+    the <literal>.HR</literal> accessor automatically unwraps arrays when
+    using the lax mode. To avoid surprising results, we recommend using
+    the <literal>.**</literal> accessor only in the strict mode. The
+    following query selects each <literal>HR</literal> value just once:
+<programlisting>
+strict $.**.HR
+</programlisting>
+   </para>
+
    </sect3>
 
    <sect3 id="jsonpath-regular-expressions">
@@ -13884,6 +13960,12 @@ SELECT COALESCE(description, short_description, '(none)') ...
   </para>
 
    <para>
+    The arguments must all be convertible to a common data type, which
+    will be the type of the result (see
+    <xref linkend="typeconv-union-case"/> for details).
+   </para>
+
+   <para>
     Like a <token>CASE</token> expression, <function>COALESCE</function> only
     evaluates the arguments that are needed to determine the result;
     that is, arguments to the right of the first non-null argument are
@@ -13913,11 +13995,28 @@ SELECT COALESCE(description, short_description, '(none)') ...
 <programlisting>
 SELECT NULLIF(value, '(none)') ...
 </programlisting>
-  </para>
-  <para>
    In this example, if <literal>value</literal> is <literal>(none)</literal>,
    null is returned, otherwise the value of <literal>value</literal>
    is returned.
+  </para>
+
+  <para>
+   The two arguments must be of comparable types.
+   To be specific, they are compared exactly as if you had
+   written <literal><replaceable>value1</replaceable>
+   = <replaceable>value2</replaceable></literal>, so there must be a
+   suitable <literal>=</literal> operator available.
+  </para>
+
+  <para>
+   The result has the same type as the first argument &mdash; but there is
+   a subtlety.  What is actually returned is the first argument of the
+   implied <literal>=</literal> operator, and in some cases that will have
+   been promoted to match the second argument's type.  For
+   example, <literal>NULLIF(1, 2.2)</literal> yields <type>numeric</type>,
+   because there is no <type>integer</type> <literal>=</literal>
+   <type>numeric</type> operator,
+   only <type>numeric</type> <literal>=</literal> <type>numeric</type>.
   </para>
 
   </sect2>
@@ -22359,7 +22458,7 @@ FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
        <row>
         <entry><literal>objsubid</literal></entry>
         <entry><type>integer</type></entry>
-        <entry>Sub-object ID (e.g. attribute number for a column)</entry>
+        <entry>Sub-object ID (e.g., attribute number for a column)</entry>
        </row>
        <row>
         <entry><literal>command_tag</literal></entry>
@@ -22446,7 +22545,7 @@ FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
        <row>
         <entry><literal>objsubid</literal></entry>
         <entry><type>integer</type></entry>
-        <entry>Sub-object ID (e.g. attribute number for a column)</entry>
+        <entry>Sub-object ID (e.g., attribute number for a column)</entry>
        </row>
        <row>
         <entry><literal>original</literal></entry>
@@ -22539,7 +22638,7 @@ BEGIN
                      obj.object_name,
                      obj.object_identity;
     END LOOP;
-END
+END;
 $$;
 CREATE EVENT TRIGGER test_event_trigger_for_drops
    ON sql_drop

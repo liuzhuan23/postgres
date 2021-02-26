@@ -354,7 +354,9 @@ RelationCopyStorage(SMgrRelation src, SMgrRelation dst,
 			page_encr = buf_read;
 		}
 
-		if (!PageIsVerified(page, blkno, page_encr))
+		if (!PageIsVerifiedExtended(page, blkno,
+									PIV_LOG_WARNING | PIV_REPORT_STAT,
+									page_encr))
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("invalid page in block %u of relation %s",

@@ -1370,7 +1370,7 @@
       <entry><type>bool</type></entry>
       <entry>
        Role can log in. That is, this role can be given as the initial
-       session authorization identifier
+       session authorization identifier.
       </entry>
      </row>
 
@@ -6175,10 +6175,21 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       </para>
      </listitem>
     </varlistentry>
+
+    <varlistentry>
+     <term><symbol>SHARED_DEPENDENCY_TABLESPACE</symbol> (<literal>t</literal>)</term>
+     <listitem>
+      <para>
+       The referenced object (which must be a tablespace) is mentioned as
+       the tablespace for a relation that doesn't have storage.
+      </para>
+     </listitem>
+    </varlistentry>
    </variablelist>
 
    Other dependency flavors might be needed in future.  Note in particular
-   that the current definition only supports roles as referenced objects.
+   that the current definition only supports roles and tablespaces as referenced
+   objects.
   </para>
 
  </sect1>
@@ -9095,7 +9106,8 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
    and general database objects (identified by class OID and object OID,
    in the same way as in <structname>pg_description</structname> or
    <structname>pg_depend</structname>).  Also, the right to extend a
-   relation is represented as a separate lockable object.
+   relation is represented as a separate lockable object, as is the right to
+   update <structname>pg_database</structname>.<structfield>datfrozenxid</structfield>.
    Also, <quote>advisory</quote> locks can be taken on numbers that have
    user-defined meanings.
   </para>
@@ -9121,6 +9133,7 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        Type of the lockable object:
        <literal>relation</literal>,
        <literal>extend</literal>,
+       <literal>frozenid</literal>,
        <literal>page</literal>,
        <literal>tuple</literal>,
        <literal>transactionid</literal>,
