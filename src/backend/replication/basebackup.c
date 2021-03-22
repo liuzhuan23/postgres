@@ -378,6 +378,7 @@ perform_base_backup(basebackup_options *opt)
 				if (decrypt && data_encrypted)
 				{
 					ControlFileData	*cfile;
+					char	*cfile_raw;
 					bool	crc_ok;
 
 					cfile = get_controlfile(".", &crc_ok);
@@ -390,11 +391,14 @@ perform_base_backup(basebackup_options *opt)
 								offsetof(ControlFileData, crc));
 					FIN_CRC32C(cfile->crc);
 
+					cfile_raw = (char *) palloc0(PG_CONTROL_FILE_SIZE);
+					memcpy(cfile_raw, cfile, sizeof(ControlFileData));
 					sendFileWithContentGeneric(XLOG_CONTROL_FILE,
-											   (char *) cfile,
-											   statbuf.st_size,
+											   (char *) cfile_raw,
+											   PG_CONTROL_FILE_SIZE,
 											   &statbuf);
 					pfree(cfile);
+					pfree(cfile_raw);
 				}
 				else
 					sendFile(XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf,
