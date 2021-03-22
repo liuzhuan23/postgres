@@ -582,8 +582,8 @@ MAKEFLAGS=
 # Identity of this package.
 PACKAGE_NAME='PostgreSQL-TDE'
 PACKAGE_TARNAME='postgresql-tde'
-PACKAGE_VERSION='13.2_TDE_1.0beta1'
-PACKAGE_STRING='PostgreSQL 13.2 TDE 1.0beta1'
+PACKAGE_VERSION='13.2_TDE_1.0'
+PACKAGE_STRING='PostgreSQL 13.2 TDE 1.0'
 PACKAGE_BUGREPORT='bugs-tde@cybertec.at'
 PACKAGE_URL='https://www.cybertec.at/'
 
