@@ -54,21 +54,51 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 
-void
-SerializeUndoData(StringInfo buf, UndoNode *undo_node)
+/*
+ * Compute the size we need in the undo log.
+ */
+Size
+GetUndoDataSize(UndoRecData *rdata)
 {
-	Size len_total;
+	UndoRecData     *rdata_tmp = rdata;
+	Size len_total = 0;
 
-	len_total = undo_node->length +
-		sizeof(((UndoNode *) NULL)->length) +
+	while (rdata_tmp)
+	{
+		len_total += rdata_tmp->len;
+		rdata_tmp = rdata_tmp->next;
+	}
+
+	len_total += sizeof(((UndoNode *) NULL)->length) +
 		sizeof(((UndoNode *) NULL)->rmid) +
 		sizeof(((UndoNode *) NULL)->type);
 
+	return len_total;
+}
+
+/*
+ * Serialize the undo records for which memory has already been allocated,
+ * typically by PrepareXactUndoData().
+ */
+void
+SerializeUndoData(StringInfo buf, RmgrId rmid, uint8 rec_type,
+				  UndoRecData *rdata)
+{
+	Size	len_total = GetUndoDataSize(rdata);
+
+
 	/* TODO: replace with actual serialization */
-	appendBinaryStringInfo(buf, (char *) &len_total, sizeof(len_total));
-	appendBinaryStringInfo(buf, (char *) &undo_node->rmid, sizeof(((UndoNode *) NULL)->rmid));
-	appendBinaryStringInfo(buf, (char *) &undo_node->type, sizeof(((UndoNode *) NULL)->type));
-	appendBinaryStringInfo(buf, undo_node->data, undo_node->length);
+	appendBinaryStringInfoNoExtend(buf, (char *) &len_total,
+								   sizeof(((UndoNode *) NULL)->length));
+	appendBinaryStringInfoNoExtend(buf, (char *) &rmid,
+								   sizeof(((UndoNode *) NULL)->rmid));
+	appendBinaryStringInfoNoExtend(buf, (char *) &rec_type,
+								   sizeof(((UndoNode *) NULL)->type));
+	while (rdata)
+	{
+		appendBinaryStringInfoNoExtend(buf, rdata->data, rdata->len);
+		rdata = rdata->next;
+	}
 }
 
 /* Per-subtransaction backend-private undo state. */
@@ -130,7 +160,7 @@ XactHasUndo(void)
  */
 UndoRecPtr
 PrepareXactUndoData(XactUndoContext *ctx, char persistence,
-					UndoNode *undo_node)
+					Size record_size)
 {
 	int			nestingLevel = GetCurrentTransactionNestLevel();
 	UndoPersistenceLevel plevel = GetUndoPersistenceLevel(persistence);
@@ -138,7 +168,6 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	UndoRecPtr	result;
 	UndoRecPtr *sub_start_location;
 	UndoRecordSet *urs;
-	UndoRecordSize size;
 
 	/* We should be connected to a database. */
 	Assert(OidIsValid(MyDatabaseId));
@@ -189,16 +218,24 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	/* Remember persistence level. */
 	ctx->plevel = plevel;
 
-	/* Prepare serialized undo data. */
 	initStringInfo(&ctx->data);
-	SerializeUndoData(&ctx->data, undo_node);
-	size = ctx->data.len;
+
+	/*
+	 * Allocate the memory anyway because we cannot do so later in the
+	 * critical section. enlargeStringInfo() is not perfect for this because
+	 * it can allocate a lot more more than we need.
+	 *
+	 * Add one extra byte for the NULL terminating character as
+	 * enlargeStringInfo() would do.
+	 */
+	ctx->data.maxlen = record_size + 1;
+	ctx->data.data = (char *) repalloc(ctx->data.data, ctx->data.maxlen);
 
 	/*
 	 * Find sufficient space for this undo insertion and lock the necessary
 	 * buffers.
 	 */
-	result = UndoPrepareToInsert(urs, size);
+	result = UndoPrepareToInsert(urs, record_size);
 
 	/*
 	 * If this is the first undo for this persistence level in this
@@ -211,21 +248,39 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	/*
 	 * Remember this as the last end location.
 	 */
-	XactUndo.end_location[plevel] = UndoRecPtrPlusUsableBytes(result, size);
+	XactUndo.end_location[plevel] = UndoRecPtrPlusUsableBytes(result,
+															  record_size);
 
 	return result;
 }
 
 /*
  * Insert transactional undo data.
+ *
+ * reg_bufs tells whether the undo buffers should be registered for
+ * XLogInsert(). Caller might want to do it later if XLogBeginInsert() hasn't
+ * been called yet.
  */
 void
-InsertXactUndoData(XactUndoContext *ctx, uint8 first_block_id)
+InsertXactUndoData(XactUndoContext *ctx, uint8 first_block_id, bool reg_bufs)
 {
 	UndoRecordSet *urs = XactUndo.record_set[ctx->plevel];
 
 	Assert(urs != NULL);
 	UndoInsert(urs, ctx->data.data, ctx->data.len);
+	if (reg_bufs)
+		UndoXLogRegisterBuffers(urs, first_block_id);
+}
+
+/*
+ * Register the undo buffers if not done by InsertXactUndoData().
+ */
+void
+RegisterXactUndoBuffers(XactUndoContext *ctx, uint8 first_block_id)
+{
+	UndoRecordSet *urs = XactUndo.record_set[ctx->plevel];
+
+	Assert(urs != NULL);
 	UndoXLogRegisterBuffers(urs, first_block_id);
 }
 
@@ -259,15 +314,20 @@ CleanupXactUndoInsertion(XactUndoContext *ctx)
  * XXX: Should this live here? Or somewhere around the serialization code?
  */
 UndoRecPtr
-XactUndoReplay(XLogReaderState *xlog_record, UndoNode *undo_node)
+XactUndoReplay(XLogReaderState *xlog_record, RmgrId rmid, uint8 rec_type,
+			   void *rec_data, size_t rec_size)
 {
-	StringInfoData data;
+	XactUndoContext ctx;
+	UndoRecData	rdata;
 
 	/* Prepare serialized undo data. */
-	initStringInfo(&data);
-	SerializeUndoData(&data, undo_node);
+	rdata.data = rec_data;
+	rdata.len = rec_size;
+	rdata.next = NULL;
+	initStringInfo(&ctx.data);
+	SerializeUndoData(&ctx.data, rmid, rec_type, &rdata);
 
-	return UndoReplay(xlog_record, data.data, data.len);
+	return UndoReplay(xlog_record, ctx.data.data, ctx.data.len);
 }
 
 /*
@@ -280,27 +340,44 @@ PerformUndoActionsRange(UndoRecPtr begin, UndoRecPtr end,
 						char relpersistence, int nestingLevel)
 {
 	UndoRSReaderState r;
+	Bitmapset	*rmids_used = NULL;
+	int	rmid;
+	const RmgrData *rmgr;
+	XactUndoRecordSetHeader	xact_hdr;
 
-	/*
-	 * FIXME: provide correct persistence level - also
-	 * UndoPersistenceLevelString
-	 */
 	UndoRSReaderInit(&r, begin, end, relpersistence, nestingLevel == 1);
+
+	UndoRSReadXactHeader(&r, &xact_hdr);
 
 	while (UndoRSReaderReadOneBackward(&r))
 	{
-		const RmgrData *rmgr;
-
 		rmgr = &RmgrTable[r.node.n.rmid];
 
 		/*
 		 * Apply the undo record.
 		 */
 		if (rmgr->rm_undo)
-			rmgr->rm_undo(&r.node);
+		{
+			rmgr->rm_undo(&r.node, xact_hdr.fxid);
+
+			rmids_used = bms_add_member(rmids_used, r.node.n.rmid);
+		}
 	}
 
 	UndoRSReaderClose(&r);
+
+	/*
+	 * Pass NULL to rm_undo() of each RMGR used above, to indicate that the
+	 * processing is done. For the RMGRs that process the records in batches
+	 * this is a message that the last batch should be processed now.
+	 */
+	while ((rmid = bms_first_member(rmids_used)) >= 0)
+	{
+		rmgr = &RmgrTable[rmid];
+		rmgr->rm_undo(NULL, xact_hdr.fxid);
+	}
+
+	bms_free(rmids_used);
 }
 
 /*

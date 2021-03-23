@@ -316,6 +316,30 @@ AdvanceNextFullTransactionIdPastXid(TransactionId xid)
 }
 
 /*
+ * ZBORKED: Blindly written - and should be removed ASAP
+ */
+uint32
+GetEpochForXid(TransactionId xid)
+{
+	FullTransactionId next_fxid;
+	TransactionId next_xid;
+	uint32		epoch;
+
+	next_fxid = ReadNextFullTransactionId();
+	next_xid = XidFromFullTransactionId(next_fxid);
+	epoch = EpochFromFullTransactionId(next_fxid);
+
+	/*
+	 * If xid is numerically bigger than next_xid, it has to be from the last
+	 * epoch.
+	 */
+	if (unlikely(xid > next_xid))
+		epoch--;
+
+	return epoch;
+}
+
+/*
  * Advance the cluster-wide value for the oldest valid clog entry.
  *
  * We must acquire XactTruncationLock to advance the oldestClogXid. It's not

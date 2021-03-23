@@ -39,8 +39,6 @@
 typedef struct BulkInsertStateData *BulkInsertState;
 struct TupleTableSlot;
 
-#define MaxLockTupleMode	LockTupleExclusive
-
 /*
  * Descriptor for heap table scans.
  */
@@ -205,6 +203,9 @@ extern bool HeapTupleHeaderIsOnlyLocked(HeapTupleHeader tuple);
 extern bool XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot);
 extern bool HeapTupleIsSurelyDead(HeapTuple htup,
 								  struct GlobalVisState *vistest);
+extern bool HeapTupleHasSerializableConflictOut(bool visible, HeapTuple tuple,
+												Buffer buffer,
+												TransactionId *xid);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation

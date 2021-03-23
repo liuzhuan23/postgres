@@ -18,6 +18,7 @@
 #error "lock.h may not be included from frontend code"
 #endif
 
+#include "nodes/lockoptions.h"
 #include "storage/backendid.h"
 #include "storage/lockdefs.h"
 #include "storage/lwlock.h"
@@ -145,6 +146,7 @@ typedef enum LockTagType
 	LOCKTAG_TUPLE,				/* one physical tuple */
 	LOCKTAG_TRANSACTION,		/* transaction (for waiting for xact done) */
 	LOCKTAG_VIRTUALTRANSACTION, /* virtual transaction (ditto) */
+	LOCKTAG_SUBTRANSACTION,		/* virtual transaction (ditto) */
 	LOCKTAG_SPECULATIVE_TOKEN,	/* speculative insertion Xid and token */
 	LOCKTAG_OBJECT,				/* non-relation database object */
 	LOCKTAG_USERLOCK,			/* reserved for old contrib/userlock code */
@@ -242,6 +244,14 @@ typedef struct LOCKTAG
 	 (locktag).locktag_type = LOCKTAG_VIRTUALTRANSACTION, \
 	 (locktag).locktag_lockmethodid = DEFAULT_LOCKMETHOD)
 
+#define SET_LOCKTAG_SUBTRANSACTION(locktag,xid,subxid) \
+	((locktag).locktag_field1 = (xid), \
+	 (locktag).locktag_field2 = (subxid), \
+	 (locktag).locktag_field3 = 0, \
+	 (locktag).locktag_field4 = 0, \
+	 (locktag).locktag_type = LOCKTAG_SUBTRANSACTION, \
+	 (locktag).locktag_lockmethodid = DEFAULT_LOCKMETHOD)
+
 /*
  * ID info for a speculative insert is TRANSACTION info +
  * its speculative insert counter.
@@ -277,6 +287,12 @@ typedef struct LOCKTAG
 	 (locktag).locktag_type = LOCKTAG_ADVISORY, \
 	 (locktag).locktag_lockmethodid = USER_LOCKMETHOD)
 
+struct LockExtraInfo
+{
+	LOCKMODE	hwlock;
+	int			lockstatus;
+	int			updstatus;
+};
 
 /*
  * Per-locked-object lock information:
@@ -601,6 +617,10 @@ extern void RememberSimpleDeadLock(PGPROC *proc1,
 extern void InitDeadLockChecking(void);
 
 extern int	LockWaiterCount(const LOCKTAG *locktag);
+extern LOCKMODE GetHWLockModeFromMode(LockTupleMode mode);
+
+#define UnlockTupleTuplock(rel, tup, mode) \
+	UnlockTuple((rel), (tup), GetHWLockModeFromMode(mode))
 
 #ifdef LOCK_DEBUG
 extern void DumpLocks(PGPROC *proc);

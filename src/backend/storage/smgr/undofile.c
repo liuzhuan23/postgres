@@ -142,6 +142,13 @@ undofile_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 											 BLCKSZ * (blocknum + 1) - 1)))
 		return false;
 
+	/*
+	 * A.H. At least in theory it seems possible that the undo log segment
+	 * gets discarded and even recycled and overwritten with new data before
+	 * we can read the page from it. This should cause ERROR rather than
+	 * reading the wrong data, but it might still be worth checking. Should we
+	 * use the slot's file_lock to avoid that problem?
+	 */
 	file = undofile_get_segment_file(reln, blocknum / UNDOSEG_SIZE);
 	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) UNDOSEG_SIZE));
 	Assert(seekpos < (off_t) BLCKSZ * UNDOSEG_SIZE);

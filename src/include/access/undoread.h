@@ -16,7 +16,6 @@
 
 #include "access/undodefs.h"
 #include "access/undorecordset.h"
-#include "access/xactundo.h"
 #include "lib/stringinfo.h"
 #include "storage/buf.h"
 
@@ -73,6 +72,9 @@ extern void UndoRSReaderInit(UndoRSReaderState *r,
 extern bool UndoRSReaderReadOneForward(UndoRSReaderState *r,
 									   bool length_only);
 extern bool UndoRSReaderReadOneBackward(UndoRSReaderState *r);
+extern void UndoRSReadXactHeader(UndoRSReaderState *r, XactUndoRecordSetHeader *hdr);
 extern void UndoRSReaderClose(UndoRSReaderState *r);
+extern void UndoRSReaderInitRandom(UndoRSReaderState *r, char relpersistence);
+extern UndoNode *UndoReadOneRecord(UndoRSReaderState *r, UndoRecPtr urp);
 
 #endif							/* UNDOREAD_H */

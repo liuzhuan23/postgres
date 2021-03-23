@@ -394,7 +394,7 @@ UndoMarkClosed(UndoRecordSet *urs)
 /*
  * Prepare to set a boolean flag of the chunk (type) header.
  *
- * *buf receives the buffer containing the flag of.
+ * *buf receives the buffer containing the flag.
  */
 void
 UndoPrepareToSetChunkHeaderFlag(UndoRecPtr chunk_hdr, uint16 off,
@@ -796,10 +796,12 @@ UndoInsert(UndoRecordSet *urs,
 	/*
 	 * The first buffer of the temporary set needs to be initialized because
 	 * the previous owner (backend) of the underlying log might have dropped
-	 * the corresponding local buffer w/o writing it to disk. The
+	 * the corresponding local buffer w/o writing it initialized to disk. The
 	 * initialization should not make any harm to that previous owner because
-	 * it shouldn't be using it anymore (and there's nothing like background
-	 * UNDO for temporary relations).
+	 * its transaction should either have been rolled back or committed. Even
+	 * if it was committed, the undo log should not be needed for visibility
+	 * purposes because other transactions do not see the temporary relations
+	 * anyway.
 	 */
 	if (urs->persistence == RELPERSISTENCE_TEMP &&
 		buffer_index == 0 && first_insert)
@@ -837,7 +839,7 @@ UndoInsert(UndoRecordSet *urs,
 			{
 				ubuf->needs_init = true;
 				ubuf->init_page_offset = init_page_offset;
-				/* Do not force initialization of the same page again. */
+				/* Do not force initialization of the following pages. */
 				init_page_offset = 0;
 			}
 			init_if_needed(ubuf);
@@ -902,11 +904,6 @@ UndoInsert(UndoRecordSet *urs,
 
 		if (buffer_index >= urs->nbuffers)
 			elog(ERROR, "ran out of buffers while inserting undo record");
-		if (init_page_offset > 0)
-		{
-			ubuf->needs_init = true;
-			ubuf->init_page_offset = init_page_offset;
-		}
 		init_if_needed(ubuf);
 		if (URSNeedsWAL(urs))
 			register_insert_page_offset_if_needed(ubuf, page_offset);
@@ -971,11 +968,13 @@ UndoSetChunkHeaderFlag(UndoRecPtr chunk_hdr, uint16 off, Buffer buf,
 	UndoRecordSetXLogBufData bufdata;
 	UndoLogOffset	flag_off;
 	bool	new_value = true;
+	XLogRecPtr	lsn;
 
 	/* Find out where in the log is the flag stored ... */
 	flag_off = UndoLogOffsetPlusUsableBytes(chunk_hdr_off, off);
 	/* ... and record the position on the page. */
 	memset(&bufdata, 0, sizeof(UndoRecordSetXLogBufData));
+	bufdata.flags = URS_XLOG_SET_FLAG;
 	bufdata.flag_offset = UndoRecPtrGetPageOffset(flag_off);
 
 	UndoPageOverwrite(BufferGetPage(buf),
@@ -986,6 +985,16 @@ UndoSetChunkHeaderFlag(UndoRecPtr chunk_hdr, uint16 off, Buffer buf,
 	MarkBufferDirty(buf);
 	XLogRegisterBuffer(first_block_id, buf, REGBUF_KEEP_DATA);
 	EncodeUndoRecordSetXLogBufData(&bufdata, first_block_id);
+
+	/*
+	 * Attach the update to a dummy WAL record.
+	 *
+	 * TODO Either introduce a new kind of WAL record for this purpose or
+	 * rename XLOG_UNDOLOG_CLOSE_URS so it matches all the current use cases.
+	 */
+	lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_CLOSE_URS);
+
+	PageSetLSN(BufferGetPage(buf), lsn);
 }
 
 /*
@@ -1108,8 +1117,7 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 				if (!record_data)
 					elog(ERROR, "undo buf data contained an insert page offset, but no record was passed to UndoReplay()");
 				/* Update the insertion point on the page. */
-				if (!skip)
-					uph->ud_insertion_point = bufdata->insert_page_offset;
+				uph->ud_insertion_point = bufdata->insert_page_offset;
 
 				/*
 				 * Also update it in shared memory, though this isn't really
@@ -1148,7 +1156,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 			else if (header_more)
 			{
 				if (skip)
-					header_offset += UndoPageSkipHeader(SizeOfUndoPageHeaderData,
+					header_offset += UndoPageSkipHeader(page,
+														SizeOfUndoPageHeaderData,
 														header_offset,
 														type_header_size);
 				else
@@ -1191,7 +1200,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 			else if (record_more)
 			{
 				if (skip)
-					record_offset += UndoPageSkipRecord(SizeOfUndoPageHeaderData,
+					record_offset += UndoPageSkipRecord(page,
+														SizeOfUndoPageHeaderData,
 														record_offset,
 														record_size);
 				else
@@ -1228,11 +1238,14 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 			/* Check if we need to write a chunk header. */
 			if (bufdata->flags & URS_XLOG_CREATE)
 			{
+				type_header_size = bufdata->type_header_size;
+
 				if (skip)
 				{
-					header_offset += UndoPageSkipHeader(SizeOfUndoPageHeaderData,
-														header_offset,
-														type_header_size);
+					header_offset = UndoPageSkipHeader(page,
+													   uph->ud_insertion_point,
+													   header_offset,
+													   type_header_size);
 				}
 				else
 				{
@@ -1242,7 +1255,6 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 					chunk_header.type = bufdata->urs_type;
 
 					type_header = bufdata->type_header;
-					type_header_size = bufdata->type_header_size;
 					header_offset = UndoPageInsertHeader(page,
 														 uph->ud_insertion_point,
 														 0,
@@ -1270,7 +1282,8 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 
 				if (skip)
 				{
-					header_offset += UndoPageSkipHeader(SizeOfUndoPageHeaderData,
+					header_offset += UndoPageSkipHeader(page,
+														uph->ud_insertion_point,
 														header_offset,
 														type_header_size);
 				}
@@ -1303,9 +1316,17 @@ UndoReplay(XLogReaderState *xlog_record, void *record_data, size_t record_size)
 			/* Check if we need to insert the caller's record data. */
 			if (record_data)
 			{
+				/*
+				 * Remember the insert pointer, to be returned to the caller.
+				 */
+				Assert(result == InvalidUndoRecPtr);
+				result = MakeUndoRecPtr(slot->logno,
+										BLCKSZ * block->blkno + uph->ud_insertion_point);
+
 				if (skip)
 				{
-					record_offset += UndoPageSkipRecord(SizeOfUndoPageHeaderData,
+					record_offset += UndoPageSkipRecord(page,
+														uph->ud_insertion_point,
 														record_offset,
 														record_size);
 				}
@@ -2309,23 +2330,30 @@ UndoSetFlag(UndoRecPtr last_chunk, uint16 off, char persistence)
 {
 	while (last_chunk != InvalidUndoRecPtr)
 	{
+		Buffer		buffers[2];
 		Buffer		buffer;
 		UndoRecordSetChunkHeader hdr;
 		UndoRecPtr	previous_chunk;
-		XLogRecPtr	lsn;
 
 		/*
 		 * Read the chunk header in order to retrieve location of the previous
-		 * chunk.
+		 * chunk. Two buffers are needed in case the header crosses page
+		 * boundary.
 		 */
+		buffers[1] = InvalidBuffer;
 		read_undo_header((void *) &hdr,
 						 SizeOfUndoRecordSetChunkHeader,
 						 last_chunk,
-						 &buffer, 1);
-		release_buffers(&buffer, 1);
+						 buffers, 2);
+
+		/* Unlock the buffer(s) but keep pin. */
+		LockBuffer(buffers[0], BUFFER_LOCK_UNLOCK);
+		if (buffers[1] != InvalidBuffer)
+			LockBuffer(buffers[1], BUFFER_LOCK_UNLOCK);
+
 		previous_chunk = hdr.previous_chunk;
 
-		/* Find and lock the buffers to be modified. */
+		/* Find and lock the buffer to be modified. */
 		UndoPrepareToSetChunkHeaderFlag(last_chunk, off, persistence,
 										&buffer);
 
@@ -2334,24 +2362,20 @@ UndoSetFlag(UndoRecPtr last_chunk, uint16 off, char persistence)
 		XLogBeginInsert();
 
 		/*
-		 * Store the new value of the "discarded" field in the chunk header.
+		 * Store the new value of the "discarded" field in the chunk header. A
+		 * separate buffer variable is used because we don't know which buffer
+		 * of 'buffers' we'll modify.
 		 */
 		UndoSetChunkHeaderFlag(last_chunk, off, buffer, 0);
-
-		/*
-		 * Attach the update to a dummy WAL record.
-		 *
-		 * TODO Either introduce a new kind of WAL record for this purpose or
-		 * rename XLOG_UNDOLOG_CLOSE_URS so it matches all the current use
-		 * cases.
-		 */
-		lsn = XLogInsert(RM_UNDOLOG_ID, XLOG_UNDOLOG_CLOSE_URS);
-
-		PageSetLSN(BufferGetPage(buffer), lsn);
 
 		END_CRIT_SECTION();
 
 		UnlockReleaseBuffer(buffer);
+
+		/* Discard the pins we have from the reader. */
+		ReleaseBuffer(buffers[0]);
+		if (buffers[1] != InvalidBuffer)
+			ReleaseBuffer(buffers[1]);
 
 		/* Go for the chunk ahead of the current one. */
 		last_chunk = previous_chunk;
@@ -2544,19 +2568,14 @@ AdvanceOldestXidHavingUndo(void)
 				(errmsg("cannot advance oldestXidHavingUndo during recovery")));
 
 	/*
-	 * We need to keep the undo log for transactions which - although possibly
-	 * committed - may still be considered by other transactions as running.
-	 * Therefore we can compute the initial value in the same way as if we
-	 * were preparing for VACUUM (i.e. tuples deleted by a transaction must
-	 * stay available to all transactions that consider the deleting
-	 * transaction as running). The running lazy VACUUM processes do not
-	 * affect this value (see procarray.c for explanation), which is ok for us
-	 * because VACUUM does not produce any undo. (Conversely, VACUUM itself
-	 * does not need undo log of other backends. If it did, we couldn't
-	 * determine the horizon here and the VACUUM processes would have to get
-	 * involved in the computation.)
+	 * Although VACUUM does not need the undo of other backends for visibility
+	 * checks (if it did, we'd have to track the "oldest XID having undo" in
+	 * the way we track "frozen XID" for tables and databases), it does
+	 * produce undo records (UNDO_ZHEAP_ITEMID_UNUSED). Therefore we must not
+	 * ignore lazy VACUUM processes when determining the XID limit for undo
+	 * removal.
 	 */
-	oldestXmin = GetOldestNonRemovableTransactionId(NULL);
+	oldestXmin = GetOldestTransactionIdConsideredRunning();
 
 	Assert(TransactionIdIsNormal(oldestXmin));
 
@@ -2833,13 +2852,11 @@ typedef struct UndoScanState
  * Parse the next undo log page and return true, or return false if suitable
  * page could not be found. Stop at when state->end or log end is reached.
  *
- * Parsing runs in the memory context passed by the
- * caller.
+ * Parsing runs in the memory context passed by the caller.
  */
 static bool
 parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 {
-	UndoRecPtr	next_page;
 	Buffer	buffer = InvalidBuffer;
 	MemoryContext oldcontext;
 
@@ -2849,8 +2866,7 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 
 	/* Retrieve the next page. */
 	while (state->cur_page == InvalidUndoRecPtr ||
-		   ((next_page = (state->cur_page + BLCKSZ)) < state->end &&
-			buffer == InvalidBuffer))
+		   (state->cur_page < state->end && buffer == InvalidBuffer))
 	{
 		bool	page_exists;
 		UndoLogOffset	page_start_off, seg_start_off;
@@ -2860,13 +2876,13 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 		/* Invalid cur_page indicates that this is the first call. */
 		if (state->cur_page == InvalidUndoRecPtr)
 		{
-			next_page = state->start - UndoRecPtrGetPageOffset(state->start);
-			if (next_page >= state->end)
+			state->cur_page = state->start - UndoRecPtrGetPageOffset(state->start);
+			if (state->cur_page >= state->end)
 				return false;
 		}
 
-		logno = UndoRecPtrGetLogNo(next_page);
-		page_start_off = UndoRecPtrGetOffset(next_page);
+		logno = UndoRecPtrGetLogNo(state->cur_page);
+		page_start_off = UndoRecPtrGetOffset(state->cur_page);
 		seg_start_off = page_start_off - page_start_off % UndoLogSegmentSize;
 
 		/*
@@ -2951,8 +2967,8 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 			RelFileNode rnode;
 			BlockNumber	blockno;
 
-			UndoRecPtrAssignRelFileNode(rnode, next_page);
-			blockno = UndoRecPtrGetOffset(next_page) / BLCKSZ;
+			UndoRecPtrAssignRelFileNode(rnode, state->cur_page);
+			blockno = UndoRecPtrGetOffset(state->cur_page) / BLCKSZ;
 			buffer = ReadBufferWithoutRelcache(SMGR_UNDO,
 											   rnode,
 											   MAIN_FORKNUM,
@@ -2968,8 +2984,6 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 		 */
 		if (buffer == InvalidBuffer && state->found_page)
 			return false;
-
-		state->cur_page = next_page;
 
 		/* Found the page? */
 		if (buffer != InvalidBuffer)
@@ -2992,6 +3006,7 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 	parse_undo_page(&state->parser, BufferGetPage(buffer),
 					UndoRecPtrGetOffset(state->cur_page) / BLCKSZ,
 					&state->seg, records);
+	state->cur_page += BLCKSZ;
 	MemoryContextSwitchTo(oldcontext);
 	UnlockReleaseBuffer(buffer);
 

@@ -79,7 +79,7 @@ typedef struct PendingRelSync
 
 static PendingRelDelete *pendingDeletes = NULL; /* head of linked list */
 
-static void log_undo_smgr_create(UndoNode *undo_node);
+static void log_undo_smgr_create(xu_smgr_create *undo_rec);
 
 HTAB	   *pendingSyncHash = NULL;
 
@@ -162,15 +162,11 @@ RelationCreateStorage(RelFileNode rnode, char relpersistence)
 	if (!IsBootstrapProcessingMode())
 	{
 		xu_smgr_create undo_rec;
-		UndoNode	undo_node;
 
 		undo_rec.rnode = rnode;
 		undo_rec.relpersistence = relpersistence;
-		undo_node.rmid = RM_SMGR_ID;
-		undo_node.type = UNDO_SMGR_CREATE;
-		undo_node.length = sizeof(undo_rec);
-		undo_node.data = (char *) &undo_rec;
-		log_undo_smgr_create(&undo_node);
+
+		log_undo_smgr_create(&undo_rec);
 	}
 
 	srel = smgropen(SMGR_MD, rnode, backend);
@@ -192,23 +188,28 @@ RelationCreateStorage(RelFileNode rnode, char relpersistence)
  * of rollback.
  */
 static void
-log_undo_smgr_create(UndoNode *undo_node)
+log_undo_smgr_create(xu_smgr_create *undo_rec)
 {
 	XactUndoContext undo_context;
+	UndoRecData	rdata;
 	XLogRecPtr	lsn;
-	xu_smgr_create *undo_rec;
 	xl_smgr_precreate xlrec;
 
-	undo_rec = (xu_smgr_create *) undo_node->data;
+	rdata.data = (char *) undo_rec;
+	rdata.len = sizeof(xu_smgr_create);
+	rdata.next = NULL;
 
-	PrepareXactUndoData(&undo_context, undo_rec->relpersistence, undo_node);
+	PrepareXactUndoData(&undo_context, undo_rec->relpersistence,
+						GetUndoDataSize(&rdata));
+	SerializeUndoData(&undo_context.data, RM_SMGR_ID, UNDO_SMGR_CREATE,
+					  &rdata);
 
 	START_CRIT_SECTION();
 
 	XLogBeginInsert();
 
 	/* Insert the UNDO record. */
-	InsertXactUndoData(&undo_context, 0);
+	InsertXactUndoData(&undo_context, 0, true);
 
 	/* Insert XLOG_SMGR_PRECREATE record to WAL. */
 	xlrec.rnode = undo_rec->rnode;
@@ -980,16 +981,12 @@ smgr_redo(XLogReaderState *record)
 	{
 		xl_smgr_precreate *xlrec = (xl_smgr_precreate *) XLogRecGetData(record);
 		xu_smgr_create undo_rec;
-		UndoNode	undo_node;
 
 		undo_rec.rnode = xlrec->rnode;
 		undo_rec.relpersistence = xlrec->relpersistence;
-		undo_node.rmid = RM_SMGR_ID;
-		undo_node.type = UNDO_SMGR_CREATE;
-		undo_node.length = sizeof(undo_rec);
-		undo_node.data = (char *) &undo_rec;
 
-		XactUndoReplay(record, &undo_node);
+		XactUndoReplay(record, RM_SMGR_ID, UNDO_SMGR_CREATE, &undo_rec,
+					   sizeof(undo_rec));
 	}
 	else if (info == XLOG_SMGR_DROP)
 	{
@@ -1093,11 +1090,18 @@ smgr_redo(XLogReaderState *record)
 }
 
 void
-smgr_undo(const WrittenUndoNode *record)
+smgr_undo(const WrittenUndoNode *record, FullTransactionId fxid)
 {
 	xu_smgr_create *undo_rec;
 	SMgrRelation srel;
 	xl_smgr_drop xlrec;
+
+	/*
+	 * The end of transaction or subtransaction is not interesting for
+	 * us. Should we process the records in batches?
+	 */
+	if (record == NULL)
+		return;
 
 	Assert(record->n.rmid == RM_SMGR_ID);
 	/* Currently we only have a single type of SMGR undo record. */

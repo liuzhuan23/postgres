@@ -50,3 +50,7 @@ PG_RMGR(RM_LOGICALMSG_ID, "LogicalMessage", logicalmsg_redo, logicalmsg_desc, lo
 PG_RMGR(RM_UNDOLOG_ID, "UndoLog", undolog_redo, undolog_desc, undolog_identify, NULL, NULL, NULL, NULL, NULL)
 PG_RMGR(RM_FOO_ID, "Foo", foo_redo, foo_desc, foo_identify, NULL, NULL, NULL, NULL, NULL)
 PG_RMGR(RM_UNDOXACTTEST_ID, "UndoXactTest", undoxacttest_redo, undoxacttest_desc, undoxacttest_identify, NULL, NULL, NULL, undoxacttest_undo, undoxacttest_undo_desc)
+PG_RMGR(RM_TPD_ID, "TPD", tpd_redo, tpd_desc, tpd_identify, NULL, NULL, zheap_mask, NULL, NULL)
+PG_RMGR(RM_ZHEAP_ID, "Zheap", zheap_redo, zheap_desc, zheap_identify, NULL, NULL, zheap_mask, zheap_undo, zheap_undo_desc)
+PG_RMGR(RM_ZHEAP2_ID, "Zheap2", zheap2_redo, zheap2_desc, zheap2_identify, NULL, NULL, zheap_mask, NULL, NULL)
+PG_RMGR(RM_ZUNDO_ID, "ZUndo", zundo_redo, zundo_desc, zundo_identify, NULL, NULL, NULL, NULL, NULL)

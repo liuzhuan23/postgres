@@ -16,6 +16,7 @@
 
 #include "access/sdir.h"
 #include "access/skey.h"
+#include "access/tableam.h"
 #include "nodes/tidbitmap.h"
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
@@ -204,6 +205,26 @@ extern TransactionId index_compute_xid_horizon_for_tuples(Relation irel,
 														  Buffer ibuf,
 														  OffsetNumber *itemnos,
 														  int nitems);
+extern void index_delete_sort(TM_IndexDeleteOp *delstate);
+extern int bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
+
+#ifdef USE_PREFETCH
+/*
+ * heap_index_delete_tuples and index_delete_prefetch_buffer use this
+ * structure to coordinate prefetching activity
+ */
+typedef struct
+{
+	BlockNumber cur_hblkno;
+	int			next_item;
+	int			ndeltids;
+	TM_IndexDelete *deltids;
+} IndexDeletePrefetchState;
+
+extern void index_delete_prefetch_buffer(Relation rel,
+										 IndexDeletePrefetchState *prefetch_state,
+										 int prefetch_count);
+#endif
 
 /*
  * heap-or-index access to system catalogs (in genam.c)

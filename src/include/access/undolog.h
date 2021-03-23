@@ -68,8 +68,8 @@
 /*
  * We want maximum offset 2^17 = 128 kB (64 kB would be too little because
  * only two segments would fit into it, so we would only test boundaries of
- * the log), however we do not increase the size of the log number so it still
- * fits into integer type.
+ * the log and segment recycling wouldn't work), however we do not increase
+ * the size of the log number so it still fits into integer type.
 */
 #define UndoLogOffsetBits (41 - UndoLogNumberBits)
 #endif

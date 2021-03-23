@@ -29,9 +29,11 @@ OBJS = \
 	spgdesc.o \
 	standbydesc.o \
 	tblspcdesc.o \
+	tpddesc.o \
 	undologdesc.o \
 	undoxacttestdesc.o \
 	xactdesc.o \
-	xlogdesc.o
+	xlogdesc.o \
+	zheapamdesc.o
 
 include $(top_srcdir)/src/backend/common.mk

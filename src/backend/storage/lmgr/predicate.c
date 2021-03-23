@@ -192,6 +192,7 @@
 
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/parallel.h"
 #include "access/slru.h"
 #include "access/subtrans.h"
@@ -209,6 +210,7 @@
 #include "storage/procarray.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/ztqual.h"
 
 /* Uncomment the next line to test the graceful degradation code. */
 /* #define TEST_SUMMARIZE_SERIAL */
@@ -476,7 +478,6 @@ static void SetNewSxactGlobalXmin(void);
 static void ClearOldPredicateLocks(void);
 static void ReleaseOneSerializableXact(SERIALIZABLEXACT *sxact, bool partial,
 									   bool summarize);
-static bool XidIsConcurrent(TransactionId xid);
 static void CheckTargetForConflictsIn(PREDICATELOCKTARGETTAG *targettag);
 static void FlagRWConflict(SERIALIZABLEXACT *reader, SERIALIZABLEXACT *writer);
 static void OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
@@ -1138,6 +1139,12 @@ CheckPointPredicate(void)
 }
 
 /*------------------------------------------------------------------------*/
+
+bool
+IsSerializableXact(void)
+{
+	return (MySerializableXact != InvalidSerializableXact);
+}
 
 /*
  * InitPredicateLocks -- Initialize the predicate locking data structures.
@@ -4059,7 +4066,7 @@ ReleaseOneSerializableXact(SERIALIZABLEXACT *sxact, bool partial,
  * that to this function to save the overhead of checking the snapshot's
  * subxip array.
  */
-static bool
+bool
 XidIsConcurrent(TransactionId xid)
 {
 	Snapshot	snap;
@@ -4106,20 +4113,27 @@ CheckForSerializableConflictOutNeeded(Relation relation, Snapshot snapshot)
 
 /*
  * CheckForSerializableConflictOut
- *		A table AM is reading a tuple that has been modified.  If it determines
- *		that the tuple version it is reading is not visible to us, it should
- *		pass in the top level xid of the transaction that created it.
- *		Otherwise, if it determines that it is visible to us but it has been
- *		deleted or there is a newer version available due to an update, it
- *		should pass in the top level xid of the modifying transaction.
+ *		We are reading a tuple which has been modified.  If it is visible to
+ *		us but has been deleted, that indicates a rw-conflict out.  If it's
+ *		not visible and was created by a concurrent (overlapping)
+ *		serializable transaction, that is also a rw-conflict out,
  *
- * This function will check for overlap with our own transaction.  If the given
- * xid is also serializable and the transactions overlap (i.e., they cannot see
- * each other's writes), then we have a conflict out.
+ * We will determine the top level xid of the writing transaction with which
+ * we may be in conflict, and check for overlap with our own transaction.
+ * If the transactions overlap (i.e., they cannot see each other's writes),
+ * then we have a conflict out.
+ *
+ * This function should be called just about anywhere in heapam.c where a
+ * tuple has been read. The caller must hold at least a shared lock on the
+ * buffer, because this function might set hint bits on the tuple. There is
+ * currently no known reason to call this function from an index AM.
  */
 void
-CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot snapshot)
+CheckForSerializableConflictOut(bool visible, Relation relation,
+								void *stup, Buffer buffer,
+								Snapshot snapshot)
 {
+	TransactionId xid;
 	SERIALIZABLEXIDTAG sxidtag;
 	SERIALIZABLEXID *sxid;
 	SERIALIZABLEXACT *sxact;
@@ -4136,10 +4150,18 @@ CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot s
 				 errdetail_internal("Reason code: Canceled on identification as a pivot, during conflict out checking."),
 				 errhint("The transaction might succeed if retried.")));
 	}
-	Assert(TransactionIdIsValid(xid));
 
-	if (TransactionIdEquals(xid, GetTopTransactionIdIfAny()))
-		return;
+	if (RelationStorageIsZHeap(relation))
+	{
+		if (!ZHeapTupleHasSerializableConflictOut(visible, relation,
+												  (ItemPointer) stup, buffer, &xid))
+			return;
+	}
+	else
+	{
+		if (!HeapTupleHasSerializableConflictOut(visible, (HeapTuple) stup, buffer, &xid))
+			return;
+	}
 
 	/*
 	 * Find sxact or summarized info for the top level xid.

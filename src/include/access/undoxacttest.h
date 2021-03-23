@@ -56,7 +56,8 @@ typedef struct xu_undoxactest_mod
 extern void undoxacttest_redo(XLogReaderState *record);
 extern void undoxacttest_desc(StringInfo buf, XLogReaderState *record);
 extern const char *undoxacttest_identify(uint8 info);
-extern void undoxacttest_undo(const WrittenUndoNode *record);
+extern void undoxacttest_undo(const WrittenUndoNode *record,
+							  FullTransactionId fxid);
 extern void undoxacttest_undo_desc(StringInfo buf,
 								   const WrittenUndoNode *record);
 

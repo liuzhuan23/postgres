@@ -449,16 +449,16 @@ read_node_remaining(UndoRSReaderState *r, UndoRecPtr urp, Size len)
 	/* rmid */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.rmid));
-	node->n.rmid = *(uint8 *) r->buf.data;
+	memcpy(&node->n.rmid, r->buf.data, sizeof(node->n.rmid));
 	len -= sizeof(node->n.rmid);
 
 	/* type */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.type));
-	node->n.type = *(uint8 *) r->buf.data;
+	memcpy(&node->n.type, r->buf.data, sizeof(node->n.type));
 	len -= sizeof(node->n.type);
 
-	/* The actual record data*/
+	/* The actual record data */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, len);
 	node->n.data = r->buf.data;
@@ -660,7 +660,7 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
  * Read one record in backward direction, with the first record returned being
  * the one at end as passed to UndoRSReaderInit(), ending at start.
  */
-extern bool
+bool
 UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 {
 	StringInfo	rl = &r->rec_lengths;
@@ -710,6 +710,26 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 	return false;
 }
 
+/*
+ * Read the transaction header of the undo record set for which the reader has
+ * been initialized.
+ */
+void
+UndoRSReadXactHeader(UndoRSReaderState *r, XactUndoRecordSetHeader *hdr)
+{
+	UndoRecordSetChunkListItem	*first_chunk;
+	UndoRecPtr	xact_hdr_urp;
+
+	/* Retrieve the transaction header, as it contains the full XID. */
+	first_chunk = &r->chunks.chunks[0];
+	Assert(first_chunk->header.type == URST_TRANSACTION);
+	Assert(!first_chunk->header.discarded);
+	xact_hdr_urp = UndoRecPtrPlusUsableBytes(first_chunk->urp_chunk_header,
+											 SizeOfUndoRecordSetChunkHeader);
+	undo_read_bytes(&r->cached_buffer, r->relpersistence, xact_hdr_urp,
+					sizeof(XactUndoRecordSetHeader), (char *) hdr);
+}
+
 void
 UndoRSReaderClose(UndoRSReaderState *r)
 {
@@ -720,4 +740,44 @@ UndoRSReaderClose(UndoRSReaderState *r)
 
 	if (r->rec_lengths.data)
 		pfree(r->rec_lengths.data);
+}
+
+/*
+ * Initialize the reader for random access. Caller is supposed to know where
+ * the records are located and to which transactions they belong, so we don't
+ * care about chunk headers.
+ */
+void
+UndoRSReaderInitRandom(UndoRSReaderState *r, char relpersistence)
+{
+	memset(r, 0, sizeof(UndoRSReaderState));
+	r->cached_buffer.pinned_buffer = InvalidBuffer;
+	r->cached_buffer.pinned_block = InvalidBlockNumber;
+	r->relpersistence = relpersistence;
+	initStringInfo(&r->buf);
+}
+
+/*
+ * Read undo record that starts at 'urp'.
+ *
+ * Caller has to guarantee that the record exists.
+ *
+ * The returned node is only valid until the next call.
+ */
+UndoNode *
+UndoReadOneRecord(UndoRSReaderState *r, UndoRecPtr urp)
+{
+	int	len_size = sizeof(((UndoNode *) NULL)->length);
+	UndoNode	*node = &r->node.n;
+
+	resetStringInfo(&r->buf);
+
+	/* Read the size info. */
+	undo_reader_read_bytes(r, urp, len_size);
+	memcpy(&node->length, r->buf.data, len_size);
+
+	/* Read the remaining part. */
+	read_node_remaining(r, urp + len_size, node->length - len_size);
+
+	return node;
 }

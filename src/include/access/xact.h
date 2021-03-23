@@ -22,6 +22,7 @@
 #include "nodes/pg_list.h"
 #include "storage/relfilenode.h"
 #include "storage/sinval.h"
+#include "utils/resowner.h"
 
 /*
  * Maximum size of Global Transaction ID (including '\0').
@@ -384,13 +385,17 @@ extern TransactionId GetTopTransactionIdIfAny(void);
 extern TransactionId GetCurrentTransactionId(void);
 extern TransactionId GetCurrentTransactionIdIfAny(void);
 extern TransactionId GetStableLatestTransactionId(void);
+extern void SetCurrentSubTransactionLocked(void);
+extern bool HasCurrentSubTransactionLock(void);
 extern SubTransactionId GetCurrentSubTransactionId(void);
+extern ResourceOwner GetCurrentTransactionResOwner(void);
 extern FullTransactionId GetTopFullTransactionId(void);
 extern FullTransactionId GetTopFullTransactionIdIfAny(void);
 extern FullTransactionId GetCurrentFullTransactionId(void);
 extern FullTransactionId GetCurrentFullTransactionIdIfAny(void);
 extern void MarkCurrentTransactionIdLoggedIfAny(void);
 extern bool SubTransactionIsActive(SubTransactionId subxid);
+extern bool GetCurrentCommandIdUsed(void);
 extern CommandId GetCurrentCommandId(bool used);
 extern void SetParallelStartTimestamps(TimestampTz xact_ts, TimestampTz stmt_ts);
 extern TimestampTz GetCurrentTransactionStartTimestamp(void);
@@ -469,5 +474,6 @@ extern void ParsePrepareRecord(uint8 info, xl_xact_prepare *xlrec, xl_xact_parse
 extern void EnterParallelMode(void);
 extern void ExitParallelMode(void);
 extern bool IsInParallelMode(void);
+extern bool XidIsConcurrent(TransactionId xid);
 
 #endif							/* XACT_H */

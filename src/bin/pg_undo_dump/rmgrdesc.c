@@ -11,6 +11,7 @@
 #include "access/undoxacttest.h"
 #include "catalog/storage_undo.h"
 #include "commands/dbcommands_undo.h"
+#include "common/zheapam_undo.h"
 #include "rmgrdesc.h"
 
 #define PG_RMGR(symname,name,redo,desc,identify,startup,cleanup,mask,undo,undo_desc) \

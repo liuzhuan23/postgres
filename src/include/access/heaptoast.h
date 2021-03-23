@@ -14,16 +14,9 @@
 #define HEAPTOAST_H
 
 #include "access/htup_details.h"
+#include "access/toast_internals.h"
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
-
-/*
- * Find the maximum size of a tuple if there are to be N tuples per page.
- */
-#define MaximumBytesPerTuple(tuplesPerPage) \
-	MAXALIGN_DOWN((BLCKSZ - \
-				   MAXALIGN(SizeOfPageHeaderData + (tuplesPerPage) * sizeof(ItemIdData))) \
-				  / (tuplesPerPage))
 
 /*
  * These symbols control toaster activation.  If a tuple is larger than
@@ -66,27 +59,6 @@
  * number is per-datum, not per-tuple, for simplicity in index_form_tuple().
  */
 #define TOAST_INDEX_TARGET		(MaxHeapTupleSize / 16)
-
-/*
- * When we store an oversize datum externally, we divide it into chunks
- * containing at most TOAST_MAX_CHUNK_SIZE data bytes.  This number *must*
- * be small enough that the completed toast-table tuple (including the
- * ID and sequence fields and all overhead) will fit on a page.
- * The coding here sets the size on the theory that we want to fit
- * EXTERN_TUPLES_PER_PAGE tuples of maximum size onto a page.
- *
- * NB: Changing TOAST_MAX_CHUNK_SIZE requires an initdb.
- */
-#define EXTERN_TUPLES_PER_PAGE	4	/* tweak only this */
-
-#define EXTERN_TUPLE_MAX_SIZE	MaximumBytesPerTuple(EXTERN_TUPLES_PER_PAGE)
-
-#define TOAST_MAX_CHUNK_SIZE	\
-	(EXTERN_TUPLE_MAX_SIZE -							\
-	 MAXALIGN(SizeofHeapTupleHeader) -					\
-	 sizeof(Oid) -										\
-	 sizeof(int32) -									\
-	 VARHDRSZ)
 
 /* ----------
  * heap_toast_insert_or_update -

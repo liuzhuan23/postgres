@@ -20,6 +20,8 @@
 #include "access/table.h"
 #include "access/toast_internals.h"
 #include "access/xact.h"
+#include "access/zheap.h"
+#include "access/zhtup.h"
 #include "catalog/catalog.h"
 #include "common/pg_lzcompress.h"
 #include "miscadmin.h"
@@ -112,11 +114,11 @@ toast_save_datum(Relation rel, Datum value,
 {
 	Relation	toastrel;
 	Relation   *toastidxs;
-	HeapTuple	toasttup;
 	TupleDesc	toasttupDesc;
 	Datum		t_values[3];
 	bool		t_isnull[3];
 	CommandId	mycid = GetCurrentCommandId(true);
+	ItemPointerData	ctid;
 	struct varlena *result;
 	struct varatt_external toast_pointer;
 	union
@@ -290,6 +292,7 @@ toast_save_datum(Relation rel, Datum value,
 	while (data_todo > 0)
 	{
 		int			i;
+		void	*toasttup_ptr;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -304,9 +307,26 @@ toast_save_datum(Relation rel, Datum value,
 		t_values[1] = Int32GetDatum(chunk_seq++);
 		SET_VARSIZE(&chunk_data, chunk_size + VARHDRSZ);
 		memcpy(VARDATA(&chunk_data), data_p, chunk_size);
-		toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
 
-		heap_insert(toastrel, toasttup, mycid, options, NULL);
+		if (!RelationStorageIsZHeap(rel))
+		{
+			HeapTuple	toasttup;
+
+			toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
+			heap_insert(toastrel, toasttup, mycid, options, NULL);
+			ctid = toasttup->t_self;
+			toasttup_ptr = toasttup;
+		}
+		else
+		{
+			ZHeapTuple	toasttup;
+
+			toasttup = zheap_form_tuple(toasttupDesc, t_values, t_isnull);
+			/* The speculative token will be ignored for TOAST. */
+			zheap_insert(toastrel, toasttup, mycid, options, NULL, 0);
+			ctid = toasttup->t_self;
+			toasttup_ptr = toasttup;
+		}
 
 		/*
 		 * Create the index entry.  We cheat a little here by not using
@@ -324,7 +344,7 @@ toast_save_datum(Relation rel, Datum value,
 			/* Only index relations marked as ready can be updated */
 			if (toastidxs[i]->rd_index->indisready)
 				index_insert(toastidxs[i], t_values, t_isnull,
-							 &(toasttup->t_self),
+							 &ctid,
 							 toastrel,
 							 toastidxs[i]->rd_index->indisunique ?
 							 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
@@ -334,7 +354,7 @@ toast_save_datum(Relation rel, Datum value,
 		/*
 		 * Free memory
 		 */
-		heap_freetuple(toasttup);
+		heap_freetuple(toasttup_ptr);
 
 		/*
 		 * Move on to next chunk
@@ -417,10 +437,20 @@ toast_delete_datum(Relation rel, Datum value, bool is_speculative)
 		/*
 		 * Have a chunk, delete it
 		 */
-		if (is_speculative)
-			heap_abort_speculative(toastrel, &toasttup->t_self);
+		if (!RelationStorageIsZHeap(rel))
+		{
+			if (is_speculative)
+				heap_abort_speculative(toastrel, &toasttup->t_self);
+			else
+				simple_heap_delete(toastrel, &toasttup->t_self);
+		}
 		else
-			simple_heap_delete(toastrel, &toasttup->t_self);
+		{
+			if (is_speculative)
+				zheap_abort_speculative(toastrel, &toasttup->t_self);
+			else
+				simple_zheap_delete(toastrel, &toasttup->t_self, &SnapshotToast);
+		}
 	}
 
 	/*

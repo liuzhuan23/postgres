@@ -14,6 +14,7 @@
 #ifndef DBCOMMANDS_UNDO_H
 #define DBCOMMANDS_UNDO_H
 
+#include "access/transam.h"
 #include "access/undodefs.h"
 #include "lib/stringinfo.h"
 
@@ -25,6 +26,6 @@ typedef struct xu_dbase_create
 	Oid		tablespace_id;
 } xu_dbase_create;
 
-extern void dbase_undo(const WrittenUndoNode *record);
+extern void dbase_undo(const WrittenUndoNode *record, FullTransactionId fxid);
 extern void dbase_undo_desc(StringInfo buf, const WrittenUndoNode *record);
 #endif							/* DBCOMMANDS_UNDO_H */

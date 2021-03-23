@@ -19,6 +19,7 @@
 #ifndef XLOG_INTERNAL_H
 #define XLOG_INTERNAL_H
 
+#include "access/transam.h"
 #include "access/undodefs.h"
 #include "access/xlogdefs.h"
 #include "access/xlogreader.h"
@@ -304,7 +305,7 @@ typedef struct RmgrData
 	void		(*rm_startup) (void);
 	void		(*rm_cleanup) (void);
 	void		(*rm_mask) (char *pagedata, BlockNumber blkno);
-	void		(*rm_undo) (const WrittenUndoNode *record);
+	void		(*rm_undo) (const WrittenUndoNode *record, FullTransactionId fxid);
 	void		(*rm_undo_desc) (StringInfo buf, const WrittenUndoNode *record);
 } RmgrData;
 

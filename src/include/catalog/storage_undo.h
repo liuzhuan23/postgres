@@ -27,7 +27,7 @@ typedef struct xu_smgr_create
 	char		relpersistence;
 } xu_smgr_create;
 
-extern void smgr_undo(const WrittenUndoNode *record);
+extern void smgr_undo(const WrittenUndoNode *record, FullTransactionId fxid);
 extern void smgr_undo_desc(StringInfo buf, const WrittenUndoNode *record);
 
 #endif

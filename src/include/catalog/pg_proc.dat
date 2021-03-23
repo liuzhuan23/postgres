@@ -905,6 +905,10 @@
   proname => 'heap_tableam_handler', provolatile => 'v',
   prorettype => 'table_am_handler', proargtypes => 'internal',
   prosrc => 'heap_tableam_handler' },
+{ oid => '4', descr => 'row-oriented, undo based, heap table access method handler',
+  proname => 'zheap_tableam_handler', provolatile => 'v',
+  prorettype => 'table_am_handler', proargtypes => 'internal',
+  prosrc => 'zheap_tableam_handler' },
 
 # Index access method handlers
 { oid => '330', descr => 'btree index access method handler',

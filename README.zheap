@@ -1,0 +1,33 @@
+This is an attempt to integrate the original implementation of the zheap
+access method [1] with the new undo record set infrastructure [2], or rather
+its version published in [3]. Also, this branch tries to merge the new
+features with the master branch of the PostgreSQL database server.
+
+Besides putting things together, this branch introduces monitoring functions
+and views (e.g. pg_stat_undo_chunks, pg_stat_undo_records) that should make it
+easier to learn about the zheap/undo internals and to fix problems encountered
+during development. In order to resolve all the pending design issues, various
+experimental branches will probably need to be created and evaluated. This is
+where the new monitoring infrastructure should help.
+
+Regardless the future development, the following thins need more work:
+
+    * Review if the merge with the postgres master is correct. One particular
+      known issue is that zheap currently does not implement parallel VACUUM.
+
+    * Implement discard worker - unlike [3], it's essential for the zheap.
+
+    * Improve / rework serialization of the undo records.
+
+    * Add zheap specific regression tests from [1]
+
+Like [3], this branch does not contain the "undo worker". According to [4] and
+[5], it seems worth to implement the zheap AM without background UNDO and test
+if it's viable.
+
+
+[1] https://github.com/EnterpriseDB/zheap/tree/master
+[2] https://github.com/EnterpriseDB/zheap/tree/undo-record-set
+[3] https://www.postgresql.org/message-id/87363.1611941415%40antos
+[4] https://www.postgresql.org/message-id/9d06265c-356a-9ee7-dc22-c21a2353f986%40iki.fi
+[5] https://www.postgresql.org/message-id/CAH2-Wzk06ypb40z3B8HFiSsTVg961%3DE0%3DuQvqARJgT8_4QB2Mg%40mail.gmail.com

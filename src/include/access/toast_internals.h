@@ -37,6 +37,39 @@ typedef struct toast_compress_header
 #define TOAST_COMPRESS_SET_RAWSIZE(ptr, len) \
 	(((toast_compress_header *) (ptr))->rawsize = (len))
 
+/*
+ * Find the maximum size of a tuple if there are to be N tuples per page.
+ */
+#define MaximumBytesPerTuple(tuplesPerPage) \
+	MAXALIGN_DOWN((BLCKSZ - \
+				   MAXALIGN(SizeOfPageHeaderData + (tuplesPerPage) * sizeof(ItemIdData))) \
+				  / (tuplesPerPage))
+
+/*
+ * When we store an oversize datum externally, we divide it into chunks
+ * containing at most TOAST_MAX_CHUNK_SIZE data bytes.  This number *must*
+ * be small enough that the completed toast-table tuple (including the
+ * ID and sequence fields and all overhead) will fit on a page.
+ * The coding here sets the size on the theory that we want to fit
+ * EXTERN_TUPLES_PER_PAGE tuples of maximum size onto a page.
+ *
+ * XXX TOAST_MAX_CHUNK_SIZE is derived from HeapTupleHeader, however we use
+ * the same for the zheap AM. Is it worth introducing separate constants and
+ * make the common TOAST code (toast_internals.c) distinguish?
+ *
+ * NB: Changing TOAST_MAX_CHUNK_SIZE requires an initdb.
+ */
+#define EXTERN_TUPLES_PER_PAGE	4	/* tweak only this */
+
+#define EXTERN_TUPLE_MAX_SIZE	MaximumBytesPerTuple(EXTERN_TUPLES_PER_PAGE)
+
+#define TOAST_MAX_CHUNK_SIZE	\
+	(EXTERN_TUPLE_MAX_SIZE -							\
+	 MAXALIGN(SizeofHeapTupleHeader) -					\
+	 sizeof(Oid) -										\
+	 sizeof(int32) -									\
+	 VARHDRSZ)
+
 extern Datum toast_compress_datum(Datum value);
 extern Oid	toast_get_valid_index(Oid toastoid, LOCKMODE lock);
 

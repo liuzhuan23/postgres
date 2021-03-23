@@ -20,6 +20,7 @@
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/xact.h"
+#include "storage/bufmgr.h"
 #include "utils/guc.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
@@ -119,6 +120,10 @@ typedef enum TM_Result
  * tuple); otherwise cmax is zero.  (We make this restriction because
  * HeapTupleHeaderGetCmax doesn't work for tuples outdated in other
  * transactions.)
+ *
+ * in_place_updated_or_locked indicates whether the tuple is updated or
+ * locked.  We need to re-verify the tuple even if it is just marked as
+ * locked, because previously someone could have updated it in place.
  */
 typedef struct TM_FailureData
 {
@@ -126,6 +131,7 @@ typedef struct TM_FailureData
 	TransactionId xmax;
 	CommandId	cmax;
 	bool		traversed;
+	bool		in_place_updated_or_locked;
 } TM_FailureData;
 
 /*
@@ -227,6 +233,21 @@ typedef struct TM_IndexDeleteOp
 	TM_IndexDelete *deltids;
 	TM_IndexStatus *status;
 } TM_IndexDeleteOp;
+
+/* heap_index_delete_tuples bottom-up index deletion costing constants */
+#define BOTTOMUP_MAX_NBLOCKS			6
+#define BOTTOMUP_TOLERANCE_NBLOCKS		3
+
+/*
+ * heap_index_delete_tuples uses this when determining which heap blocks it
+ * must visit to help its bottom-up index deletion caller
+ */
+typedef struct IndexDeleteCounts
+{
+	int16		npromisingtids; /* Number of "promising" TIDs in group */
+	int16		ntids;			/* Number of TIDs in group */
+	int16		ifirsttid;		/* Offset to group's first deltid */
+} IndexDeleteCounts;
 
 /* "options" flag bits for table_tuple_insert */
 /* TABLE_INSERT_SKIP_WAL was 0x0001; RelationNeedsWAL() now governs */
@@ -1985,4 +2006,20 @@ extern const TableAmRoutine *GetHeapamTableAmRoutine(void);
 extern bool check_default_table_access_method(char **newval, void **extra,
 											  GucSource source);
 
+
+/* ----------------------------------------------------------------------------
+ * Functions common to heap and zheap
+ * ----------------------------------------------------------------------------
+ */
+typedef struct BulkInsertStateData *BulkInsertState;
+
+extern bool heap_acquire_tuplock(Relation relation, ItemPointer tid,
+								 LockTupleMode mode, LockWaitPolicy wait_policy,
+								 bool *have_tuple_lock);
+extern void GetVisibilityMapPins(Relation relation, Buffer buffer1,
+								 Buffer buffer2, BlockNumber block1, BlockNumber block2,
+								 Buffer *vmbuffer1, Buffer *vmbuffer2);
+extern void RelationAddExtraBlocks(Relation relation, BulkInsertState bistate);
+extern Buffer ReadBufferBI(Relation relation, BlockNumber targetBlock,
+						   ReadBufferMode mode, BulkInsertState bistate);
 #endif							/* TABLEAM_H */

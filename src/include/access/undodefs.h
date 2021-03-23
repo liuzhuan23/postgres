@@ -16,6 +16,8 @@
 #ifndef UNDODEFS_H
 #define UNDODEFS_H
 
+#include "access/rmgr.h"
+
 /* The type used to identify an undo log and position within it. */
 typedef uint64 UndoRecPtr;
 
@@ -46,6 +48,21 @@ typedef enum
 	UNDOPERSISTENCE_TEMP = 2
 } UndoPersistenceLevel;
 
+/*
+ * Convert from relpersistence ('p', 'u', 't') to an UndoPersistence
+ * enumerator.
+ */
+#define UndoPersistenceForRelPersistence(rp)						\
+	((rp) == RELPERSISTENCE_PERMANENT ? UNDOPERSISTENCE_PERMANENT :			\
+	 (rp) == RELPERSISTENCE_UNLOGGED ? UNDOPERSISTENCE_UNLOGGED : \
+	 UNDOPERSISTENCE_TEMP)
+
+/*
+ * Get the appropriate UndoPersistence value from a Relation.
+ */
+#define UndoPersistenceForRelation(rel)									\
+	(UndoPersistenceForRelPersistence((rel)->rd_rel->relpersistence))
+
 /* Number of supported persistence levels for undo. */
 #define NUndoPersistenceLevels 3
 
@@ -63,7 +80,7 @@ typedef struct UndoNode
 	 * development, have an absolutely dumb format, for now.
 	 */
 	Size		length;
-	uint8		rmid;
+	RmgrId		rmid;
 	uint8		type;
 	char	   *data;
 } UndoNode;

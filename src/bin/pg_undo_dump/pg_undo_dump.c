@@ -242,9 +242,10 @@ process_log(UndoSegFile *first, int count)
 
 		/*
 		 * Since the UNDO log is a continuous stream of changes, any hole
-		 * terminates processing.
+		 * terminates processing. A missing segment at the beginning is
+		 * accepted though.
 		 */
-		if (seg->offset != off_expected)
+		if (seg->offset != off_expected && off_expected != 0)
 		{
 			pg_log_error("segment %010zX missing in log %d", off_expected,
 						 seg->logno);
@@ -273,6 +274,9 @@ process_log(UndoSegFile *first, int count)
 		process_log_segment(&state, buf, seg);
 
 		close(seg_file);
+
+		if (off_expected == 0)
+			off_expected = seg->offset;
 		off_expected += UndoLogSegmentSize;
 		seg++;
 	}

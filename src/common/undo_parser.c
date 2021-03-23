@@ -13,6 +13,7 @@
 #include "access/undopage.h"
 #include "access/undorecordset.h"
 #include "common/undo_parser.h"
+#include "common/zheapam_undo.h"
 #include "utils/memutils.h"
 
 static void add_chunk_info(UndoLogParserState *s, UndoRecordSetType urs_type);
@@ -129,10 +130,9 @@ parse_undo_page(UndoLogParserState *s, char *page, int nr, UndoSegFile *seg,
 #endif
 	}
 
-	/* The current chunk must start in front of the current page. */
+	/* The current chunk must start before the end of the current page. */
 	Assert(s->current_chunk <
-		   MakeUndoRecPtr(seg->logno, seg->offset + nr * BLCKSZ) ||
-		   s->current_chunk == InvalidUndoRecPtr);
+		   MakeUndoRecPtr(seg->logno, seg->offset + (nr + 1) * BLCKSZ));
 
 	cont = pghdr.ud_continue_chunk;
 	if (s->current_chunk != InvalidUndoRecPtr && cont != InvalidUndoRecPtr &&
@@ -564,12 +564,12 @@ process_records(UndoLogParserState *s, char *data, int size,
 		Size		rec_off_tmp = rec_buf_off;
 		uint8		rmid,
 					rec_type;
-		UndoPageItem	*item;
+		UndoPageItem	item;
 		UndoNode *node;
+		Size	data_len;
 
 		enlarge_item_array(s, s->nitems + 1);
-		item = &s->items[s->nitems++];
-		node = &item->u.record;
+		node = &item.u.record;
 
 		/* Read the record length info. */
 		memcpy(&rec_len, rec_buffer + rec_off_tmp, length_size);
@@ -592,25 +592,28 @@ process_records(UndoLogParserState *s, char *data, int size,
 			break;
 
 		/* Store the node. */
-		item->location = current_rec_start;
+		item.location = current_rec_start;
 		node->rmid = rmid;
 		node->type = rec_type;
+		Assert((length_size + rmid_size + type_size) <= rec_len);
 		node->length = rec_len;
+		data_len = node->length - (length_size + rmid_size + type_size);
 
 		/*
 		 * Copy the data because the buffer contents will be moved towards the
 		 * buffer start, see below.
 		 */
-		if (rec_len > 0)
+		if (data_len > 0)
 		{
-			char	* data = rec_buffer + rec_off_tmp;
+			char	*data = rec_buffer + rec_off_tmp;
 
-			node->data = (char *) palloc(rec_len);
-			memcpy(node->data, data, rec_len);
+			node->data = (char *) palloc(data_len);
+			memcpy(node->data, data, data_len);
 		}
 		else
 			node->data = NULL;
 
+		s->items[s->nitems++] = item;
 		rec_buf_off += rec_len;
 		current_rec_start += rec_len;
 	}

@@ -419,17 +419,6 @@ PageRestoreTempPage(Page tempPage, Page oldPage)
 }
 
 /*
- * Tuple defrag support for PageRepairFragmentation and PageIndexMultiDelete
- */
-typedef struct itemIdCompactData
-{
-	uint16		offsetindex;	/* linp array index */
-	int16		itemoff;		/* page offset of item data */
-	uint16		alignedlen;		/* MAXALIGN(item data len) */
-} itemIdCompactData;
-typedef itemIdCompactData *itemIdCompact;
-
-/*
  * After removing or marking some line pointers unused, move the tuples to
  * remove the gaps caused by the removed items and reorder them back into
  * reverse line pointer order in the page.

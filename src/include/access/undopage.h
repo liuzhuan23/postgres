@@ -146,13 +146,13 @@ extern int	UndoPageInsertHeader(Page page, int page_offset, int header_offset,
 								 UndoRecordSetChunkHeader *header,
 								 Size type_header_size, char *type_header,
 								 UndoRecPtr chunk_start);
-extern int	UndoPageSkipHeader(int page_offset, int header_offset,
+extern int	UndoPageSkipHeader(Page page, int page_offset, int header_offset,
 							   size_t type_header_size);
 extern int	UndoPageInsertRecord(Page page, int page_offset, int data_offset,
 								 Size data_size, char *data,
 								 UndoRecPtr chunk_start,
 								 UndoRecordSetType chunk_type);
-extern int	UndoPageSkipRecord(int page_offset, int data_offset,
+extern int	UndoPageSkipRecord(Page page, int page_offset, int data_offset,
 							   size_t data_size);
 extern int	UndoPageOverwrite(Page page, int page_offset, int data_offset,
 							  Size data_size, char *data);

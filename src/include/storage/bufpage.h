@@ -199,6 +199,17 @@ typedef PageHeaderData *PageHeader;
 #define PG_PAGE_LAYOUT_VERSION		4
 #define PG_DATA_CHECKSUM_VERSION	1
 
+/*
+ * Tuple defrag support for PageRepairFragmentation and PageIndexMultiDelete
+ */
+typedef struct itemIdCompactData
+{
+	uint16		offsetindex;	/* linp array index */
+	int16		itemoff;		/* page offset of item data */
+	uint16		alignedlen;		/* MAXALIGN(item data len) */
+} itemIdCompactData;
+typedef itemIdCompactData *itemIdCompact;
+
 /* ----------------------------------------------------------------
  *						page support macros
  * ----------------------------------------------------------------
@@ -399,6 +410,20 @@ do { \
 #define PageClearPrunable(page) \
 	(((PageHeader) (page))->pd_prune_xid = InvalidTransactionId)
 
+#define ZPageIsPrunable(page) \
+( \
+	TransactionIdIsValid(((PageHeader) (page))->pd_prune_xid) && \
+	!TransactionIdIsInProgress(((PageHeader) (page))->pd_prune_xid) \
+)
+#define ZPageSetPrunable(page, xid) \
+do { \
+	Assert(TransactionIdIsNormal(xid)); \
+	if (!TransactionIdIsValid(((PageHeader) (page))->pd_prune_xid) || \
+		TransactionIdIsInProgress(((PageHeader) (page))->pd_prune_xid) || \
+		TransactionIdPrecedes(xid, ((PageHeader) (page))->pd_prune_xid)) \
+		((PageHeader) (page))->pd_prune_xid = (xid); \
+} while (0)
+#define ZPageClearPrunable(page) PageClearPrunable(page)
 
 /* ----------------------------------------------------------------
  *		extern declarations

@@ -16,6 +16,7 @@
 
 #include "access/tupdesc.h"
 #include "access/xlog.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_publication.h"
@@ -361,6 +362,14 @@ typedef struct StdRdOptions
 #define RelationGetParallelWorkers(relation, defaultpw) \
 	((relation)->rd_options ? \
 	 ((StdRdOptions *) (relation)->rd_options)->parallel_workers : (defaultpw))
+
+#define RelationStorageIsZHeap(relation) \
+	(relation &&	\
+	((relation)->rd_rel->relkind == RELKIND_RELATION ||	\
+	 (relation)->rd_rel->relkind == RELKIND_MATVIEW ||	\
+	 (relation)->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||	\
+	 (relation)->rd_rel->relkind == RELKIND_TOASTVALUE) &&	\
+	 (relation)->rd_rel->relam == ZHEAP_TABLE_AM_OID) \
 
 /* ViewOptions->check_option values */
 typedef enum ViewOptCheckOption

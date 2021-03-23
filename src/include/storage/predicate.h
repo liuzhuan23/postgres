@@ -41,6 +41,7 @@ typedef void *SerializableXactHandle;
  */
 
 /* housekeeping for shared memory predicate lock structures */
+extern bool IsSerializableXact(void);
 extern void InitPredicateLocks(void);
 extern Size PredicateLockShmemSize(void);
 
@@ -66,7 +67,9 @@ extern void ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe);
 
 /* conflict detection (may also trigger rollback) */
 extern bool CheckForSerializableConflictOutNeeded(Relation relation, Snapshot snapshot);
-extern void CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot snapshot);
+extern void CheckForSerializableConflictOut(bool visible, Relation relation,
+											void *stup, Buffer buffer,
+											Snapshot snapshot);
 extern void CheckForSerializableConflictIn(Relation relation, ItemPointer tid, BlockNumber blkno);
 extern void CheckTableForSerializableConflictIn(Relation relation);
 

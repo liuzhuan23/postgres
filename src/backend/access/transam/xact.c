@@ -207,6 +207,8 @@ typedef struct TransactionStateData
 	bool		didLogXid;		/* has xid been included in WAL record? */
 	int			parallelModeLevel;	/* Enter/ExitParallelMode counter */
 	bool		chain;			/* start a new block after this one */
+	bool		subXactLock;	/* has lock created for subtransaction? */
+
 	bool		assigned;		/* assigned to top-level XID */
 	struct TransactionStateData *parent;	/* back link to parent */
 } TransactionStateData;
@@ -724,6 +726,28 @@ AssignTransactionId(TransactionState s)
 }
 
 /*
+ *	SetCurrentSubTransactionLocked
+ */
+void
+SetCurrentSubTransactionLocked(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	s->subXactLock = true;
+}
+
+/*
+ *	HasCurrentSubTransactionLock
+ */
+bool
+HasCurrentSubTransactionLock(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	return s->subXactLock;
+}
+
+/*
  *	GetCurrentSubTransactionId
  */
 SubTransactionId
@@ -732,6 +756,17 @@ GetCurrentSubTransactionId(void)
 	TransactionState s = CurrentTransactionState;
 
 	return s->subTransactionId;
+}
+
+/*
+ * GetCurrentTransactionResOwner
+ */
+ResourceOwner
+GetCurrentTransactionResOwner(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	return s->curTransactionOwner;
 }
 
 /*
@@ -755,6 +790,14 @@ SubTransactionIsActive(SubTransactionId subxid)
 	return false;
 }
 
+/*
+ *	GetCurrentCommandIdUsed
+ */
+bool
+GetCurrentCommandIdUsed(void)
+{
+	return currentCommandIdUsed;
+}
 
 /*
  *	GetCurrentCommandId
@@ -2060,6 +2103,7 @@ StartTransaction(void)
 	 */
 	nUnreportedXids = 0;
 	s->didLogXid = false;
+	s->subXactLock = false;
 
 	/*
 	 * must initialize resource-management stuff first
@@ -2116,6 +2160,8 @@ StartTransaction(void)
 	AtStart_GUC();
 	AtStart_Cache();
 	AfterTriggerBeginXact();
+
+	s->subXactLock = false;
 
 	/*
 	 * done with start processing, set current transaction state to "in

@@ -24,11 +24,11 @@
 
 #include "access/clog.h"
 #include "access/commit_ts.h"
-#include "access/heaptoast.h"
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/subtrans.h"
 #include "access/timeline.h"
+#include "access/toast_internals.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/undo.h"

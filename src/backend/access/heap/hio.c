@@ -87,7 +87,7 @@ RelationPutHeapTuple(Relation relation,
 /*
  * Read in a buffer in mode, using bulk-insert strategy if bistate isn't NULL.
  */
-static Buffer
+Buffer
 ReadBufferBI(Relation relation, BlockNumber targetBlock,
 			 ReadBufferMode mode, BulkInsertState bistate)
 {
@@ -137,7 +137,7 @@ ReadBufferBI(Relation relation, BlockNumber targetBlock,
  * must not be InvalidBuffer.  If both buffers are specified, block1 must
  * be less than block2.
  */
-static void
+void
 GetVisibilityMapPins(Relation relation, Buffer buffer1, Buffer buffer2,
 					 BlockNumber block1, BlockNumber block2,
 					 Buffer *vmbuffer1, Buffer *vmbuffer2)
@@ -193,7 +193,7 @@ GetVisibilityMapPins(Relation relation, Buffer buffer1, Buffer buffer2,
  * amount which ramps up as the degree of contention ramps up, but limiting
  * the result to some sane overall value.
  */
-static void
+void
 RelationAddExtraBlocks(Relation relation, BulkInsertState bistate)
 {
 	BlockNumber blockNum,

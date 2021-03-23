@@ -9,7 +9,7 @@ include $(top_builddir)/src/Makefile.global
 
 override CPPFLAGS := -DFRONTEND $(CPPFLAGS)
 
-RMGRDESCSOURCES = dbasedesc.c smgrdesc.c
+RMGRDESCSOURCES = dbasedesc.c smgrdesc.c zheapamdesc.c
 RMGRDESCOBJS = $(patsubst %.c,%.o,$(RMGRDESCSOURCES))
 
 OBJS = \
