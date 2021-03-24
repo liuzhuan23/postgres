@@ -21,7 +21,7 @@
 
 /*
  * Maximum length for identifiers (e.g. table names, column names,
- * function names).  Names actually are limited to one less byte than this,
+ * function names).  Names actually are limited to one fewer byte than this,
  * because the length must include a trailing zero byte.
  *
  * Changing this requires an initdb.
@@ -133,6 +133,13 @@
  */
 #if defined(WIN32) && !defined(__CYGWIN__)
 #define EXEC_BACKEND
+#endif
+
+/*
+ * Define this if your operating system supports link()
+ */
+#if !defined(WIN32) && !defined(__CYGWIN__)
+#define HAVE_WORKING_LINK 1
 #endif
 
 /*

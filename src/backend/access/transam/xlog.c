@@ -113,6 +113,7 @@ int			CommitDelay = 0;	/* precommit delay in microseconds */
 int			CommitSiblings = 5; /* # concurrent xacts needed to sleep */
 int			wal_retrieve_retry_interval = 5000;
 int			max_slot_wal_keep_size_mb = -1;
+bool		track_wal_io_timing = false;
 
 #ifdef WAL_DEBUG
 bool		XLOG_DEBUG = false;
@@ -724,8 +725,9 @@ typedef struct XLogCtlData
 	 * only relevant for replication or archive recovery
 	 */
 	TimestampTz currentChunkStartTime;
-	/* Are we requested to pause recovery? */
-	bool		recoveryPause;
+	/* Recovery pause state */
+	RecoveryPauseState	recoveryPauseState;
+	ConditionVariable recoveryNotPausedCV;
 
 	/*
 	 * lastFpwDisableRecPtr points to the start of the last replayed
@@ -897,6 +899,7 @@ static void validateRecoveryParameters(void);
 static void exitArchiveRecovery(TimeLineID endTLI, XLogRecPtr endOfLog);
 static bool recoveryStopsBefore(XLogReaderState *record);
 static bool recoveryStopsAfter(XLogReaderState *record);
+static void ConfirmRecoveryPaused(void);
 static void recoveryPausesHere(bool endOfRecovery);
 static bool recoveryApplyDelay(XLogReaderState *record);
 static void SetLatestXTime(TimestampTz xtime);
@@ -1222,8 +1225,7 @@ XLogInsertRecord(XLogRecData *rdata,
 		oldCxt = MemoryContextSwitchTo(walDebugCxt);
 
 		initStringInfo(&buf);
-		appendStringInfo(&buf, "INSERT @ %X/%X: ",
-						 (uint32) (EndPos >> 32), (uint32) EndPos);
+		appendStringInfo(&buf, "INSERT @ %X/%X: ", LSN_FORMAT_ARGS(EndPos));
 
 		/*
 		 * We have to piece together the WAL record data from the XLogRecData
@@ -1826,8 +1828,7 @@ WaitXLogInsertionsToFinish(XLogRecPtr upto)
 	{
 		ereport(LOG,
 				(errmsg("request to flush past end of generated WAL; request %X/%X, current position %X/%X",
-						(uint32) (upto >> 32), (uint32) upto,
-						(uint32) (reservedUpto >> 32), (uint32) reservedUpto)));
+						LSN_FORMAT_ARGS(upto), LSN_FORMAT_ARGS(reservedUpto))));
 		upto = reservedUpto;
 	}
 
@@ -1978,7 +1979,7 @@ GetXLogBuffer(XLogRecPtr ptr)
 
 		if (expectedEndPtr != endptr)
 			elog(PANIC, "could not find WAL buffer for %X/%X",
-				 (uint32) (ptr >> 32), (uint32) ptr);
+				 LSN_FORMAT_ARGS(ptr));
 	}
 	else
 	{
@@ -2295,7 +2296,7 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, bool opportunistic)
 	if (XLOG_DEBUG && npages > 0)
 	{
 		elog(DEBUG1, "initialized %d pages, up to %X/%X",
-			 npages, (uint32) (NewPageEndPtr >> 32), (uint32) NewPageEndPtr);
+			 npages, LSN_FORMAT_ARGS(NewPageEndPtr));
 	}
 #endif
 }
@@ -2476,9 +2477,8 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 
 		if (LogwrtResult.Write >= EndPtr)
 			elog(PANIC, "xlog write request %X/%X is past end of log %X/%X",
-				 (uint32) (LogwrtResult.Write >> 32),
-				 (uint32) LogwrtResult.Write,
-				 (uint32) (EndPtr >> 32), (uint32) EndPtr);
+				 LSN_FORMAT_ARGS(LogwrtResult.Write),
+				 LSN_FORMAT_ARGS(EndPtr));
 
 		/* Advance LogwrtResult.Write to end of current buffer page */
 		LogwrtResult.Write = EndPtr;
@@ -2541,6 +2541,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			Size		nbytes;
 			Size		nleft;
 			int			written;
+			instr_time	start;
 
 			/* OK to write the page(s) */
 			from = XLogCtl->pages + startidx * (Size) XLOG_BLCKSZ;
@@ -2549,9 +2550,30 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			do
 			{
 				errno = 0;
+
+				/* Measure I/O timing to write WAL data */
+				if (track_wal_io_timing)
+					INSTR_TIME_SET_CURRENT(start);
+
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
 				pgstat_report_wait_end();
+
+				/*
+				 * Increment the I/O timing and the number of times WAL data
+				 * were written out to disk.
+				 */
+				if (track_wal_io_timing)
+				{
+					instr_time	duration;
+
+					INSTR_TIME_SET_CURRENT(duration);
+					INSTR_TIME_SUBTRACT(duration, start);
+					WalStats.m_wal_write_time += INSTR_TIME_GET_MICROSEC(duration);
+				}
+
+				WalStats.m_wal_write++;
+
 				if (written <= 0)
 				{
 					char		xlogfname[MAXFNAMELEN];
@@ -2828,9 +2850,7 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 		if (!force && newMinRecoveryPoint < lsn)
 			elog(WARNING,
 				 "xlog min recovery request %X/%X is past current point %X/%X",
-				 (uint32) (lsn >> 32), (uint32) lsn,
-				 (uint32) (newMinRecoveryPoint >> 32),
-				 (uint32) newMinRecoveryPoint);
+				 LSN_FORMAT_ARGS(lsn), LSN_FORMAT_ARGS(newMinRecoveryPoint));
 
 		/* update control file */
 		if (ControlFile->minRecoveryPoint < newMinRecoveryPoint)
@@ -2842,9 +2862,8 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 			minRecoveryPointTLI = newMinRecoveryPointTLI;
 
 			ereport(DEBUG2,
-					(errmsg("updated min recovery point to %X/%X on timeline %u",
-							(uint32) (minRecoveryPoint >> 32),
-							(uint32) minRecoveryPoint,
+					(errmsg_internal("updated min recovery point to %X/%X on timeline %u",
+							LSN_FORMAT_ARGS(minRecoveryPoint),
 							newMinRecoveryPointTLI)));
 		}
 	}
@@ -2883,9 +2902,9 @@ XLogFlush(XLogRecPtr record)
 #ifdef WAL_DEBUG
 	if (XLOG_DEBUG)
 		elog(LOG, "xlog flush request %X/%X; write %X/%X; flush %X/%X",
-			 (uint32) (record >> 32), (uint32) record,
-			 (uint32) (LogwrtResult.Write >> 32), (uint32) LogwrtResult.Write,
-			 (uint32) (LogwrtResult.Flush >> 32), (uint32) LogwrtResult.Flush);
+			 LSN_FORMAT_ARGS(record),
+			 LSN_FORMAT_ARGS(LogwrtResult.Write),
+			 LSN_FORMAT_ARGS(LogwrtResult.Flush));
 #endif
 
 	START_CRIT_SECTION();
@@ -3018,8 +3037,8 @@ XLogFlush(XLogRecPtr record)
 	if (LogwrtResult.Flush < record)
 		elog(ERROR,
 			 "xlog flush request %X/%X is not satisfied --- flushed only to %X/%X",
-			 (uint32) (record >> 32), (uint32) record,
-			 (uint32) (LogwrtResult.Flush >> 32), (uint32) LogwrtResult.Flush);
+			 LSN_FORMAT_ARGS(record),
+			 LSN_FORMAT_ARGS(LogwrtResult.Flush));
 }
 
 /*
@@ -3134,10 +3153,10 @@ XLogBackgroundFlush(void)
 #ifdef WAL_DEBUG
 	if (XLOG_DEBUG)
 		elog(LOG, "xlog bg flush request write %X/%X; flush: %X/%X, current is write %X/%X; flush %X/%X",
-			 (uint32) (WriteRqst.Write >> 32), (uint32) WriteRqst.Write,
-			 (uint32) (WriteRqst.Flush >> 32), (uint32) WriteRqst.Flush,
-			 (uint32) (LogwrtResult.Write >> 32), (uint32) LogwrtResult.Write,
-			 (uint32) (LogwrtResult.Flush >> 32), (uint32) LogwrtResult.Flush);
+			 LSN_FORMAT_ARGS(WriteRqst.Write),
+			 LSN_FORMAT_ARGS(WriteRqst.Flush),
+			 LSN_FORMAT_ARGS(LogwrtResult.Write),
+			 LSN_FORMAT_ARGS(LogwrtResult.Flush));
 #endif
 
 	START_CRIT_SECTION();
@@ -4214,7 +4233,7 @@ RemoveXlogFile(const char *segname, XLogSegNo recycleSegNo,
 							   true, recycleSegNo, true))
 	{
 		ereport(DEBUG2,
-				(errmsg("recycled write-ahead log file \"%s\"",
+				(errmsg_internal("recycled write-ahead log file \"%s\"",
 						segname)));
 		CheckpointStats.ckpt_segs_recycled++;
 		/* Needn't recheck that slot on future iterations */
@@ -4226,7 +4245,7 @@ RemoveXlogFile(const char *segname, XLogSegNo recycleSegNo,
 		int			rc;
 
 		ereport(DEBUG2,
-				(errmsg("removing write-ahead log file \"%s\"",
+				(errmsg_internal("removing write-ahead log file \"%s\"",
 						segname)));
 
 #ifdef WIN32
@@ -4565,7 +4584,7 @@ rescanLatestTimeLine(void)
 				(errmsg("new timeline %u forked off current database system timeline %u before current recovery point %X/%X",
 						newtarget,
 						ThisTimeLineID,
-						(uint32) (EndRecPtr >> 32), (uint32) EndRecPtr)));
+						LSN_FORMAT_ARGS(EndRecPtr))));
 		return false;
 	}
 
@@ -5215,6 +5234,7 @@ XLOGShmemInit(void)
 	SpinLockInit(&XLogCtl->info_lck);
 	SpinLockInit(&XLogCtl->ulsn_lck);
 	InitSharedLatch(&XLogCtl->recoveryWakeupLatch);
+	ConditionVariableInit(&XLogCtl->recoveryNotPausedCV);
 }
 
 /*
@@ -5760,8 +5780,7 @@ recoveryStopsBefore(XLogReaderState *record)
 		recoveryStopName[0] = '\0';
 		ereport(LOG,
 				(errmsg("recovery stopping before WAL location (LSN) \"%X/%X\"",
-						(uint32) (recoveryStopLSN >> 32),
-						(uint32) recoveryStopLSN)));
+						LSN_FORMAT_ARGS(recoveryStopLSN))));
 		return true;
 	}
 
@@ -5924,8 +5943,7 @@ recoveryStopsAfter(XLogReaderState *record)
 		recoveryStopName[0] = '\0';
 		ereport(LOG,
 				(errmsg("recovery stopping after WAL location (LSN) \"%X/%X\"",
-						(uint32) (recoveryStopLSN >> 32),
-						(uint32) recoveryStopLSN)));
+						LSN_FORMAT_ARGS(recoveryStopLSN))));
 		return true;
 	}
 
@@ -6025,15 +6043,11 @@ recoveryStopsAfter(XLogReaderState *record)
 }
 
 /*
- * Wait until shared recoveryPause flag is cleared.
+ * Wait until shared recoveryPauseState is set to RECOVERY_NOT_PAUSED.
  *
  * endOfRecovery is true if the recovery target is reached and
  * the paused state starts at the end of recovery because of
  * recovery_target_action=pause, and false otherwise.
- *
- * XXX Could also be done with shared latch, avoiding the pg_usleep loop.
- * Probably not worth the trouble though.  This state shouldn't be one that
- * anyone cares about server power consumption in.
  */
 static void
 recoveryPausesHere(bool endOfRecovery)
@@ -6055,34 +6069,80 @@ recoveryPausesHere(bool endOfRecovery)
 				(errmsg("recovery has paused"),
 				 errhint("Execute pg_wal_replay_resume() to continue.")));
 
-	while (RecoveryIsPaused())
+	/* loop until recoveryPauseState is set to RECOVERY_NOT_PAUSED */
+	while (GetRecoveryPauseState() != RECOVERY_NOT_PAUSED)
 	{
 		HandleStartupProcInterrupts();
 		if (CheckForStandbyTrigger())
 			return;
-		pgstat_report_wait_start(WAIT_EVENT_RECOVERY_PAUSE);
-		pg_usleep(1000000L);	/* 1000 ms */
-		pgstat_report_wait_end();
+
+		/*
+		 * If recovery pause is requested then set it paused.  While we are in
+		 * the loop, user might resume and pause again so set this every time.
+		 */
+		ConfirmRecoveryPaused();
+
+		/*
+		 * We wait on a condition variable that will wake us as soon as the
+		 * pause ends, but we use a timeout so we can check the above exit
+		 * condition periodically too.
+		 */
+		ConditionVariableTimedSleep(&XLogCtl->recoveryNotPausedCV, 1000,
+									WAIT_EVENT_RECOVERY_PAUSE);
 	}
+	ConditionVariableCancelSleep();
 }
 
-bool
-RecoveryIsPaused(void)
+/*
+ * Get the current state of the recovery pause request.
+ */
+RecoveryPauseState
+GetRecoveryPauseState(void)
 {
-	bool		recoveryPause;
+	RecoveryPauseState	state;
 
 	SpinLockAcquire(&XLogCtl->info_lck);
-	recoveryPause = XLogCtl->recoveryPause;
+	state = XLogCtl->recoveryPauseState;
 	SpinLockRelease(&XLogCtl->info_lck);
 
-	return recoveryPause;
+	return state;
 }
 
+/*
+ * Set the recovery pause state.
+ *
+ * If recovery pause is requested then sets the recovery pause state to
+ * 'pause requested' if it is not already 'paused'.  Otherwise, sets it
+ * to 'not paused' to resume the recovery.  The recovery pause will be
+ * confirmed by the ConfirmRecoveryPaused.
+ */
 void
 SetRecoveryPause(bool recoveryPause)
 {
 	SpinLockAcquire(&XLogCtl->info_lck);
-	XLogCtl->recoveryPause = recoveryPause;
+
+	if (!recoveryPause)
+		XLogCtl->recoveryPauseState = RECOVERY_NOT_PAUSED;
+	else if (XLogCtl->recoveryPauseState == RECOVERY_NOT_PAUSED)
+		XLogCtl->recoveryPauseState = RECOVERY_PAUSE_REQUESTED;
+
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (!recoveryPause)
+		ConditionVariableBroadcast(&XLogCtl->recoveryNotPausedCV);
+}
+
+/*
+ * Confirm the recovery pause by setting the recovery pause state to
+ * RECOVERY_PAUSED.
+ */
+static void
+ConfirmRecoveryPaused(void)
+{
+	/* If recovery pause is requested then set it paused */
+	SpinLockAcquire(&XLogCtl->info_lck);
+	if (XLogCtl->recoveryPauseState == RECOVERY_PAUSE_REQUESTED)
+		XLogCtl->recoveryPauseState = RECOVERY_PAUSED;
 	SpinLockRelease(&XLogCtl->info_lck);
 }
 
@@ -6283,7 +6343,7 @@ RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue
 					 errdetail("If recovery is unpaused, the server will shut down."),
 					 errhint("You can then restart the server after making the necessary configuration changes.")));
 
-			while (RecoveryIsPaused())
+			while (GetRecoveryPauseState() != RECOVERY_NOT_PAUSED)
 			{
 				HandleStartupProcInterrupts();
 
@@ -6302,10 +6362,22 @@ RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue
 					warned_for_promote = true;
 				}
 
-				pgstat_report_wait_start(WAIT_EVENT_RECOVERY_PAUSE);
-				pg_usleep(1000000L);	/* 1000 ms */
-				pgstat_report_wait_end();
+				/*
+				 * If recovery pause is requested then set it paused.  While we
+				 * are in the loop, user might resume and pause again so set
+				 * this every time.
+				 */
+				ConfirmRecoveryPaused();
+
+				/*
+				 * We wait on a condition variable that will wake us as soon as
+				 * the pause ends, but we use a timeout so we can check the
+				 * above conditions periodically too.
+				 */
+				ConditionVariableTimedSleep(&XLogCtl->recoveryNotPausedCV, 1000,
+											WAIT_EVENT_RECOVERY_PAUSE);
 			}
+			ConditionVariableCancelSleep();
 		}
 
 		ereport(FATAL,
@@ -6537,8 +6609,7 @@ StartupXLOG(void)
 		else if (recoveryTarget == RECOVERY_TARGET_LSN)
 			ereport(LOG,
 					(errmsg("starting point-in-time recovery to WAL location (LSN) \"%X/%X\"",
-							(uint32) (recoveryTargetLSN >> 32),
-							(uint32) recoveryTargetLSN)));
+							LSN_FORMAT_ARGS(recoveryTargetLSN))));
 		else if (recoveryTarget == RECOVERY_TARGET_IMMEDIATE)
 			ereport(LOG,
 					(errmsg("starting point-in-time recovery to earliest consistent point")));
@@ -6603,8 +6674,8 @@ StartupXLOG(void)
 			memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
 			wasShutdown = ((record->xl_info & ~XLR_INFO_MASK) == XLOG_CHECKPOINT_SHUTDOWN);
 			ereport(DEBUG1,
-					(errmsg("checkpoint record is at %X/%X",
-							(uint32) (checkPointLoc >> 32), (uint32) checkPointLoc)));
+					(errmsg_internal("checkpoint record is at %X/%X",
+									 LSN_FORMAT_ARGS(checkPointLoc))));
 			InRecovery = true;	/* force recovery even if SHUTDOWNED */
 
 			/*
@@ -6736,8 +6807,8 @@ StartupXLOG(void)
 		if (record != NULL)
 		{
 			ereport(DEBUG1,
-					(errmsg("checkpoint record is at %X/%X",
-							(uint32) (checkPointLoc >> 32), (uint32) checkPointLoc)));
+					(errmsg_internal("checkpoint record is at %X/%X",
+									 LSN_FORMAT_ARGS(checkPointLoc))));
 		}
 		else
 		{
@@ -6789,11 +6860,9 @@ StartupXLOG(void)
 				(errmsg("requested timeline %u is not a child of this server's history",
 						recoveryTargetTLI),
 				 errdetail("Latest checkpoint is at %X/%X on timeline %u, but in the history of the requested timeline, the server forked off from that timeline at %X/%X.",
-						   (uint32) (ControlFile->checkPoint >> 32),
-						   (uint32) ControlFile->checkPoint,
+						   LSN_FORMAT_ARGS(ControlFile->checkPoint),
 						   ControlFile->checkPointCopy.ThisTimeLineID,
-						   (uint32) (switchpoint >> 32),
-						   (uint32) switchpoint)));
+						   LSN_FORMAT_ARGS(switchpoint))));
 	}
 
 	/*
@@ -6806,15 +6875,14 @@ StartupXLOG(void)
 		ereport(FATAL,
 				(errmsg("requested timeline %u does not contain minimum recovery point %X/%X on timeline %u",
 						recoveryTargetTLI,
-						(uint32) (ControlFile->minRecoveryPoint >> 32),
-						(uint32) ControlFile->minRecoveryPoint,
+						LSN_FORMAT_ARGS(ControlFile->minRecoveryPoint),
 						ControlFile->minRecoveryPointTLI)));
 
 	LastRec = RecPtr = checkPointLoc;
 
 	ereport(DEBUG1,
 			(errmsg_internal("redo record is at %X/%X; shutdown %s",
-							 (uint32) (checkPoint.redo >> 32), (uint32) checkPoint.redo,
+							 LSN_FORMAT_ARGS(checkPoint.redo),
 							 wasShutdown ? "true" : "false")));
 	ereport(DEBUG1,
 			(errmsg_internal("next transaction ID: " UINT64_FORMAT "; next OID: %u",
@@ -7137,7 +7205,7 @@ StartupXLOG(void)
 			int			nxids;
 
 			ereport(DEBUG1,
-					(errmsg("initializing for hot standby")));
+					(errmsg_internal("initializing for hot standby")));
 
 			InitRecoveryTransactionEnvironment();
 
@@ -7213,7 +7281,7 @@ StartupXLOG(void)
 		XLogCtl->lastReplayedTLI = XLogCtl->replayEndTLI;
 		XLogCtl->recoveryLastXTime = 0;
 		XLogCtl->currentChunkStartTime = 0;
-		XLogCtl->recoveryPause = false;
+		XLogCtl->recoveryPauseState = RECOVERY_NOT_PAUSED;
 		SpinLockRelease(&XLogCtl->info_lck);
 
 		/* Also ensure XLogReceiptTime has a sane value */
@@ -7273,7 +7341,7 @@ StartupXLOG(void)
 
 			ereport(LOG,
 					(errmsg("redo starts at %X/%X",
-							(uint32) (ReadRecPtr >> 32), (uint32) ReadRecPtr)));
+							LSN_FORMAT_ARGS(ReadRecPtr))));
 
 			/*
 			 * main redo apply loop
@@ -7291,8 +7359,8 @@ StartupXLOG(void)
 
 					initStringInfo(&buf);
 					appendStringInfo(&buf, "REDO @ %X/%X; LSN %X/%X: ",
-									 (uint32) (ReadRecPtr >> 32), (uint32) ReadRecPtr,
-									 (uint32) (EndRecPtr >> 32), (uint32) EndRecPtr);
+									 LSN_FORMAT_ARGS(ReadRecPtr),
+									 LSN_FORMAT_ARGS(EndRecPtr));
 					xlog_outrec(&buf, xlogreader);
 					appendStringInfoString(&buf, " - ");
 					xlog_outdesc(&buf, xlogreader);
@@ -7317,7 +7385,8 @@ StartupXLOG(void)
 				 * otherwise would is a minor issue, so it doesn't seem worth
 				 * adding another spinlock cycle to prevent that.
 				 */
-				if (((volatile XLogCtlData *) XLogCtl)->recoveryPause)
+				if (((volatile XLogCtlData *) XLogCtl)->recoveryPauseState !=
+					RECOVERY_NOT_PAUSED)
 					recoveryPausesHere(false);
 
 				/*
@@ -7342,7 +7411,8 @@ StartupXLOG(void)
 					 * here otherwise pausing during the delay-wait wouldn't
 					 * work.
 					 */
-					if (((volatile XLogCtlData *) XLogCtl)->recoveryPause)
+					if (((volatile XLogCtlData *) XLogCtl)->recoveryPauseState !=
+						RECOVERY_NOT_PAUSED)
 						recoveryPausesHere(false);
 				}
 
@@ -7534,7 +7604,7 @@ StartupXLOG(void)
 
 			ereport(LOG,
 					(errmsg("redo done at %X/%X system usage: %s",
-							(uint32) (ReadRecPtr >> 32), (uint32) ReadRecPtr,
+							LSN_FORMAT_ARGS(ReadRecPtr),
 							pg_rusage_show(&ru0))));
 			xtime = GetLatestXTime();
 			if (xtime)
@@ -7716,8 +7786,7 @@ StartupXLOG(void)
 			snprintf(reason, sizeof(reason),
 					 "%s LSN %X/%X\n",
 					 recoveryStopAfter ? "after" : "before",
-					 (uint32) (recoveryStopLSN >> 32),
-					 (uint32) recoveryStopLSN);
+					 LSN_FORMAT_ARGS(recoveryStopLSN));
 		else if (recoveryTarget == RECOVERY_TARGET_NAME)
 			snprintf(reason, sizeof(reason),
 					 "at restore point \"%s\"",
@@ -8154,8 +8223,7 @@ CheckRecoveryConsistency(void)
 		reachedConsistency = true;
 		ereport(LOG,
 				(errmsg("consistent recovery state reached at %X/%X",
-						(uint32) (lastReplayedEndRecPtr >> 32),
-						(uint32) lastReplayedEndRecPtr)));
+						LSN_FORMAT_ARGS(lastReplayedEndRecPtr))));
 	}
 
 	/*
@@ -8978,7 +9046,7 @@ CreateCheckPoint(int flags)
 			WALInsertLockRelease();
 			END_CRIT_SECTION();
 			ereport(DEBUG1,
-					(errmsg("checkpoint skipped because system is idle")));
+					(errmsg_internal("checkpoint skipped because system is idle")));
 			return;
 		}
 	}
@@ -9393,8 +9461,7 @@ RecoveryRestartPoint(const CheckPoint *checkPoint)
 		elog(trace_recovery(DEBUG2),
 			 "could not record restart point at %X/%X because there "
 			 "are unresolved references to invalid pages",
-			 (uint32) (checkPoint->redo >> 32),
-			 (uint32) checkPoint->redo);
+			 LSN_FORMAT_ARGS(checkPoint->redo));
 		return;
 	}
 
@@ -9448,7 +9515,7 @@ CreateRestartPoint(int flags)
 	if (!RecoveryInProgress())
 	{
 		ereport(DEBUG2,
-				(errmsg("skipping restartpoint, recovery has already ended")));
+				(errmsg_internal("skipping restartpoint, recovery has already ended")));
 		return false;
 	}
 
@@ -9470,9 +9537,8 @@ CreateRestartPoint(int flags)
 		lastCheckPoint.redo <= ControlFile->checkPointCopy.redo)
 	{
 		ereport(DEBUG2,
-				(errmsg("skipping restartpoint, already performed at %X/%X",
-						(uint32) (lastCheckPoint.redo >> 32),
-						(uint32) lastCheckPoint.redo)));
+				(errmsg_internal("skipping restartpoint, already performed at %X/%X",
+								 LSN_FORMAT_ARGS(lastCheckPoint.redo))));
 
 		UpdateMinRecoveryPoint(InvalidXLogRecPtr, true);
 		if (flags & CHECKPOINT_IS_SHUTDOWN)
@@ -9644,7 +9710,7 @@ CreateRestartPoint(int flags)
 	xtime = GetLatestXTime();
 	ereport((log_checkpoints ? LOG : DEBUG2),
 			(errmsg("recovery restart point at %X/%X",
-					(uint32) (lastCheckPoint.redo >> 32), (uint32) lastCheckPoint.redo),
+					LSN_FORMAT_ARGS(lastCheckPoint.redo)),
 			 xtime ? errdetail("Last completed transaction was at log time %s.",
 							   timestamptz_to_str(xtime)) : 0));
 
@@ -9886,7 +9952,7 @@ XLogRestorePoint(const char *rpName)
 
 	ereport(LOG,
 			(errmsg("restore point \"%s\" created at %X/%X",
-					rpName, (uint32) (RecPtr >> 32), (uint32) RecPtr)));
+					rpName, LSN_FORMAT_ARGS(RecPtr))));
 
 	return RecPtr;
 }
@@ -10057,8 +10123,7 @@ checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI, TimeLineID prevTLI)
 		ereport(PANIC,
 				(errmsg("unexpected timeline ID %u in checkpoint record, before reaching minimum recovery point %X/%X on timeline %u",
 						newTLI,
-						(uint32) (minRecoveryPoint >> 32),
-						(uint32) minRecoveryPoint,
+						LSN_FORMAT_ARGS(minRecoveryPoint),
 						minRecoveryPointTLI)));
 
 	/* Looks good */
@@ -10423,8 +10488,7 @@ static void
 xlog_outrec(StringInfo buf, XLogReaderState *record)
 {
 	appendStringInfo(buf, "prev %X/%X; xid %u",
-					 (uint32) (XLogRecGetPrev(record) >> 32),
-					 (uint32) XLogRecGetPrev(record),
+					 LSN_FORMAT_ARGS(XLogRecGetPrev(record)),
 					 XLogRecGetXid(record));
 
 	appendStringInfo(buf, "; len %u",
@@ -10600,6 +10664,20 @@ void
 issue_xlog_fsync(int fd, XLogSegNo segno)
 {
 	char	   *msg = NULL;
+	instr_time	start;
+
+	/*
+	 * Quick exit if fsync is disabled or write() has already synced the WAL
+	 * file.
+	 */
+	if (!enableFsync ||
+		sync_method == SYNC_METHOD_OPEN ||
+		sync_method == SYNC_METHOD_OPEN_DSYNC)
+		return;
+
+	/* Measure I/O timing to sync the WAL file */
+	if (track_wal_io_timing)
+		INSTR_TIME_SET_CURRENT(start);
 
 	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 	switch (sync_method)
@@ -10622,7 +10700,8 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 #endif
 		case SYNC_METHOD_OPEN:
 		case SYNC_METHOD_OPEN_DSYNC:
-			/* write synced it already */
+			/* not reachable */
+			Assert(false);
 			break;
 		default:
 			elog(PANIC, "unrecognized wal_sync_method: %d", sync_method);
@@ -10644,6 +10723,20 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 	}
 
 	pgstat_report_wait_end();
+
+	/*
+	 * Increment the I/O timing and the number of times WAL files were synced.
+	 */
+	if (track_wal_io_timing)
+	{
+		instr_time	duration;
+
+		INSTR_TIME_SET_CURRENT(duration);
+		INSTR_TIME_SUBTRACT(duration, start);
+		WalStats.m_wal_sync_time += INSTR_TIME_GET_MICROSEC(duration);
+	}
+
+	WalStats.m_wal_sync++;
 }
 
 /*
@@ -10667,18 +10760,16 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
  * active at the same time, and they don't conflict with an exclusive backup
  * either.
  *
- * tablespaces is required only when this function is called while
- * the streaming base backup requested by pg_basebackup is running.
- * NULL should be specified otherwise.
+ * labelfile and tblspcmapfile must be passed as NULL when starting an
+ * exclusive backup, and as initially-empty StringInfos for a non-exclusive
+ * backup.
+ *
+ * If "tablespaces" isn't NULL, it receives a list of tablespaceinfo structs
+ * describing the cluster's tablespaces.
  *
  * tblspcmapfile is required mainly for tar format in windows as native windows
  * utilities are not able to create symlinks while extracting files from tar.
  * However for consistency, the same is used for all platforms.
- *
- * needtblspcmapfile is true for the cases (exclusive backup and for
- * non-exclusive backup only when tar format is used for taking backup)
- * when backup needs to generate tablespace_map file, it is used to
- * embed escape character before newline character in tablespace path.
  *
  * Returns the minimum WAL location that must be present to restore from this
  * backup, and the corresponding timeline ID in *starttli_p.
@@ -10692,7 +10783,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 XLogRecPtr
 do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 				   StringInfo labelfile, List **tablespaces,
-				   StringInfo tblspcmapfile, bool needtblspcmapfile)
+				   StringInfo tblspcmapfile)
 {
 	bool		exclusive = (labelfile == NULL);
 	bool		backup_started_in_recovery = false;
@@ -10905,9 +10996,10 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 		XLogFileName(xlogfilename, starttli, _logSegNo, wal_segment_size);
 
 		/*
-		 * Construct tablespace_map file
+		 * Construct tablespace_map file.  If caller isn't interested in this,
+		 * we make a local StringInfo.
 		 */
-		if (exclusive)
+		if (tblspcmapfile == NULL)
 			tblspcmapfile = makeStringInfo();
 
 		datadirpathlen = strlen(DataDir);
@@ -10920,11 +11012,11 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 			char		linkpath[MAXPGPATH];
 			char	   *relpath = NULL;
 			int			rllen;
-			StringInfoData buflinkpath;
-			char	   *s = linkpath;
+			StringInfoData escapedpath;
+			char	   *s;
 
-			/* Skip special stuff */
-			if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			/* Skip anything that doesn't look like a tablespace */
+			if (strspn(de->d_name, "0123456789") != strlen(de->d_name))
 				continue;
 
 			snprintf(fullpath, sizeof(fullpath), "pg_tblspc/%s", de->d_name);
@@ -10948,18 +11040,15 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 			linkpath[rllen] = '\0';
 
 			/*
-			 * Add the escape character '\\' before newline in a string to
-			 * ensure that we can distinguish between the newline in the
-			 * tablespace path and end of line while reading tablespace_map
-			 * file during archive recovery.
+			 * Build a backslash-escaped version of the link path to include
+			 * in the tablespace map file.
 			 */
-			initStringInfo(&buflinkpath);
-
-			while (*s)
+			initStringInfo(&escapedpath);
+			for (s = linkpath; *s; s++)
 			{
-				if ((*s == '\n' || *s == '\r') && needtblspcmapfile)
-					appendStringInfoChar(&buflinkpath, '\\');
-				appendStringInfoChar(&buflinkpath, *s++);
+				if (*s == '\n' || *s == '\r' || *s == '\\')
+					appendStringInfoChar(&escapedpath, '\\');
+				appendStringInfoChar(&escapedpath, *s);
 			}
 
 			/*
@@ -10974,16 +11063,17 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 
 			ti = palloc(sizeof(tablespaceinfo));
 			ti->oid = pstrdup(de->d_name);
-			ti->path = pstrdup(buflinkpath.data);
+			ti->path = pstrdup(linkpath);
 			ti->rpath = relpath ? pstrdup(relpath) : NULL;
 			ti->size = -1;
 
 			if (tablespaces)
 				*tablespaces = lappend(*tablespaces, ti);
 
-			appendStringInfo(tblspcmapfile, "%s %s\n", ti->oid, ti->path);
+			appendStringInfo(tblspcmapfile, "%s %s\n",
+							 ti->oid, escapedpath.data);
 
-			pfree(buflinkpath.data);
+			pfree(escapedpath.data);
 #else
 
 			/*
@@ -10999,9 +11089,10 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 		FreeDir(tblspcdir);
 
 		/*
-		 * Construct backup label file
+		 * Construct backup label file.  If caller isn't interested in this,
+		 * we make a local StringInfo.
 		 */
-		if (exclusive)
+		if (labelfile == NULL)
 			labelfile = makeStringInfo();
 
 		/* Use the log timezone here, not the session timezone */
@@ -11010,9 +11101,9 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 					"%Y-%m-%d %H:%M:%S %Z",
 					pg_localtime(&stamp_time, log_timezone));
 		appendStringInfo(labelfile, "START WAL LOCATION: %X/%X (file %s)\n",
-						 (uint32) (startpoint >> 32), (uint32) startpoint, xlogfilename);
+						 LSN_FORMAT_ARGS(startpoint), xlogfilename);
 		appendStringInfo(labelfile, "CHECKPOINT LOCATION: %X/%X\n",
-						 (uint32) (checkpointloc >> 32), (uint32) checkpointloc);
+						 LSN_FORMAT_ARGS(checkpointloc));
 		appendStringInfo(labelfile, "BACKUP METHOD: %s\n",
 						 exclusive ? "pg_start_backup" : "streamed");
 		appendStringInfo(labelfile, "BACKUP FROM: %s\n",
@@ -11498,9 +11589,9 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive, TimeLineID *stoptli_p)
 					 errmsg("could not create file \"%s\": %m",
 							histfilepath)));
 		fprintf(fp, "START WAL LOCATION: %X/%X (file %s)\n",
-				(uint32) (startpoint >> 32), (uint32) startpoint, startxlogfilename);
+				LSN_FORMAT_ARGS(startpoint), startxlogfilename);
 		fprintf(fp, "STOP WAL LOCATION: %X/%X (file %s)\n",
-				(uint32) (stoppoint >> 32), (uint32) stoppoint, stopxlogfilename);
+				LSN_FORMAT_ARGS(stoppoint), stopxlogfilename);
 
 		/*
 		 * Transfer remaining lines including label and start timeline to
@@ -11821,12 +11912,12 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 	 */
 	if (fscanf(lfp, "START TIME: %127[^\n]\n", backuptime) == 1)
 		ereport(DEBUG1,
-				(errmsg("backup time %s in file \"%s\"",
+				(errmsg_internal("backup time %s in file \"%s\"",
 						backuptime, BACKUP_LABEL_FILE)));
 
 	if (fscanf(lfp, "LABEL: %1023[^\n]\n", backuplabel) == 1)
 		ereport(DEBUG1,
-				(errmsg("backup label %s in file \"%s\"",
+				(errmsg_internal("backup label %s in file \"%s\"",
 						backuplabel, BACKUP_LABEL_FILE)));
 
 	/*
@@ -11843,7 +11934,7 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 							   tli_from_file, tli_from_walseg)));
 
 		ereport(DEBUG1,
-				(errmsg("backup timeline %u in file \"%s\"",
+				(errmsg_internal("backup timeline %u in file \"%s\"",
 						tli_from_file, BACKUP_LABEL_FILE)));
 	}
 
@@ -11863,22 +11954,20 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
  * recovering from a backup dump file, and we therefore need to create symlinks
  * as per the information present in tablespace_map file.
  *
- * Returns true if a tablespace_map file was found (and fills the link
- * information for all the tablespace links present in file); returns false
- * if not.
+ * Returns true if a tablespace_map file was found (and fills *tablespaces
+ * with a tablespaceinfo struct for each tablespace listed in the file);
+ * returns false if not.
  */
 static bool
 read_tablespace_map(List **tablespaces)
 {
 	tablespaceinfo *ti;
 	FILE	   *lfp;
-	char		tbsoid[MAXPGPATH];
-	char	   *tbslinkpath;
 	char		str[MAXPGPATH];
 	int			ch,
-				prev_ch = -1,
-				i = 0,
+				i,
 				n;
+	bool		was_backslash;
 
 	/*
 	 * See if tablespace_map file is present
@@ -11897,37 +11986,54 @@ read_tablespace_map(List **tablespaces)
 	/*
 	 * Read and parse the link name and path lines from tablespace_map file
 	 * (this code is pretty crude, but we are not expecting any variability in
-	 * the file format).  While taking backup we embed escape character '\\'
-	 * before newline in tablespace path, so that during reading of
-	 * tablespace_map file, we could distinguish newline in tablespace path
-	 * and end of line.  Now while reading tablespace_map file, remove the
-	 * escape character that has been added in tablespace path during backup.
+	 * the file format).  De-escape any backslashes that were inserted.
 	 */
+	i = 0;
+	was_backslash = false;
 	while ((ch = fgetc(lfp)) != EOF)
 	{
-		if ((ch == '\n' || ch == '\r') && prev_ch != '\\')
+		if (!was_backslash && (ch == '\n' || ch == '\r'))
 		{
+			if (i == 0)
+				continue;		/* \r immediately followed by \n */
+
+			/*
+			 * The de-escaped line should contain an OID followed by exactly
+			 * one space followed by a path.  The path might start with
+			 * spaces, so don't be too liberal about parsing.
+			 */
 			str[i] = '\0';
-			if (sscanf(str, "%s %n", tbsoid, &n) != 1)
+			n = 0;
+			while (str[n] && str[n] != ' ')
+				n++;
+			if (n < 1 || n >= i - 1)
 				ereport(FATAL,
 						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						 errmsg("invalid data in file \"%s\"", TABLESPACE_MAP)));
-			tbslinkpath = str + n;
-			i = 0;
+			str[n++] = '\0';
 
-			ti = palloc(sizeof(tablespaceinfo));
-			ti->oid = pstrdup(tbsoid);
-			ti->path = pstrdup(tbslinkpath);
-
+			ti = palloc0(sizeof(tablespaceinfo));
+			ti->oid = pstrdup(str);
+			ti->path = pstrdup(str + n);
 			*tablespaces = lappend(*tablespaces, ti);
+
+			i = 0;
 			continue;
 		}
-		else if ((ch == '\n' || ch == '\r') && prev_ch == '\\')
-			str[i - 1] = ch;
+		else if (!was_backslash && ch == '\\')
+			was_backslash = true;
 		else
-			str[i++] = ch;
-		prev_ch = ch;
+		{
+			if (i < sizeof(str) - 1)
+				str[i++] = ch;
+			was_backslash = false;
+		}
 	}
+
+	if (i != 0 || was_backslash)	/* last line not terminated? */
+		ereport(FATAL,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("invalid data in file \"%s\"", TABLESPACE_MAP)));
 
 	if (ferror(lfp) || FreeFile(lfp))
 		ereport(FATAL,
@@ -11953,8 +12059,7 @@ rm_redo_error_callback(void *arg)
 
 	/* translator: %s is a WAL record description */
 	errcontext("WAL redo at %X/%X for %s",
-			   (uint32) (record->ReadRecPtr >> 32),
-			   (uint32) record->ReadRecPtr,
+			   LSN_FORMAT_ARGS(record->ReadRecPtr),
 			   buf.data);
 
 	pfree(buf.data);
@@ -12553,8 +12658,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 
 							if (curFileTLI > 0 && tli < curFileTLI)
 								elog(ERROR, "according to history file, WAL location %X/%X belongs to timeline %u, but previous recovered WAL file came from timeline %u",
-									 (uint32) (tliRecPtr >> 32),
-									 (uint32) tliRecPtr,
+									 LSN_FORMAT_ARGS(tliRecPtr),
 									 tli, curFileTLI);
 						}
 						curFileTLI = tli;
@@ -12682,6 +12786,14 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 			default:
 				elog(ERROR, "unexpected WAL source %d", currentSource);
 		}
+
+		/*
+		 * Check for recovery pause here so that we can confirm more quickly
+		 * that a requested pause has actually taken effect.
+		 */
+		if (((volatile XLogCtlData *) XLogCtl)->recoveryPauseState !=
+			RECOVERY_NOT_PAUSED)
+			recoveryPausesHere(false);
 
 		/*
 		 * This possibly-long loop needs to handle interrupts of startup

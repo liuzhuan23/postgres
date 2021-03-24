@@ -479,6 +479,12 @@ typedef struct PgStat_MsgWal
 	PgStat_Counter m_wal_fpi;
 	uint64		m_wal_bytes;
 	PgStat_Counter m_wal_buffers_full;
+	PgStat_Counter m_wal_write;
+	PgStat_Counter m_wal_sync;
+	PgStat_Counter m_wal_write_time;	/* time spent writing wal records in
+										 * microseconds */
+	PgStat_Counter m_wal_sync_time; /* time spent syncing wal records in
+									 * microseconds */
 } PgStat_MsgWal;
 
 /* ----------
@@ -697,7 +703,7 @@ typedef union PgStat_Msg
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA0
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA1
 
 /* ----------
  * PgStat_StatDBEntry			The collector's data per database
@@ -845,6 +851,10 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_fpi;
 	uint64		wal_bytes;
 	PgStat_Counter wal_buffers_full;
+	PgStat_Counter wal_write;
+	PgStat_Counter wal_sync;
+	PgStat_Counter wal_write_time;
+	PgStat_Counter wal_sync_time;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
@@ -950,7 +960,6 @@ typedef enum
 	WAIT_EVENT_LIBPQWALRECEIVER_CONNECT,
 	WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE,
 	WAIT_EVENT_SSL_OPEN_SERVER,
-	WAIT_EVENT_WAL_RECEIVER_WAIT_START,
 	WAIT_EVENT_WAL_SENDER_WAIT_WAL,
 	WAIT_EVENT_WAL_SENDER_WRITE_DATA,
 } WaitEventClient;
@@ -968,6 +977,7 @@ typedef enum
 	WAIT_EVENT_BGWORKER_SHUTDOWN,
 	WAIT_EVENT_BGWORKER_STARTUP,
 	WAIT_EVENT_BTREE_PAGE,
+	WAIT_EVENT_BUFFER_IO,
 	WAIT_EVENT_CHECKPOINT_DONE,
 	WAIT_EVENT_CHECKPOINT_START,
 	WAIT_EVENT_EXECUTE_GATHER,
@@ -1005,6 +1015,8 @@ typedef enum
 	WAIT_EVENT_REPLICATION_SLOT_DROP,
 	WAIT_EVENT_SAFE_SNAPSHOT,
 	WAIT_EVENT_SYNC_REP,
+	WAIT_EVENT_WALRCV_EXIT,
+	WAIT_EVENT_WAL_RECEIVER_WAIT_START,
 	WAIT_EVENT_XACT_GROUP_UPDATE
 } WaitEventIPC;
 
@@ -1149,7 +1161,6 @@ typedef struct PgBackendSSLStatus
 {
 	/* Information about SSL connection */
 	int			ssl_bits;
-	bool		ssl_compression;
 	char		ssl_version[NAMEDATALEN];
 	char		ssl_cipher[NAMEDATALEN];
 	char		ssl_client_dn[NAMEDATALEN];
@@ -1605,7 +1616,8 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 
 extern void pgstat_send_archiver(const char *xlog, bool failed);
 extern void pgstat_send_bgwriter(void);
-extern void pgstat_send_wal(void);
+extern void pgstat_report_wal(void);
+extern bool pgstat_send_wal(bool force);
 
 /* ----------
  * Support functions for the SQL-callable functions to

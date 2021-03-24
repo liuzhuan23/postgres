@@ -213,7 +213,22 @@ brin_form_tuple(BrinDesc *brdesc, BlockNumber blkno, BrinMemTuple *tuple,
 				(atttype->typstorage == TYPSTORAGE_EXTENDED ||
 				 atttype->typstorage == TYPSTORAGE_MAIN))
 			{
-				Datum		cvalue = toast_compress_datum(value);
+				Datum	cvalue;
+				char	compression;
+				Form_pg_attribute att = TupleDescAttr(brdesc->bd_tupdesc,
+													  keyno);
+
+				/*
+				 * If the BRIN summary and indexed attribute use the same data
+				 * type, we can use the same compression method. Otherwise we
+				 * have to use the default method.
+				 */
+				if (att->atttypid == atttype->type_id)
+					compression = att->attcompression;
+				else
+					compression = GetDefaultToastCompression();
+
+				cvalue = toast_compress_datum(value, compression);
 
 				if (DatumGetPointer(cvalue) != NULL)
 				{

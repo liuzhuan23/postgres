@@ -324,10 +324,10 @@ end_heap_rewrite(RewriteState state)
 						state->rs_blockno,
 						state->rs_buffer,
 						true);
-		RelationOpenSmgr(state->rs_new_rel);
 
 		PageSetChecksumInplace(state->rs_buffer, state->rs_blockno);
 
+		RelationOpenSmgr(state->rs_new_rel);
 		smgrextend(state->rs_new_rel->rd_smgr, MAIN_FORKNUM, state->rs_blockno,
 				   (char *) state->rs_buffer, true);
 	}
@@ -340,7 +340,11 @@ end_heap_rewrite(RewriteState state)
 	 * wrote before the checkpoint.
 	 */
 	if (RelationNeedsWAL(state->rs_new_rel))
+	{
+		/* for an empty table, this could be first smgr access */
+		RelationOpenSmgr(state->rs_new_rel);
 		smgrimmedsync(state->rs_new_rel->rd_smgr, MAIN_FORKNUM);
+	}
 
 	logical_end_heap_rewrite(state);
 
@@ -999,8 +1003,7 @@ logical_rewrite_log_mapping(RewriteState state, TransactionId xid,
 		snprintf(path, MAXPGPATH,
 				 "pg_logical/mappings/" LOGICAL_REWRITE_FORMAT,
 				 dboid, relid,
-				 (uint32) (state->rs_begin_lsn >> 32),
-				 (uint32) state->rs_begin_lsn,
+				 LSN_FORMAT_ARGS(state->rs_begin_lsn),
 				 xid, GetCurrentTransactionId());
 
 		dlist_init(&src->mappings);
@@ -1122,8 +1125,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 	snprintf(path, MAXPGPATH,
 			 "pg_logical/mappings/" LOGICAL_REWRITE_FORMAT,
 			 xlrec->mapped_db, xlrec->mapped_rel,
-			 (uint32) (xlrec->start_lsn >> 32),
-			 (uint32) xlrec->start_lsn,
+			 LSN_FORMAT_ARGS(xlrec->start_lsn),
 			 xlrec->mapped_xid, XLogRecGetXid(r));
 
 	fd = OpenTransientFile(path,

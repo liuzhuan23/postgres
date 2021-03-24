@@ -314,6 +314,7 @@ _outPlannedStmt(StringInfo str, const PlannedStmt *node)
 	WRITE_BITMAPSET_FIELD(rewindPlanIDs);
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(relationOids);
+	WRITE_NODE_FIELD(partitionOids);
 	WRITE_NODE_FIELD(invalItems);
 	WRITE_NODE_FIELD(paramExecTypes);
 	WRITE_NODE_FIELD(utilityStmt);
@@ -606,6 +607,16 @@ _outTidScan(StringInfo str, const TidScan *node)
 	_outScanInfo(str, (const Scan *) node);
 
 	WRITE_NODE_FIELD(tidquals);
+}
+
+static void
+_outTidRangeScan(StringInfo str, const TidRangeScan *node)
+{
+	WRITE_NODE_TYPE("TIDRANGESCAN");
+
+	_outScanInfo(str, (const Scan *) node);
+
+	WRITE_NODE_FIELD(tidrangequals);
 }
 
 static void
@@ -2211,6 +2222,7 @@ _outPlannerGlobal(StringInfo str, const PlannerGlobal *node)
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_NODE_FIELD(appendRelations);
 	WRITE_NODE_FIELD(relationOids);
+	WRITE_NODE_FIELD(partitionOids);
 	WRITE_NODE_FIELD(invalItems);
 	WRITE_NODE_FIELD(paramExecTypes);
 	WRITE_UINT_FIELD(lastPHId);
@@ -2314,6 +2326,7 @@ _outRelOptInfo(StringInfo str, const RelOptInfo *node)
 	WRITE_NODE_FIELD(subroot);
 	WRITE_NODE_FIELD(subplan_params);
 	WRITE_INT_FIELD(rel_parallel_workers);
+	WRITE_UINT_FIELD(amflags);
 	WRITE_OID_FIELD(serverid);
 	WRITE_OID_FIELD(userid);
 	WRITE_BOOL_FIELD(useridiscurrent);
@@ -2758,6 +2771,7 @@ _outSelectStmt(StringInfo str, const SelectStmt *node)
 	WRITE_NODE_FIELD(fromClause);
 	WRITE_NODE_FIELD(whereClause);
 	WRITE_NODE_FIELD(groupClause);
+	WRITE_BOOL_FIELD(groupDistinct);
 	WRITE_NODE_FIELD(havingClause);
 	WRITE_NODE_FIELD(windowClause);
 	WRITE_NODE_FIELD(valuesLists);
@@ -2863,6 +2877,7 @@ _outColumnDef(StringInfo str, const ColumnDef *node)
 
 	WRITE_STRING_FIELD(colname);
 	WRITE_NODE_FIELD(typeName);
+	WRITE_STRING_FIELD(compression);
 	WRITE_INT_FIELD(inhcount);
 	WRITE_BOOL_FIELD(is_local);
 	WRITE_BOOL_FIELD(is_not_null);
@@ -2983,6 +2998,7 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_NODE_FIELD(onConflict);
 	WRITE_NODE_FIELD(returningList);
 	WRITE_NODE_FIELD(groupClause);
+	WRITE_BOOL_FIELD(groupDistinct);
 	WRITE_NODE_FIELD(groupingSets);
 	WRITE_NODE_FIELD(havingQual);
 	WRITE_NODE_FIELD(windowClause);
@@ -3809,6 +3825,9 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_TidScan:
 				_outTidScan(str, obj);
+				break;
+			case T_TidRangeScan:
+				_outTidRangeScan(str, obj);
 				break;
 			case T_SubqueryScan:
 				_outSubqueryScan(str, obj);

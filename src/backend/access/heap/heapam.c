@@ -1359,6 +1359,153 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	return true;
 }
 
+void
+heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
+				  ItemPointer maxtid)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	BlockNumber startBlk;
+	BlockNumber numBlks;
+	ItemPointerData highestItem;
+	ItemPointerData lowestItem;
+
+	/*
+	 * For relations without any pages, we can simply leave the TID range
+	 * unset.  There will be no tuples to scan, therefore no tuples outside
+	 * the given TID range.
+	 */
+	if (scan->rs_nblocks == 0)
+		return;
+
+	/*
+	 * Set up some ItemPointers which point to the first and last possible
+	 * tuples in the heap.
+	 */
+	ItemPointerSet(&highestItem, scan->rs_nblocks - 1, MaxOffsetNumber);
+	ItemPointerSet(&lowestItem, 0, FirstOffsetNumber);
+
+	/*
+	 * If the given maximum TID is below the highest possible TID in the
+	 * relation, then restrict the range to that, otherwise we scan to the end
+	 * of the relation.
+	 */
+	if (ItemPointerCompare(maxtid, &highestItem) < 0)
+		ItemPointerCopy(maxtid, &highestItem);
+
+	/*
+	 * If the given minimum TID is above the lowest possible TID in the
+	 * relation, then restrict the range to only scan for TIDs above that.
+	 */
+	if (ItemPointerCompare(mintid, &lowestItem) > 0)
+		ItemPointerCopy(mintid, &lowestItem);
+
+	/*
+	 * Check for an empty range and protect from would be negative results
+	 * from the numBlks calculation below.
+	 */
+	if (ItemPointerCompare(&highestItem, &lowestItem) < 0)
+	{
+		/* Set an empty range of blocks to scan */
+		heap_setscanlimits(sscan, 0, 0);
+		return;
+	}
+
+	/*
+	 * Calculate the first block and the number of blocks we must scan. We
+	 * could be more aggressive here and perform some more validation to try
+	 * and further narrow the scope of blocks to scan by checking if the
+	 * lowerItem has an offset above MaxOffsetNumber.  In this case, we could
+	 * advance startBlk by one.  Likewise, if highestItem has an offset of 0
+	 * we could scan one fewer blocks.  However, such an optimization does not
+	 * seem worth troubling over, currently.
+	 */
+	startBlk = ItemPointerGetBlockNumberNoCheck(&lowestItem);
+
+	numBlks = ItemPointerGetBlockNumberNoCheck(&highestItem) -
+		ItemPointerGetBlockNumberNoCheck(&lowestItem) + 1;
+
+	/* Set the start block and number of blocks to scan */
+	heap_setscanlimits(sscan, startBlk, numBlks);
+
+	/* Finally, set the TID range in sscan */
+	ItemPointerCopy(&lowestItem, &sscan->rs_mintid);
+	ItemPointerCopy(&highestItem, &sscan->rs_maxtid);
+}
+
+bool
+heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
+						  TupleTableSlot *slot)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	ItemPointer mintid = &sscan->rs_mintid;
+	ItemPointer maxtid = &sscan->rs_maxtid;
+
+	/* Note: no locking manipulations needed */
+	for (;;)
+	{
+		if (sscan->rs_flags & SO_ALLOW_PAGEMODE)
+			heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+		else
+			heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+
+		if (scan->rs_ctup.t_data == NULL)
+		{
+			ExecClearTuple(slot);
+			return false;
+		}
+
+		/*
+		 * heap_set_tidrange will have used heap_setscanlimits to limit the
+		 * range of pages we scan to only ones that can contain the TID range
+		 * we're scanning for.  Here we must filter out any tuples from these
+		 * pages that are outwith that range.
+		 */
+		if (ItemPointerCompare(&scan->rs_ctup.t_self, mintid) < 0)
+		{
+			ExecClearTuple(slot);
+
+			/*
+			 * When scanning backwards, the TIDs will be in descending order.
+			 * Future tuples in this direction will be lower still, so we can
+			 * just return false to indicate there will be no more tuples.
+			 */
+			if (ScanDirectionIsBackward(direction))
+				return false;
+
+			continue;
+		}
+
+		/*
+		 * Likewise for the final page, we must filter out TIDs greater than
+		 * maxtid.
+		 */
+		if (ItemPointerCompare(&scan->rs_ctup.t_self, maxtid) > 0)
+		{
+			ExecClearTuple(slot);
+
+			/*
+			 * When scanning forward, the TIDs will be in ascending order.
+			 * Future tuples in this direction will be higher still, so we can
+			 * just return false to indicate there will be no more tuples.
+			 */
+			if (ScanDirectionIsForward(direction))
+				return false;
+			continue;
+		}
+
+		break;
+	}
+
+	/*
+	 * if we get here it means we have a new current scan tuple, so point to
+	 * the proper return buffer and return the tuple.
+	 */
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+
+	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot, scan->rs_cbuf);
+	return true;
+}
+
 /*
  *	heap_fetch		- retrieve tuple with given tid
  *
@@ -2737,8 +2884,7 @@ l1:
 			HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data->t_infomask) ||
 			HeapTupleHeaderIsOnlyLocked(tp.t_data))
 			result = TM_Ok;
-		else if (!ItemPointerEquals(&tp.t_self, &tp.t_data->t_ctid) ||
-				 HeapTupleHeaderIndicatesMovedPartitions(tp.t_data))
+		else if (!ItemPointerEquals(&tp.t_self, &tp.t_data->t_ctid))
 			result = TM_Updated;
 		else
 			result = TM_Deleted;
@@ -3367,8 +3513,7 @@ l2:
 
 		if (can_continue)
 			result = TM_Ok;
-		else if (!ItemPointerEquals(&oldtup.t_self, &oldtup.t_data->t_ctid) ||
-				 HeapTupleHeaderIndicatesMovedPartitions(oldtup.t_data))
+		else if (!ItemPointerEquals(&oldtup.t_self, &oldtup.t_data->t_ctid))
 			result = TM_Updated;
 		else
 			result = TM_Deleted;
@@ -4604,8 +4749,7 @@ l3:
 			HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_data->t_infomask) ||
 			HeapTupleHeaderIsOnlyLocked(tuple->t_data))
 			result = TM_Ok;
-		else if (!ItemPointerEquals(&tuple->t_self, &tuple->t_data->t_ctid) ||
-				 HeapTupleHeaderIndicatesMovedPartitions(tuple->t_data))
+		else if (!ItemPointerEquals(&tuple->t_self, &tuple->t_data->t_ctid))
 			result = TM_Updated;
 		else
 			result = TM_Deleted;
@@ -5178,8 +5322,7 @@ test_lockmode_for_conflict(MultiXactStatus status, TransactionId xid,
 								LOCKMODE_from_mxstatus(wantedstatus)))
 		{
 			/* bummer */
-			if (!ItemPointerEquals(&tup->t_self, &tup->t_data->t_ctid) ||
-				HeapTupleHeaderIndicatesMovedPartitions(tup->t_data))
+			if (!ItemPointerEquals(&tup->t_self, &tup->t_data->t_ctid))
 				return TM_Updated;
 			else
 				return TM_Deleted;
@@ -7357,35 +7500,6 @@ heap_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 	delstate->ndeltids = finalndeltids;
 
 	return latestRemovedXid;
-}
-
-/*
- * Specialized inlineable comparison function for index_delete_sort()
- */
-static inline int
-index_delete_sort_cmp(TM_IndexDelete *deltid1, TM_IndexDelete *deltid2)
-{
-	ItemPointer tid1 = &deltid1->tid;
-	ItemPointer tid2 = &deltid2->tid;
-
-	{
-		BlockNumber blk1 = ItemPointerGetBlockNumber(tid1);
-		BlockNumber blk2 = ItemPointerGetBlockNumber(tid2);
-
-		if (blk1 != blk2)
-			return (blk1 < blk2) ? -1 : 1;
-	}
-	{
-		OffsetNumber pos1 = ItemPointerGetOffsetNumber(tid1);
-		OffsetNumber pos2 = ItemPointerGetOffsetNumber(tid2);
-
-		if (pos1 != pos2)
-			return (pos1 < pos2) ? -1 : 1;
-	}
-
-	pg_unreachable();
-
-	return 0;
 }
 
 /*

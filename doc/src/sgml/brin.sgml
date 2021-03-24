@@ -464,12 +464,14 @@ typedef struct BrinOpcInfo
 
    <varlistentry>
     <term><function>bool consistent(BrinDesc *bdesc, BrinValues *column,
-       ScanKey key)</function></term>
+       ScanKey *keys, int nkeys)</function></term>
     <listitem>
      <para>
-      Returns whether the ScanKey is consistent with the given indexed
-      values for a range.
+      Returns whether all the ScanKey entries are consistent with the given
+      indexed values for a range.
       The attribute number to use is passed as part of the scan key.
+      Multiple scan keys for the same attribute may be passed at once, the
+      number of entries is determined by the <literal>nkeys</literal> parameter.
      </para>
     </listitem>
    </varlistentry>
@@ -703,12 +705,12 @@ typedef struct BrinOpcInfo
      <entry>Operator Strategy 7</entry>
     </row>
     <row>
-     <entry>Operator Strategy 7, 13, 16, 24, 25</entry>
+     <entry>Operator Strategy 7, 16, 24, 25</entry>
      <entry>operator contains-or-equal-to</entry>
      <entry></entry>
     </row>
     <row>
-     <entry>Operator Strategy 8, 14, 26, 27</entry>
+     <entry>Operator Strategy 8, 26, 27</entry>
      <entry>operator is-contained-by-or-equal-to</entry>
      <entry>Operator Strategy 3</entry>
     </row>

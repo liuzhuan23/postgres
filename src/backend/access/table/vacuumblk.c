@@ -18,6 +18,7 @@
 
 #include "access/multixact.h"
 #include "access/vacuumblk.h"
+#include "catalog/index.h"
 #include "catalog/storage.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
@@ -167,9 +168,11 @@ lazy_cleanup_index(Relation indrel,
 						(*stats)->num_index_tuples,
 						(*stats)->num_pages),
 				 errdetail("%.0f index row versions were removed.\n"
-						   "%u index pages have been deleted, %u are currently reusable.\n"
+						   "%u index pages were newly deleted.\n"
+						   "%u index pages are currently deleted, of which %u are currently reusable.\n"
 						   "%s.",
 						   (*stats)->tuples_removed,
+						   (*stats)->pages_newly_deleted,
 						   (*stats)->pages_deleted, (*stats)->pages_free,
 						   pg_rusage_show(&ru0))));
 	}
@@ -379,7 +382,23 @@ static bool
 lazy_tid_reaped(ItemPointer itemptr, void *state)
 {
 	LVDeadTuples *dead_tuples = (LVDeadTuples *) state;
+	int64		litem,
+				ritem,
+				item;
 	ItemPointer res;
+
+	litem = itemptr_encode(&dead_tuples->itemptrs[0]);
+	ritem = itemptr_encode(&dead_tuples->itemptrs[dead_tuples->num_tuples - 1]);
+	item = itemptr_encode(itemptr);
+
+	/*
+	 * Doing a simple bound check before bsearch() is useful to avoid the
+	 * extra cost of bsearch(), especially if dead tuples on the heap are
+	 * concentrated in a certain range.  Since this function is called for
+	 * every index tuple, it pays to be really fast.
+	 */
+	if (item < litem || item > ritem)
+		return false;
 
 	res = (ItemPointer) bsearch((void *) itemptr,
 								(void *) dead_tuples->itemptrs,

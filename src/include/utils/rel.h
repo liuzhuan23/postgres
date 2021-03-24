@@ -308,6 +308,8 @@ typedef struct StdRdOptions
 	int			parallel_workers;	/* max number of parallel workers */
 	bool		vacuum_index_cleanup;	/* enables index vacuuming and cleanup */
 	bool		vacuum_truncate;	/* enables vacuum to truncate a relation */
+	bool		parallel_insert_enabled;	/* enables planner's use of
+											 * parallel insert */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -432,6 +434,29 @@ typedef struct ViewOptions
 	 (relation)->rd_options &&												\
 	 ((ViewOptions *) (relation)->rd_options)->check_option ==				\
 	  VIEW_OPTION_CHECK_OPTION_CASCADED)
+
+/*
+ * PartitionedTableRdOptions
+ *		Contents of rd_options for partitioned tables
+ */
+typedef struct PartitionedTableRdOptions
+{
+	int32		vl_len_;		/* varlena header (do not touch directly!) */
+	bool		parallel_insert_enabled;	/* enables planner's use of
+											 * parallel insert */
+} PartitionedTableRdOptions;
+
+/*
+ * RelationGetParallelInsert
+ *		Returns the relation's parallel_insert_enabled reloption setting.
+ *		Note multiple eval of argument!
+ */
+#define RelationGetParallelInsert(relation, defaultpd) 						\
+	((relation)->rd_options ?												\
+	 (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?				\
+	 ((PartitionedTableRdOptions *) (relation)->rd_options)->parallel_insert_enabled : \
+	 ((StdRdOptions *) (relation)->rd_options)->parallel_insert_enabled) :		\
+	 (defaultpd))
 
 /*
  * RelationIsValid
@@ -566,6 +591,13 @@ typedef struct ViewOptions
 	} while (0)
 
 /*
+ * RelationIsPermanent
+ *		True if relation is permanent.
+ */
+#define RelationIsPermanent(relation) \
+	((relation)->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT)
+
+/*
  * RelationNeedsWAL
  *		True if relation needs WAL.
  *
@@ -574,8 +606,7 @@ typedef struct ViewOptions
  * RelFileNode" in src/backend/access/transam/README.
  */
 #define RelationNeedsWAL(relation)										\
-	((relation)->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT &&	\
-	 (XLogIsNeeded() ||													\
+	(RelationIsPermanent(relation) && (XLogIsNeeded() ||				\
 	  (relation->rd_createSubid == InvalidSubTransactionId &&			\
 	   relation->rd_firstRelfilenodeSubid == InvalidSubTransactionId)))
 

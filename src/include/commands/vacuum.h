@@ -14,6 +14,7 @@
 #ifndef VACUUM_H
 #define VACUUM_H
 
+#include "access/genam.h"
 #include "access/htup.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_statistic.h"
@@ -303,6 +304,10 @@ typedef struct LVRelStats
 	int			num_index_scans;
 	TransactionId latestRemovedXid;
 	bool		lock_waiter_detected;
+
+	/* Statistics about indexes */
+	IndexBulkDeleteResult **indstats;
+	int			nindexes;
 
 	/* Used for error callback */
 	char	   *indname;
