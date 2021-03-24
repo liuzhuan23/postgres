@@ -273,7 +273,6 @@ static void end_parallel_vacuum(IndexBulkDeleteResult **stats,
 								LVParallelState *lps, int nindexes);
 static LVSharedIndStats *get_indstats(LVShared *lvshared, int n);
 static bool skip_parallel_vacuum_index(Relation indrel, LVShared *lvshared);
-static void vacuum_error_callback(void *arg);
 
 
 /*
@@ -3026,98 +3025,4 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	vac_close_indexes(nindexes, indrels, RowExclusiveLock);
 	table_close(onerel, ShareUpdateExclusiveLock);
 	pfree(vacrelstats.indstats);
-}
-
-/*
- * Error context callback for errors occurring during vacuum.
- */
-static void
-vacuum_error_callback(void *arg)
-{
-	LVRelStats *errinfo = arg;
-
-	switch (errinfo->phase)
-	{
-		case VACUUM_ERRCB_PHASE_SCAN_HEAP:
-			if (BlockNumberIsValid(errinfo->blkno))
-			{
-				if (OffsetNumberIsValid(errinfo->offnum))
-					errcontext("while scanning block %u and offset %u of relation \"%s.%s\"",
-							   errinfo->blkno, errinfo->offnum, errinfo->relnamespace, errinfo->relname);
-				else
-					errcontext("while scanning block %u of relation \"%s.%s\"",
-							   errinfo->blkno, errinfo->relnamespace, errinfo->relname);
-			}
-			else
-				errcontext("while scanning relation \"%s.%s\"",
-						   errinfo->relnamespace, errinfo->relname);
-			break;
-
-		case VACUUM_ERRCB_PHASE_VACUUM_HEAP:
-			if (BlockNumberIsValid(errinfo->blkno))
-			{
-				if (OffsetNumberIsValid(errinfo->offnum))
-					errcontext("while vacuuming block %u and offset %u of relation \"%s.%s\"",
-							   errinfo->blkno, errinfo->offnum, errinfo->relnamespace, errinfo->relname);
-				else
-					errcontext("while vacuuming block %u of relation \"%s.%s\"",
-							   errinfo->blkno, errinfo->relnamespace, errinfo->relname);
-			}
-			else
-				errcontext("while vacuuming relation \"%s.%s\"",
-						   errinfo->relnamespace, errinfo->relname);
-			break;
-
-		case VACUUM_ERRCB_PHASE_VACUUM_INDEX:
-			errcontext("while vacuuming index \"%s\" of relation \"%s.%s\"",
-					   errinfo->indname, errinfo->relnamespace, errinfo->relname);
-			break;
-
-		case VACUUM_ERRCB_PHASE_INDEX_CLEANUP:
-			errcontext("while cleaning up index \"%s\" of relation \"%s.%s\"",
-					   errinfo->indname, errinfo->relnamespace, errinfo->relname);
-			break;
-
-		case VACUUM_ERRCB_PHASE_TRUNCATE:
-			if (BlockNumberIsValid(errinfo->blkno))
-				errcontext("while truncating relation \"%s.%s\" to %u blocks",
-						   errinfo->relnamespace, errinfo->relname, errinfo->blkno);
-			break;
-
-		case VACUUM_ERRCB_PHASE_UNKNOWN:
-		default:
-			return;				/* do nothing; the errinfo may not be
-								 * initialized */
-	}
-}
-
-/*
- * Updates the information required for vacuum error callback.  This also saves
- * the current information which can be later restored via restore_vacuum_error_info.
- */
-void
-update_vacuum_error_info(LVRelStats *errinfo, LVSavedErrInfo *saved_err_info, int phase,
-						 BlockNumber blkno, OffsetNumber offnum)
-{
-	if (saved_err_info)
-	{
-		saved_err_info->offnum = errinfo->offnum;
-		saved_err_info->blkno = errinfo->blkno;
-		saved_err_info->phase = errinfo->phase;
-	}
-
-	errinfo->blkno = blkno;
-	errinfo->offnum = offnum;
-	errinfo->phase = phase;
-}
-
-/*
- * Restores the vacuum information saved via a prior call to update_vacuum_error_info.
- */
-void
-restore_vacuum_error_info(LVRelStats *errinfo, const LVSavedErrInfo *saved_err_info)
-{
-	errinfo->blkno = saved_err_info->blkno;
-	errinfo->offnum = saved_err_info->offnum;
-	errinfo->phase = saved_err_info->phase;
 }

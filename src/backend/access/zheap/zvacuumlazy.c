@@ -46,6 +46,7 @@
 #include "commands/dbcommands.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "portability/instr_time.h"
@@ -571,7 +572,6 @@ lazy_scan_zheap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 				tups_vacuumed,
 				nkeep,
 				nunused;
-	IndexBulkDeleteResult **indstats;
 	StringInfoData infobuf;
 	int			i;
 	int			tupindex = 0;
@@ -605,9 +605,6 @@ lazy_scan_zheap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	empty_pages = vacuumed_pages = 0;
 	next_fsm_block_to_vacuum = (BlockNumber) 0;
 	num_tuples = tups_vacuumed = nkeep = nunused = 0;
-
-	indstats = (IndexBulkDeleteResult **)
-		palloc0(nindexes * sizeof(IndexBulkDeleteResult *));
 
 	nblocks = RelationGetNumberOfBlocks(onerel);
 	vacrelstats->rel_pages = nblocks;
@@ -746,7 +743,7 @@ lazy_scan_zheap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			 */
 			for (i = 0; i < nindexes; i++)
 				lazy_vacuum_index(Irel[i],
-								  &indstats[i],
+								  &(vacrelstats->indstats[i]),
 								  vacrelstats->dead_tuples,
 								  vacrelstats->old_live_tuples,
 								  vacrelstats,
@@ -1165,7 +1162,7 @@ lazy_scan_zheap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		 */
 		for (i = 0; i < nindexes; i++)
 			lazy_vacuum_index(Irel[i],
-							  &indstats[i],
+							  &(vacrelstats->indstats[i]),
 							  vacrelstats->dead_tuples,
 							  vacrelstats->old_live_tuples,
 							  vacrelstats,
@@ -1208,7 +1205,7 @@ lazy_scan_zheap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 
 	/* Do post-vacuum cleanup and statistics update for each index */
 	for (i = 0; i < nindexes; i++)
-		lazy_cleanup_index(Irel[i], &indstats[i], vacrelstats->new_rel_tuples,
+		lazy_cleanup_index(Irel[i], &(vacrelstats->indstats[i]), vacrelstats->new_rel_tuples,
 						   vacrelstats->tupcount_pages < vacrelstats->rel_pages,
 						   vacrelstats, vac_strategy, elevel);
 
@@ -1249,14 +1246,20 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 	int			nindexes;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
+	WalUsage	walusage_start = pgWalUsage;
+	WalUsage	walusage = {0, 0, 0};
 	long		secs;
 	int			usecs;
 	double		read_rate,
 				write_rate;
 	bool		aggressive = false; /* should we scan all unfrozen pages? */
+	char	  **indnames = NULL;
 	BlockNumber new_rel_pages;
 	double		new_rel_tuples;
 	double		new_live_tuples;
+	ErrorContextCallback errcallback;
+	PgStat_Counter startreadtime = 0;
+	PgStat_Counter startwritetime = 0;
 
 	Assert(params != NULL);
 
@@ -1274,6 +1277,11 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 	{
 		pg_rusage_init(&ru0);
 		starttime = GetCurrentTimestamp();
+		if (track_io_timing)
+		{
+			startreadtime = pgStatBlockReadTime;
+			startwritetime = pgStatBlockWriteTime;
+		}
 	}
 
 	if (params->options & VACOPT_VERBOSE)
@@ -1301,6 +1309,10 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 
 	vacrelstats = (LVRelStats *) palloc0(sizeof(LVRelStats));
 
+	vacrelstats->relnamespace = get_namespace_name(RelationGetNamespace(onerel));
+	vacrelstats->relname = pstrdup(RelationGetRelationName(onerel));
+	vacrelstats->indname = NULL;
+	vacrelstats->phase = VACUUM_ERRCB_PHASE_UNKNOWN;
 	vacrelstats->old_rel_pages = onerel->rd_rel->relpages;
 	vacrelstats->old_live_tuples = onerel->rd_rel->reltuples;
 	vacrelstats->num_index_scans = 0;
@@ -1311,6 +1323,36 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 	vac_open_indexes(onerel, RowExclusiveLock, &nindexes, &Irel);
 	vacrelstats->useindex = (nindexes > 0 &&
 							 params->index_cleanup == VACOPT_TERNARY_ENABLED);
+
+	vacrelstats->indstats = (IndexBulkDeleteResult **)
+		palloc0(nindexes * sizeof(IndexBulkDeleteResult *));
+	vacrelstats->nindexes = nindexes;
+
+	/* Save index names iff autovacuum logging requires it */
+	if (IsAutoVacuumWorkerProcess() &&
+		params->log_min_duration >= 0 &&
+		vacrelstats->nindexes > 0)
+	{
+		indnames = palloc(sizeof(char *) * vacrelstats->nindexes);
+		for (int i = 0; i < vacrelstats->nindexes; i++)
+			indnames[i] = pstrdup(RelationGetRelationName(Irel[i]));
+	}
+
+	/*
+	 * Setup error traceback support for ereport().  The idea is to set up an
+	 * error context callback to display additional information on any error
+	 * during a vacuum.  During different phases of vacuum (heap scan, heap
+	 * vacuum, index vacuum, index clean up, heap truncate), we update the
+	 * error context callback to display appropriate information.
+	 *
+	 * Note that the index vacuum and heap vacuum phases may be called
+	 * multiple times in the middle of the heap scan phase.  So the old phase
+	 * information is restored at the end of those phases.
+	 */
+	errcallback.callback = vacuum_error_callback;
+	errcallback.arg = vacrelstats;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	/* Do the vacuuming */
 	lazy_scan_zheap(onerel, params, vacrelstats, Irel, nindexes,
@@ -1323,7 +1365,21 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 	 * Optionally truncate the relation.
 	 */
 	if (should_attempt_truncation(params, vacrelstats))
+	{
+		/*
+		 * Update error traceback information.  This is the last phase during
+		 * which we add context information to errors, so we don't need to
+		 * revert to the previous phase.
+		 */
+		update_vacuum_error_info(vacrelstats, NULL, VACUUM_ERRCB_PHASE_TRUNCATE,
+								 vacrelstats->nonempty_pages,
+								 InvalidOffsetNumber);
+
 		lazy_truncate_heap(onerel, vacrelstats, bstrategy, elevel);
+	}
+
+	/* Pop the error context stack */
+	error_context_stack = errcallback.previous;
 
 	/* Report that we are now doing final cleanup. */
 	pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
@@ -1392,6 +1448,9 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 
 			TimestampDifference(starttime, endtime, &secs, &usecs);
 
+			memset(&walusage, 0, sizeof(WalUsage));
+			WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
+
 			read_rate = 0;
 			write_rate = 0;
 			if ((secs > 0) || (usecs > 0))
@@ -1430,14 +1489,55 @@ lazy_vacuum_zheap_rel(Relation onerel, VacuumParams *params,
 							 (long long) VacuumPageHit,
 							 (long long) VacuumPageMiss,
 							 (long long) VacuumPageDirty);
+			for (int i = 0; i < vacrelstats->nindexes; i++)
+			{
+				IndexBulkDeleteResult *stats = vacrelstats->indstats[i];
+
+				if (!stats)
+					continue;
+
+				appendStringInfo(&buf,
+								 _("index \"%s\": pages: %u remain, %u newly deleted, %u currently deleted, %u reusable\n"),
+								 indnames[i],
+								 stats->num_pages,
+								 stats->pages_newly_deleted,
+								 stats->pages_deleted,
+								 stats->pages_free);
+			}
 			appendStringInfo(&buf, _("avg read rate: %.3f MB/s, avg write rate: %.3f MB/s\n"),
 							 read_rate, write_rate);
+			if (track_io_timing)
+			{
+				appendStringInfoString(&buf, _("I/O Timings:"));
+				if (pgStatBlockReadTime - startreadtime > 0)
+					appendStringInfo(&buf, _(" read=%.3f"),
+									 (double) (pgStatBlockReadTime - startreadtime) / 1000);
+				if (pgStatBlockWriteTime - startwritetime > 0)
+					appendStringInfo(&buf, _(" write=%.3f"),
+									 (double) (pgStatBlockWriteTime - startwritetime) / 1000);
+				appendStringInfoChar(&buf, '\n');
+			}
 			appendStringInfo(&buf, _("system usage: %s"), pg_rusage_show(&ru0));
+appendStringInfo(&buf,
+							 _("WAL usage: %ld records, %ld full page images, %llu bytes"),
+							 walusage.wal_records,
+							 walusage.wal_fpi,
+							 (unsigned long long) walusage.wal_bytes);
 
 			ereport(LOG,
 					(errmsg_internal("%s", buf.data)));
 			pfree(buf.data);
 		}
+	}
+
+	/* Cleanup index statistics and index names */
+	for (int i = 0; i < vacrelstats->nindexes; i++)
+	{
+		if (vacrelstats->indstats[i])
+			pfree(vacrelstats->indstats[i]);
+
+		if (indnames && indnames[i])
+			pfree(indnames[i]);
 	}
 }
 

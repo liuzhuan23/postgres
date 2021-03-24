@@ -34,6 +34,7 @@ extern void lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats,
 							   int elevel);
 extern void lazy_record_dead_tuple(LVDeadTuples *dead_tuples,
 								   ItemPointer itemptr);
+extern void vacuum_error_callback(void *arg);
 extern void update_vacuum_error_info(LVRelStats *errinfo,
 									 LVSavedErrInfo *saved_err_info,
 									 int phase, BlockNumber blkno,
