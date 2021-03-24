@@ -292,7 +292,7 @@ zheap_undo_desc(StringInfo buf, const WrittenUndoNode *record)
 
 		UnpackZHeapUndoRecord(record->n.data, false, false, &uur);
 		appendStringInfo(buf,
-						 "DELETE reloid %u, blk %u, off %u, cid %u, prevxid %u",
+						 "DELETE reloid %u, blk %u, off %u, cid %u, prevxid %u,",
 						 uur.uur_reloid, uur.uur_block, uur.uur_offset,
 						 uur.uur_cid, uur.uur_prevxid);
 		append_blkprev(buf, uur.uur_blkprev, record->location);
@@ -303,7 +303,7 @@ zheap_undo_desc(StringInfo buf, const WrittenUndoNode *record)
 
 		UnpackZHeapUndoRecord(record->n.data, false, false, &uur);
 		appendStringInfo(buf,
-						 "INPLACE_UPDATE reloid %u, blk %u, off %u, cid %u, prevxid %u",
+						 "INPLACE_UPDATE reloid %u, blk %u, off %u, cid %u, prevxid %u,",
 						 uur.uur_reloid, uur.uur_block, uur.uur_offset,
 						 uur.uur_cid, uur.uur_prevxid);
 		append_blkprev(buf, uur.uur_blkprev, record->location);
@@ -313,7 +313,7 @@ zheap_undo_desc(StringInfo buf, const WrittenUndoNode *record)
 		UnpackedUndoRecord	uur;
 
 		UnpackZHeapUndoRecord(record->n.data, false, false, &uur);
-		appendStringInfo(buf, "UPDATE reloid %u, blk %u, off %u, cid %u, prevxid %u",
+		appendStringInfo(buf, "UPDATE reloid %u, blk %u, off %u, cid %u, prevxid %u,",
 						 uur.uur_reloid, uur.uur_block, uur.uur_offset,
 						 uur.uur_cid, uur.uur_prevxid);
 		append_blkprev(buf, uur.uur_blkprev, record->location);
@@ -342,7 +342,7 @@ zheap_undo_desc(StringInfo buf, const WrittenUndoNode *record)
 				Assert(false);
 		}
 
-		appendStringInfo(buf, "LOCK type %s, reloid %u, blk %u, off %u, cid %u, prevxid %u",
+		appendStringInfo(buf, "LOCK type %s, reloid %u, blk %u, off %u, cid %u, prevxid %u,",
 						 type_str, uur.uur_reloid, uur.uur_block, uur.uur_offset,
 						 uur.uur_cid, uur.uur_prevxid);
 		append_blkprev(buf, uur.uur_blkprev, record->location);
@@ -352,7 +352,7 @@ zheap_undo_desc(StringInfo buf, const WrittenUndoNode *record)
 		UnpackedUndoRecord	uur;
 
 		UnpackZHeapUndoRecord(record->n.data, false, false, &uur);
-		appendStringInfo(buf, "ITEMID_UNUSED reloid %u, blk %u, off %u, cid %u, prevxid %u",
+		appendStringInfo(buf, "ITEMID_UNUSED reloid %u, blk %u, off %u, cid %u, prevxid %u,",
 						 uur.uur_reloid, uur.uur_block, uur.uur_offset,
 						 uur.uur_cid, uur.uur_prevxid);
 		append_blkprev(buf, uur.uur_blkprev, record->location);
