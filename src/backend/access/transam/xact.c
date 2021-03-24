@@ -1022,6 +1022,32 @@ IsInParallelMode(void)
 }
 
 /*
+ *	PrepareParallelModePlanExec
+ *
+ * Prepare for entering parallel mode plan execution, based on command-type.
+ */
+void
+PrepareParallelModePlanExec(CmdType commandType)
+{
+	if (IsModifySupportedInParallelMode(commandType))
+	{
+		Assert(!IsInParallelMode());
+
+		/*
+		 * Prepare for entering parallel mode by assigning a TransactionId.
+		 * Failure to do this now would result in heap_insert() subsequently
+		 * attempting to assign a TransactionId whilst in parallel-mode, which
+		 * is not allowed.
+		 *
+		 * This approach has a disadvantage in that if the underlying SELECT
+		 * does not return any rows, then the TransactionId is not used,
+		 * however that shouldn't happen in practice in many cases.
+		 */
+		(void) GetCurrentTransactionId();
+	}
+}
+
+/*
  *	CommandCounterIncrement
  */
 void
@@ -3212,6 +3238,13 @@ CommitTransactionCommand(void)
 				Assert(s->parent == NULL);
 				CommitTransaction();
 				s->blockState = TBLOCK_DEFAULT;
+				if (s->chain)
+				{
+					StartTransaction();
+					s->blockState = TBLOCK_INPROGRESS;
+					s->chain = false;
+					RestoreTransactionCharacteristics();
+				}
 			}
 			else if (s->blockState == TBLOCK_PREPARE)
 			{
@@ -6008,10 +6041,12 @@ XactLogAbortRecord(int nestingLevel, TimestampTz abort_time,
 		xl_dbinfo.tsId = MyDatabaseTableSpace;
 	}
 
-	/* dump transaction origin information only for abort prepared */
+	/*
+	 * Dump transaction origin information only for abort prepared. We need
+	 * this during recovery to update the replication origin progress.
+	 */
 	if ((replorigin_session_origin != InvalidRepOriginId) &&
-		TransactionIdIsValid(twophase_xid) &&
-		XLogLogicalInfoActive())
+		TransactionIdIsValid(twophase_xid))
 	{
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_ORIGIN;
 
@@ -6223,7 +6258,8 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
  * because subtransaction commit is never WAL logged.
  */
 static void
-xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid)
+xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
+				XLogRecPtr lsn, RepOriginId origin_id)
 {
 	TransactionId max_xid;
 
@@ -6270,6 +6306,13 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid)
 		 */
 		if (parsed->xinfo & XACT_XINFO_HAS_AE_LOCKS)
 			StandbyReleaseLockTree(xid, parsed->nsubxacts, parsed->subxacts);
+	}
+
+	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)
+	{
+		/* recover apply progress */
+		replorigin_advance(origin_id, parsed->origin_lsn, lsn,
+						   false /* backward */ , false /* WAL */ );
 	}
 
 	/* Make sure files supposed to be dropped are dropped */
@@ -6320,7 +6363,8 @@ xact_redo(XLogReaderState *record)
 
 		UndoReplay(record, NULL, 0);
 		ParseAbortRecord(XLogRecGetInfo(record), xlrec, &parsed);
-		xact_redo_abort(&parsed, XLogRecGetXid(record));
+		xact_redo_abort(&parsed, XLogRecGetXid(record),
+						record->EndRecPtr, XLogRecGetOrigin(record));
 	}
 	else if (info == XLOG_XACT_ABORT_PREPARED)
 	{
@@ -6329,7 +6373,8 @@ xact_redo(XLogReaderState *record)
 
 		Assert(!XLogRecHasAnyBlockRefs(record));
 		ParseAbortRecord(XLogRecGetInfo(record), xlrec, &parsed);
-		xact_redo_abort(&parsed, parsed.twophase_xid);
+		xact_redo_abort(&parsed, parsed.twophase_xid,
+						record->EndRecPtr, XLogRecGetOrigin(record));
 
 		/* Delete TwoPhaseState gxact entry and/or 2PC file. */
 		LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);

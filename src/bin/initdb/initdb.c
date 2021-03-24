@@ -658,6 +658,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 {
 	{"arabic", "ar"},
 	{"arabic", "Arabic"},
+	{"armenian", "hy"},
+	{"armenian", "Armenian"},
 	{"basque", "eu"},
 	{"basque", "Basque"},
 	{"catalan", "ca"},
@@ -699,6 +701,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"romanian", "ro"},
 	{"russian", "ru"},
 	{"russian", "Russian"},
+	{"serbian", "sr"},
+	{"serbian", "Serbian"},
 	{"spanish", "es"},
 	{"spanish", "Spanish"},
 	{"swedish", "sv"},
@@ -707,6 +711,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"tamil", "Tamil"},
 	{"turkish", "tr"},
 	{"turkish", "Turkish"},
+	{"yiddish", "yi"},
+	{"yiddish", "Yiddish"},
 	{NULL, NULL}				/* end marker */
 };
 
@@ -3234,6 +3240,9 @@ main(int argc, char *argv[])
 		get_parent_directory(pg_ctl_path);
 		/* ... and tag on pg_ctl instead */
 		join_path_components(pg_ctl_path, pg_ctl_path, "pg_ctl");
+
+		/* Convert the path to use native separators */
+		make_native_path(pg_ctl_path);
 
 		/* path to pg_ctl, properly quoted */
 		appendShellString(start_db_cmd, pg_ctl_path);
