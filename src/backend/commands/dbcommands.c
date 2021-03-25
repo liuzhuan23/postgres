@@ -2310,6 +2310,13 @@ dbase_undo(const WrittenUndoNode *record, FullTransactionId fxid)
 	xu_dbase_create *undo_rec;
 	xl_dbase_drop_dir_rec xlrec;
 
+	/*
+	 * The end of transaction or subtransaction is not interesting for
+	 * us. Should we process the records in batches?
+	 */
+	if (record == NULL)
+		return;
+
 	Assert(record->n.rmid == RM_DBASE_ID);
 	/* Currently we only have a single type of DBASE undo record. */
 	Assert(record->n.type == UNDO_DBASE_CREATE);
