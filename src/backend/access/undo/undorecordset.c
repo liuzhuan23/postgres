@@ -2211,7 +2211,7 @@ GetAllUndoRecordSets(void)
 			XactUndoRecordSetHeader xact_hdr;
 			UndoRecordSetType urs_type;
 			bool	discarded;
-			bool	applied;
+			bool	applied = false;
 
 			chunk_start = MakeUndoRecPtr(logno, cur);
 
