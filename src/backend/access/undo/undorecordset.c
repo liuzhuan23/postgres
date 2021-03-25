@@ -2557,9 +2557,8 @@ AdvanceOldestXidHavingUndo(void)
 	URSEntry *entry;
 
 	/*
-	 * Since this function discards undo, do nothing while the undo log might
-	 * still be subject to recovery. And even if the log files were recovered,
-	 * ApplyPendingUndo() might still be running, which needs the undo.
+	 * Since this function assists in undo discarding, do nothing while the
+	 * undo log might still be subject to recovery.
 	 *
 	 * ERROR makes more sense than returning an invalid XID.
 	 */
