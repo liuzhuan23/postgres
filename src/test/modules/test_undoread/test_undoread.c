@@ -111,30 +111,34 @@ Datum
 test_undoread_insert(PG_FUNCTION_ARGS)
 {
 	char	   *string = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	UndoRecData	rdata;
+	XactUndoContext undo_context;
 	UndoRecPtr	urp;
-	UndoNode	undo_node;
-	StringInfo	buf;
 
 	check_debug_build();
 
 	if (current_urs == NULL)
 		elog(ERROR, "no active UndoRecordSet");
 
-	/* Neither type nor rmid is important here. */
-	undo_node.type = 0;
-	undo_node.rmid = 0;
-	undo_node.length = strlen(string) + 1;
-	undo_node.data = string;
+	rdata.len = strlen(string) + 1;
+	rdata.data = string;
+	rdata.next = NULL;
 
-	buf = makeStringInfo();
-	SerializeUndoData(buf, &undo_node);
+	/*
+	 * Neither relation persistence nor record type nor rmid is important
+	 * here.
+	 */
+	urp = PrepareXactUndoData(&undo_context, RELPERSISTENCE_PERMANENT,
+							  GetUndoDataSize(&rdata));
+	SerializeUndoData(&undo_context.data, 0, 0, &rdata);
 
 	/* Since we do not modify relation pages, no WAL needs to be written. */
-	urp = UndoPrepareToInsert(current_urs, buf->len);
+
 	START_CRIT_SECTION();
-	UndoInsert(current_urs, buf->data, buf->len);
+	InsertXactUndoData(&undo_context, 0);
 	END_CRIT_SECTION();
-	UndoRelease(current_urs);
+
+	CleanupXactUndoInsertion(&undo_context);
 
 	PG_RETURN_TEXT_P(cstring_to_text(psprintf(UndoRecPtrFormat, urp)));
 }

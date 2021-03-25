@@ -16,7 +16,6 @@
 
 #include "access/undodefs.h"
 #include "access/undorecordset.h"
-#include "access/xactundo.h"
 #include "lib/stringinfo.h"
 #include "storage/buf.h"
 

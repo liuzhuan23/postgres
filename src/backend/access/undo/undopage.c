@@ -157,9 +157,12 @@ UndoPageInsertHeader(Page page, int page_offset, int header_offset,
  * returned given the same arguments, but without writing anything.
  */
 int
-UndoPageSkipHeader(int page_offset, int header_offset, size_t type_header_size)
+UndoPageSkipHeader(Page page, int page_offset, int header_offset,
+				   size_t type_header_size)
 {
+	UndoPageHeader uph = (UndoPageHeader) page;
 	size_t		all_header_size = SizeOfUndoRecordSetChunkHeader + type_header_size;
+	int		bytes_skipped;
 
 	/* Must not overwrite the page header. */
 	Assert(page_offset >= SizeOfUndoPageHeaderData);
@@ -167,7 +170,17 @@ UndoPageSkipHeader(int page_offset, int header_offset, size_t type_header_size)
 	/* Must not overrun the end of the page. */
 	Assert(page_offset < BLCKSZ);
 
-	return Min(BLCKSZ - page_offset, all_header_size);
+	bytes_skipped = Min(BLCKSZ - page_offset,
+						all_header_size - header_offset);
+
+	/*
+	 * Keep track of the insertion point even if not actually inserting:
+	 * UndoReplay() needs to return the record position even if skipping the
+	 * part of the undo log.
+	 */
+	uph->ud_insertion_point += bytes_skipped;
+
+	return bytes_skipped;
 }
 
 /*
@@ -250,15 +263,28 @@ UndoPageInsertRecord(Page page, int page_offset, int data_offset,
  * returned given the same arguments, but without writing anything.
  */
 int
-UndoPageSkipRecord(int page_offset, int data_offset, size_t data_size)
+UndoPageSkipRecord(Page page, int page_offset, int data_offset,
+				   size_t data_size)
 {
+	UndoPageHeader uph = (UndoPageHeader) page;
+	int		bytes_skipped;
+
 	/* Must not overwrite the page header. */
 	Assert(page_offset >= SizeOfUndoPageHeaderData);
 
 	/* Must not overrun the end of the page. */
 	Assert(page_offset < BLCKSZ);
 
-	return Min(BLCKSZ - page_offset, data_size);
+	bytes_skipped = Min(BLCKSZ - page_offset, data_size - data_offset);
+
+	/*
+	 * Keep track of the insertion point even if not actually inserting:
+	 * UndoReplay() needs to return the record position even if skipping the
+	 * part of the undo log.
+	 */
+	uph->ud_insertion_point += bytes_skipped;
+
+	return bytes_skipped;
 }
 
 /*

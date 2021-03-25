@@ -449,16 +449,16 @@ read_node_remaining(UndoRSReaderState *r, UndoRecPtr urp, Size len)
 	/* rmid */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.rmid));
-	node->n.rmid = *(uint8 *) r->buf.data;
+	memcpy(&node->n.rmid, r->buf.data, sizeof(node->n.rmid));
 	len -= sizeof(node->n.rmid);
 
 	/* type */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.type));
-	node->n.type = *(uint8 *) r->buf.data;
+	memcpy(&node->n.type, r->buf.data, sizeof(node->n.type));
 	len -= sizeof(node->n.type);
 
-	/* The actual record data*/
+	/* The actual record data */
 	resetStringInfo(&r->buf);
 	urp = undo_reader_read_bytes(r, urp, len);
 	node->n.data = r->buf.data;
@@ -660,7 +660,7 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
  * Read one record in backward direction, with the first record returned being
  * the one at end as passed to UndoRSReaderInit(), ending at start.
  */
-extern bool
+bool
 UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 {
 	StringInfo	rl = &r->rec_lengths;

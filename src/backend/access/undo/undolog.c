@@ -538,6 +538,7 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 	UndoLogOffset new_end = 0;
 	UndoLogOffset begin;
 	UndoLogOffset end;
+	UndoLogOffset insert, size;
 	int			recycle = 0;
 
 	/*
@@ -545,13 +546,6 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 	 * lowest-numbered segment we need to keep.
 	 */
 	new_begin = new_discard - new_discard % UndoLogSegmentSize;
-
-	/*
-	 * Round new_insert up to the nearest segment boundary, to make a valid
-	 * end offset.  This will be one past the highest-numbered setgment we
-	 * need to keep, but we may decide to keep more, below.
-	 */
-	new_end = new_insert + UndoLogSegmentSize - new_insert % UndoLogSegmentSize;
 
 	slot = UndoLogGetSlot(logno, true);
 
@@ -570,24 +564,32 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 		return;
 	}
 
+	/* Fetch information that will be needed below. */
+	LWLockAcquire(&slot->meta_lock, LW_SHARED);
+	insert = slot->meta.insert;
+	size = slot->meta.size;
+	end = slot->end;
+	LWLockRelease(&slot->meta_lock);
+
+	if (new_insert == 0)
+		new_insert = insert;
+
+	/*
+	 * Round new_insert up to the nearest segment boundary, to make a valid
+	 * end offset.  This will be one past the highest-numbered setgment we
+	 * need to keep, but we may decide to keep more, below.
+	 */
+	new_end = new_insert + UndoLogSegmentSize - new_insert % UndoLogSegmentSize;
+
 	/* First, deal with advancing 'begin', if we were asked to do that. */
 	if (new_discard != 0)
 	{
-		UndoLogOffset insert;
-
-		LWLockAcquire(&slot->meta_lock, LW_SHARED);
-		insert = slot->meta.insert;
-		LWLockRelease(&slot->meta_lock);
-
 		/*
 		 * Can we try to recycle an old segment to become a new one?  For now
 		 * we only consider creating one spare segment.
 		 */
-		if (new_begin > slot->begin && slot->end < insert + UndoLogSegmentSize)
-		{
+		if (new_begin > slot->begin && (end + UndoLogSegmentSize) <= size)
 			recycle = 1;
-			new_end += UndoLogSegmentSize;
-		}
 
 		for (begin = slot->begin;
 			 begin < new_begin;
@@ -611,7 +613,7 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 			{
 				char		new_path[MAXPGPATH];
 
-				UndoLogSegmentPath(logno, begin / UndoLogSegmentSize,
+				UndoLogSegmentPath(logno, end / UndoLogSegmentSize,
 								   slot->meta.tablespace, new_path);
 
 				if (rename(old_path, new_path) == 0)
@@ -619,7 +621,7 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 					elog(DEBUG1, "recycled undo segment \"%s\" -> \"%s\"",
 						 old_path, new_path);
 					--recycle;
-					new_end += UndoLogSegmentSize;
+					end += UndoLogSegmentSize;
 				}
 				else if (errno != ENOENT)
 					ereport(ERROR,
@@ -640,12 +642,23 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 		}
 	}
 
-	/* Next, deal with advancing 'end', if we were asked to do that. */
-	if (new_end != 0)
-	{
-		for (end = slot->end; end < new_end; end += UndoLogSegmentSize)
-			allocate_empty_undo_segment(logno, UndoLogNumberGetTablespace(logno), end);
-	}
+	/*
+	 * Next, deal with advancing 'end', if we were asked to do that.
+	 *
+	 * Note that here we skip the segment(s) we got by recycling the old
+	 * one(s). UndoPrepareToInsert() should initialize the pages before the
+	 * first write. XXX pg_undo_dump will report errors if it hits the old
+	 * contents - is that a serious issue?
+	 */
+	for (; end < new_end; end += UndoLogSegmentSize)
+		allocate_empty_undo_segment(logno, UndoLogNumberGetTablespace(logno), end);
+
+	/*
+	 * If recycling added more space than required, make sure the slot
+	 * metadata reflects that.
+	 */
+	if (end > new_end)
+		new_end = end;
 
 	/*
 	 * Ask the checkpointer to flush the directory entries before next
@@ -657,8 +670,7 @@ UndoLogAdjustPhysicalRange(UndoLogNumber logno,
 	LWLockAcquire(&slot->meta_lock, LW_EXCLUSIVE);
 	if (new_begin != 0)
 		slot->begin = new_begin;
-	if (new_end != 0)
-		slot->end = new_end;
+	slot->end = new_end;
 	LWLockRelease(&slot->meta_lock);
 
 	LWLockRelease(&slot->file_lock);
@@ -2116,6 +2128,8 @@ undolog_redo(XLogReaderState *record)
 /*
  * Get the undo persistence level that corresponds to a relation persistence
  * level.
+ *
+ * TODO Remove, UndoPersistenceForRelPersistence() exists already.
  */
 UndoPersistenceLevel
 GetUndoPersistenceLevel(char relpersistence)

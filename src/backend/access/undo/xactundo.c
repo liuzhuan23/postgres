@@ -54,21 +54,50 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 
-void
-SerializeUndoData(StringInfo buf, UndoNode *undo_node)
+/*
+ * Compute the size we need in the undo log.
+ */
+Size
+GetUndoDataSize(UndoRecData *rdata)
 {
-	Size len_total;
+	UndoRecData     *rdata_tmp = rdata;
+	Size len_total = 0;
 
-	len_total = undo_node->length +
-		sizeof(((UndoNode *) NULL)->length) +
+	while (rdata_tmp)
+	{
+		len_total += rdata_tmp->len;
+		rdata_tmp = rdata_tmp->next;
+	}
+
+	len_total += sizeof(((UndoNode *) NULL)->length) +
 		sizeof(((UndoNode *) NULL)->rmid) +
 		sizeof(((UndoNode *) NULL)->type);
 
+	return len_total;
+}
+
+/*
+ * Serialize the undo records.
+ */
+void
+SerializeUndoData(StringInfo buf, RmgrId rmid, uint8 rec_type,
+				  UndoRecData *rdata)
+{
+	Size	len_total = GetUndoDataSize(rdata);
+
+
 	/* TODO: replace with actual serialization */
-	appendBinaryStringInfo(buf, (char *) &len_total, sizeof(len_total));
-	appendBinaryStringInfo(buf, (char *) &undo_node->rmid, sizeof(((UndoNode *) NULL)->rmid));
-	appendBinaryStringInfo(buf, (char *) &undo_node->type, sizeof(((UndoNode *) NULL)->type));
-	appendBinaryStringInfo(buf, undo_node->data, undo_node->length);
+	appendBinaryStringInfo(buf, (char *) &len_total,
+						   sizeof(((UndoNode *) NULL)->length));
+	appendBinaryStringInfo(buf, (char *) &rmid,
+						   sizeof(((UndoNode *) NULL)->rmid));
+	appendBinaryStringInfo(buf, (char *) &rec_type,
+						   sizeof(((UndoNode *) NULL)->type));
+	while (rdata)
+	{
+		appendBinaryStringInfo(buf, rdata->data, rdata->len);
+		rdata = rdata->next;
+	}
 }
 
 /* Per-subtransaction backend-private undo state. */
@@ -130,7 +159,7 @@ XactHasUndo(void)
  */
 UndoRecPtr
 PrepareXactUndoData(XactUndoContext *ctx, char persistence,
-					UndoNode *undo_node)
+					Size record_size)
 {
 	int			nestingLevel = GetCurrentTransactionNestLevel();
 	UndoPersistenceLevel plevel = GetUndoPersistenceLevel(persistence);
@@ -138,7 +167,6 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	UndoRecPtr	result;
 	UndoRecPtr *sub_start_location;
 	UndoRecordSet *urs;
-	UndoRecordSize size;
 
 	/* We should be connected to a database. */
 	Assert(OidIsValid(MyDatabaseId));
@@ -189,16 +217,24 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	/* Remember persistence level. */
 	ctx->plevel = plevel;
 
-	/* Prepare serialized undo data. */
 	initStringInfo(&ctx->data);
-	SerializeUndoData(&ctx->data, undo_node);
-	size = ctx->data.len;
+
+	/*
+	 * Allocate the memory anyway because we cannot do so later in the
+	 * critical section. enlargeStringInfo() is not perfect for this because
+	 * it can allocate a lot more more than we need.
+	 *
+	 * Add one extra byte for the NULL terminating character as
+	 * enlargeStringInfo() would do.
+	 */
+	ctx->data.maxlen = record_size + 1;
+	ctx->data.data = (char *) repalloc(ctx->data.data, ctx->data.maxlen);
 
 	/*
 	 * Find sufficient space for this undo insertion and lock the necessary
 	 * buffers.
 	 */
-	result = UndoPrepareToInsert(urs, size);
+	result = UndoPrepareToInsert(urs, record_size);
 
 	/*
 	 * If this is the first undo for this persistence level in this
@@ -211,7 +247,8 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 	/*
 	 * Remember this as the last end location.
 	 */
-	XactUndo.end_location[plevel] = UndoRecPtrPlusUsableBytes(result, size);
+	XactUndo.end_location[plevel] = UndoRecPtrPlusUsableBytes(result,
+															  record_size);
 
 	return result;
 }
@@ -259,15 +296,20 @@ CleanupXactUndoInsertion(XactUndoContext *ctx)
  * XXX: Should this live here? Or somewhere around the serialization code?
  */
 UndoRecPtr
-XactUndoReplay(XLogReaderState *xlog_record, UndoNode *undo_node)
+XactUndoReplay(XLogReaderState *xlog_record, RmgrId rmid, uint8 rec_type,
+			   void *rec_data, size_t rec_size)
 {
-	StringInfoData data;
+	XactUndoContext ctx;
+	UndoRecData	rdata;
 
 	/* Prepare serialized undo data. */
-	initStringInfo(&data);
-	SerializeUndoData(&data, undo_node);
+	rdata.data = rec_data;
+	rdata.len = rec_size;
+	rdata.next = NULL;
+	initStringInfo(&ctx.data);
+	SerializeUndoData(&ctx.data, rmid, rec_type, &rdata);
 
-	return UndoReplay(xlog_record, data.data, data.len);
+	return UndoReplay(xlog_record, ctx.data.data, ctx.data.len);
 }
 
 /*
@@ -281,10 +323,6 @@ PerformUndoActionsRange(UndoRecPtr begin, UndoRecPtr end,
 {
 	UndoRSReaderState r;
 
-	/*
-	 * FIXME: provide correct persistence level - also
-	 * UndoPersistenceLevelString
-	 */
 	UndoRSReaderInit(&r, begin, end, relpersistence, nestingLevel == 1);
 
 	while (UndoRSReaderReadOneBackward(&r))

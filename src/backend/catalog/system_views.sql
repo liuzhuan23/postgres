@@ -1193,7 +1193,6 @@ SELECT	c.logno, c.start, c.prev, c.size, c.discarded,
 	c.type, c.type_header
 FROM pg_stat_get_undo_logs() l,
      pg_get_undo_log_chunks(l.discard, l.insert) c
-WHERE c.discarded = 'f'
 ORDER BY c.logno;
 
 CREATE VIEW pg_stat_undo_records AS
