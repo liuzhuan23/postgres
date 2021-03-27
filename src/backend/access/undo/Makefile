@@ -19,6 +19,7 @@ OBJS = \
 	undoread.o \
 	undorecordset.o \
 	undorecordset_xlog.o \
+	undoworker.o \
 	xactundo.o
 
 include $(top_srcdir)/src/backend/common.mk

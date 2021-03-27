@@ -119,8 +119,8 @@ print_chunk_info(UndoLogChunkInfo *chunk, UndoRecPtr location)
 		 * Print out t/f rather than true/false as if it was the bool SQL
 		 * type. (Other monitoring code does use bool.)
 		 */
-		printf("type: transaction (xid=%u, applied=%s)",
-			   xid, hdr->applied ? "t" : "f");
+		printf("type: transaction (xid=%u, dboid=%u, applied=%s)",
+			   xid, hdr->dboid, hdr->applied ? "t" : "f");
 	}
 	else if (chunk->type == URST_FOO)
 	{

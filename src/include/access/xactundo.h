@@ -49,6 +49,8 @@ extern UndoRecPtr XactUndoReplay(XLogReaderState *xlog_record, RmgrId rmid,
 extern void PerformUndoActionsRange(UndoRecPtr begin, UndoRecPtr end,
 									char relpersistence, int nestingLevel);
 extern void PerformUndoActions(int nestingLevel);
+extern void PerformBackgroundUndo(UndoRecPtr begin, UndoRecPtr end,
+								  UndoPersistenceLevel plevel);
 
 /* transaction integration */
 extern void AtCommit_XactUndo(void);

@@ -208,6 +208,7 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 		XactUndoRecordSetHeader hdr;
 
 		hdr.fxid = fxid;
+		hdr.dboid = MyDatabaseId;
 		hdr.applied = false;
 
 		urs = UndoCreate(URST_TRANSACTION, persistence, 1,
@@ -472,6 +473,40 @@ PerformUndoActions(int nestingLevel)
 		}
 	}
 }
+
+/*
+ * Perform the undo actions with no active transaction.
+ */
+void
+PerformBackgroundUndo(UndoRecPtr begin, UndoRecPtr end,
+					  UndoPersistenceLevel plevel)
+{
+	UndoRecPtr	first_rec;
+
+	/* We pretend to do a regular transaction, but there's no DO in it. */
+	StartTransactionCommand();
+
+	/*
+	 * Initialize XactUndo so that the undo actios can be applied simply by
+	 * aborting the current transaction.
+	 */
+	first_rec = UndoRecPtrPlusUsableBytes(begin,
+										  SizeOfUndoRecordSetChunkHeader +
+										  sizeof(XactUndoRecordSetHeader));
+	ResetXactUndo();
+	XactUndo.has_undo = true;
+	XactUndo.subxact->start_location[plevel] = first_rec;
+	XactUndo.end_location[plevel] = end;
+
+	/*
+	 * Abort the transaction. This includes the UNDO stage.
+	 *
+	 * XXX Downside of this approach is that if the undo fails, the background
+	 * worker exits without processing the remaining sets. Is that o.k.?
+	 */
+	AbortCurrentTransaction();
+}
+
 
 /*
  * Post-commit cleanup of the undo state.

@@ -2390,18 +2390,31 @@ UndoSetFlag(UndoRecPtr last_chunk, uint16 off, char persistence)
 void
 ApplyPendingUndo(void)
 {
+	ResourceOwner	res_owner_tmp;
 	chunktable_hash *sets;
 	chunktable_iterator iterator;
 	URSEntry *entry;
 
+	/*
+	 * At this point we do not need a regular transaction, but need to have
+	 * the CurrentResourceOwner set, in order to access the undo log in shared
+	 * buffers. (It few used a transaction here, we'd also have to copy the
+	 * result from that transaction's memory context.)
+	 */
+	Assert(CurrentResourceOwner == NULL);
+	CurrentResourceOwner = ResourceOwnerCreate(CurrentResourceOwner,
+											   "GetAllUndoRecordSets");
 	sets = GetAllUndoRecordSets();
+	res_owner_tmp = CurrentResourceOwner;
+	CurrentResourceOwner = NULL;
+	ResourceOwnerDelete(res_owner_tmp);
 
 	if (sets->members == 0)
 		return;
 
 	/*
 	 * Now that we have the whole record sets, check if their undo records
-	 * need to be executed.
+	 * need to be executed, and execute them.
 	 *
 	 * TODO If there can be multiple per-subtransaction URSs (i.e. they have
 	 * the same XID) make sure they are processed in the correct order.
@@ -2415,6 +2428,10 @@ ApplyPendingUndo(void)
 
 		/* The set can be discarded but the underlying log still there. */
 		if (entry->discarded)
+			continue;
+
+		/* We can only process undo of the database we are connected to. */
+		if (entry->xact_hdr.dboid != MyDatabaseId)
 			continue;
 
 		xid = XidFromFullTransactionId(entry->xact_hdr.fxid);
@@ -2439,15 +2456,7 @@ ApplyPendingUndo(void)
 		}
 		else if (TransactionIdIsPrepared(xid))
 		{
-			/*
-			 * Prepared transactions may still need the undo log.
-			 *
-			 * Since no connection should exist at the moment, only prepared
-			 * transactions should be in the proc array now, so
-			 * TransactionIdIsInProgress() would normally reveal them. However
-			 * that function does not work in the startup worker, as it does
-			 * not have MyProc->pgxactoff set.
-			 */
+			/* Prepared transactions may still need the undo log. */
 		}
 		else
 		{
@@ -2460,28 +2469,13 @@ ApplyPendingUndo(void)
 			 */
 			if (!entry->applied)
 			{
-				/*
-				 * As we're not in a failed transaction now, we might want to
-				 * create a dummy transaction state. So far let's assume that
-				 * the RMGR specific undo routines only deal with shared
-				 * buffers and WAL, e.g. they do not open relations. Thus we
-				 * should not need transaction state like we don't need it for
-				 * WAL replay.
-				 */
-				PerformUndoActionsRange(entry->begin, entry->end,
-										entry->persistence, 1);
+				/* Do the actual work. */
+				PerformBackgroundUndo(entry->begin, entry->end,
+									  UndoPersistenceForRelPersistence(entry->persistence));
 
 				/*
 				 * Mark the URS applied (only the first chunk can carry this
 				 * information).
-				 *
-				 * Since this is still a cleanup after crash recovery and
-				 * since the URS will be marked discarded below, the
-				 * transaction should never be examined by
-				 * AdvanceOldestXidHavingUndo(). Thus it's not necessary to
-				 * set "applied" here, however it can help to make the next
-				 * restart shorter if this function fails to complete due to
-				 * server crash.
 				 */
 				if (entry->urs_type == URST_TRANSACTION)
 				{
@@ -2490,28 +2484,22 @@ ApplyPendingUndo(void)
 					/* Compute the offset of the "applied" flag in the chunk. */
 					off = SizeOfUndoRecordSetChunkHeader +
 						offsetof(XactUndoRecordSetHeader, applied);
+
+					/*
+					 * Adjust the chunk(s). Transaction is not needed here,
+					 * but resource owner is.
+					 */
+					Assert(CurrentResourceOwner == NULL);
+					CurrentResourceOwner = ResourceOwnerCreate(CurrentResourceOwner,
+															   "UndoSetFlag");
 					UndoSetFlag(entry->begin, off, entry->persistence);
+					res_owner_tmp = CurrentResourceOwner;
+					CurrentResourceOwner = NULL;
+					ResourceOwnerDelete(res_owner_tmp);
 				}
 			}
-
-			/*
-			 * Now that the changes are undone, make sure the affected chunks
-			 * are discarded.
-			 */
-			if (!entry->discarded)
-				UndoSetFlag(entry->last_chunk,
-							offsetof(UndoRecordSetChunkHeader, discarded),
-							entry->persistence);
 		}
 	}
-
-	/*
-	 * Some undo actions may unlink files. Since the checkpointer is not
-	 * guaranteed to be up, it seems simpler to process the undo request
-	 * ourselves in the way the checkpointer would do.
-	 */
-	SyncPreCheckpoint();
-	SyncPostCheckpoint();
 
 	/* Cleanup. */
 	chunktable_destroy(sets);
@@ -2621,9 +2609,10 @@ AdvanceOldestXidHavingUndo(void)
 			/*
 			 * If the transaction aborted, we can only discard the chunk(s) if
 			 * the URS has already been applied. We must not try to apply the
-			 * undo ourselves because the backend/worker that ran the
+			 * undo ourselves because 1) the backend/worker that ran the
 			 * transaction might try to do itself and there's no easy way to
-			 * find out (and interlock).
+			 * find out (and interlock), 2) the URS might belong to a prepared
+			 * transaction which can eventually commit.
 			 */
 			if (entry->applied)
 				UndoSetFlag(entry->last_chunk,
@@ -2635,9 +2624,13 @@ AdvanceOldestXidHavingUndo(void)
 				 * This URS must be preserved, so adjust the discarding
 				 * horizon if needed.
 				 *
-				 * Note that here we should not see URS of a transaction that
-				 * could not complete due to server crash - those should have
-				 * been processed by now, see ApplyPendingUndo().
+				 * Note that besides prepared transactions, we can see here an
+				 * URS of a transaction that could not complete due to server
+				 * crash. This is not too likely because the undo worker
+				 * should start processing such transactions immediately after
+				 * the completion of crash recovery. If we hit particular xid
+				 * before the undo worker did, the next run of this function
+				 * should find it as applied.
 				 */
 				if (TransactionIdPrecedes(xid, oldestXidHavingUndo))
 					oldestXidHavingUndo = xid;
@@ -2687,11 +2680,9 @@ DiscardUndoRecordSetChunks(void)
 
 	/*
 	 * Since AdvanceOldestXidHavingUndo() does nothing in the recovery mode,
-	 * all we could process here is the chunks discarded by
-	 * ApplyPendingUndo(). Not sure it's worth the effort. Furthermore, the
-	 * discard worker is not expected to run during recovery. And finally, we
-	 * don't want to perform discarding on standby cluster in other way than
-	 * by replaying WAL.
+	 * we should not find much work to do in recovery as well.  Furthermore,
+	 * we don't want to perform discarding on standby cluster in other way
+	 * than by replaying WAL.
 	 *
 	 * ERROR seems more suitable than returning because this function can be
 	 * called interactively from a backend.
@@ -3159,8 +3150,8 @@ get_next_undo_log_chunk(PG_FUNCTION_ARGS, FuncCallContext *funcctx)
 		 * Print out t/f rather than true/false so it's consistent with the
 		 * 'discarded' bool value.
 		 */
-		values[6] = CStringGetTextDatum(psprintf("(xid=%u, applied=%s)",
-												 xid, hdr->applied ?
+		values[6] = CStringGetTextDatum(psprintf("(xid=%u, dboid=%u, applied=%s)",
+												 xid, hdr->dboid, hdr->applied ?
 												 "t" : "f"));
 	}
 	else

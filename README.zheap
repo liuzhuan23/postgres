@@ -21,9 +21,11 @@ Regardless the future development, the following thins need more work:
 
     * Add zheap specific regression tests from [1]
 
-Like [3], this branch does not contain the "undo worker". According to [4] and
-[5], it seems worth to implement the zheap AM without background UNDO and test
-if it's viable.
+This branch does introduce the "undo worker", however it only runs after crash
+recovery in order to apply the undo log of transactions that could not
+complete due to server crash. Otherwise, according to [4] and [5], it seems
+worth to implement the zheap AM without background UNDO and test if it's
+viable.
 
 
 [1] https://github.com/EnterpriseDB/zheap/tree/master

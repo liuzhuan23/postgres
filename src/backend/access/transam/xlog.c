@@ -8103,10 +8103,10 @@ StartupXLOG(void)
 	CloseDanglingUndoRecordSets();
 
 	/*
-	 * The undo logs are consistent now, so check all undo record sets and
-	 * apply those belonging to aborted (or not finished) transactions.
+	 * Undo worker will start as soon as the crash recovery is completed, to
+	 * apply the undo log of transactions which could not complete due to
+	 * server crash.
 	 */
-	ApplyPendingUndo();
 
 	/*
 	 * All done with end-of-recovery actions.
