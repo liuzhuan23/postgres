@@ -76,7 +76,7 @@ test_undoread_create(PG_FUNCTION_ARGS)
 	current_urs = UndoCreate(URST_TRANSACTION,
 							 RELPERSISTENCE_PERMANENT,
 							 GetCurrentTransactionNestLevel(),
-							 sizeof(XactUndoRecordSetHeader),
+							 SizeOfXactUndoRecordSetHeader,
 							 (char *) &hdr);
 	MemoryContextSwitchTo(old_context);
 

@@ -72,6 +72,9 @@ typedef struct XactUndoRecordSetHeader
 	bool		applied;
 } XactUndoRecordSetHeader;
 
+#define SizeOfXactUndoRecordSetHeader \
+	(offsetof(XactUndoRecordSetHeader, applied) + sizeof(bool))
+
 /*
  * TODO Handle the missing types.
  */
@@ -81,7 +84,7 @@ get_urs_type_header_size(UndoRecordSetType type)
 	switch (type)
 	{
 		case URST_TRANSACTION:
-			return sizeof(XactUndoRecordSetHeader);
+			return SizeOfXactUndoRecordSetHeader;
 		case URST_FOO:
 			return 4;
 		default:
