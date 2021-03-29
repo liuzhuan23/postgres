@@ -568,7 +568,7 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 
 	/* read all */
 	if (r->current_chunk == -1)
-		return false;
+		goto done;
 
 	Assert(r->current_chunk > 0 && r->current_chunk <= r->chunks.nchunks);
 
@@ -595,12 +595,12 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 	}
 
 	if (r->next_urp == InvalidUndoRecPtr)
-		return false;
+		goto done;
 
 	if (r->next_urp >= r->end_reading)
 	{
 		undo_reader_release_buffer(r);
-		return false;
+		goto done;
 	}
 
 	/* Read the URS record length, could be split over pages. */
@@ -620,9 +620,12 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 
 		/*
 		 * Store the length, as it usually takes much less space than the
-		 * pointer.
+		 * pointer. In fact we store difference of the record pointers because
+		 * the last record in the chunk may be followed by unused bytes.
 		 */
-		store_record_length(r, rec_len);
+		if (r->last_record != InvalidUndoRecPtr)
+			store_record_length(r, r->next_urp - r->last_record);
+		r->last_record = r->next_urp;
 
 		/* Compute where the next records should start. */
 		next_logno = UndoRecPtrGetLogNo(r->next_urp);
@@ -654,6 +657,17 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 		r->next_urp = next;
 
 	return true;
+
+done:
+	/* Make sure the last record length is stored. */
+	if (length_only && r->last_record != InvalidUndoRecPtr)
+	{
+		Assert(r->last_record < r->end_reading);
+
+		store_record_length(r, r->end_reading - r->last_record);
+	}
+
+	return false;
 }
 
 /*
@@ -682,23 +696,34 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 		/* Initialize the pointer to read the length of the last record. */
 		r->backward_cur = rl->data + rl->len;
 
-		/* URP of the last node returned. */
+		/* URP immediately following the last node returned. */
 		r->node.location = r->end_reading;
 	}
 
 	if (r->backward_cur > rl->data)
 	{
 		Size	rec_len;
-		UndoRecPtr	urp;
+		UndoRecPtr	urp, urp_diff;
 		WrittenUndoNode *node = &r->node;
 
-		rec_len = get_next_record_length(r);
+		urp_diff = get_next_record_length(r);
 		Assert(r->backward_cur >= rl->data);
 
+		/* Compute position of the next record. */
+		node->location -= urp_diff;
+
+		/* Read the actual record length. */
+		resetStringInfo(&r->buf);
+		undo_reader_read_bytes(r, node->location, sizeof(rec_len));
+		rec_len = *(Size *) r->buf.data;
 		node->n.length = rec_len;
 
-		/* Use the length to compute the record pointer. */
-		node->location = UndoRecPtrMinusUsableBytes(node->location, rec_len);
+		/*
+		 * The amount of useful data can be lower than urp_diff if the record
+		 * crosses page boundary or if there is unused space at the end of the
+		 * page.
+		 */
+		Assert(node->n.length <= urp_diff);
 
 		/* Read the remaining part. */
 		urp = UndoRecPtrPlusUsableBytes(node->location, sizeof(rec_len));
@@ -777,7 +802,8 @@ UndoReadOneRecord(UndoRSReaderState *r, UndoRecPtr urp)
 	memcpy(&node->length, r->buf.data, len_size);
 
 	/* Read the remaining part. */
-	read_node_remaining(r, urp + len_size, node->length - len_size);
+	urp = UndoRecPtrPlusUsableBytes(urp, len_size);
+	read_node_remaining(r, urp, node->length - len_size);
 
 	return node;
 }

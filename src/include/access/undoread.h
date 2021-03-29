@@ -49,6 +49,7 @@ typedef struct UndoRSReaderState
 	UndoCachedBuffer cached_buffer;
 
 	int			current_chunk;
+	UndoRecPtr	last_record;
 	UndoRecPtr	next_urp;
 
 	WrittenUndoNode node;
