@@ -704,8 +704,9 @@ zheap_undo(const WrittenUndoNode *record, FullTransactionId fxid)
 
 		/* Make sure there's enough space for the next record. */
 		if (rec_array == NULL)
-			rec_array = (UndoRecInfo *) palloc(rec_array_size *
-												   sizeof(UndoRecInfo));
+			rec_array = (UndoRecInfo *) MemoryContextAlloc(TopMemoryContext,
+														   rec_array_size *
+														   sizeof(UndoRecInfo));
 		else if (undo_batch_items >= rec_array_size)
 		{
 			Assert(undo_batch_items == rec_array_size);
