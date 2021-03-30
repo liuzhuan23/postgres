@@ -3140,7 +3140,8 @@ get_next_undo_log_chunk(PG_FUNCTION_ARGS, FuncCallContext *funcctx)
 
 	/* Return the next tuple. */
 	memset(isnull, false, sizeof(isnull));
-	values[0] = UInt32GetDatum(UndoRecPtrGetLogNo(item->location));
+	values[0] = CStringGetTextDatum(psprintf("%.6lX",
+											 UndoRecPtrGetLogNo(item->location)));
 	values[1] = CStringGetTextDatum(psprintf(UndoRecPtrFormat, item->location));
 	if (chunk->hdr.previous_chunk != InvalidUndoRecPtr)
 		values[2] = CStringGetTextDatum(psprintf(UndoRecPtrFormat,

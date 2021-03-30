@@ -92,9 +92,8 @@ print_chunk_info(UndoLogChunkInfo *chunk, UndoRecPtr location)
 {
 	UndoRecordSetChunkHeader	*hdr = &chunk->hdr;
 	UndoLogNumber logno = UndoRecPtrGetLogNo(location);
-	UndoLogOffset off = UndoRecPtrGetOffset(location);
 
-	printf("logno: %X, start: %010zX, prev: ", logno, off);
+	printf("logno: %.6X, start: " UndoRecPtrFormat ", prev: ", logno, location);
 	if (hdr->previous_chunk != InvalidUndoRecPtr)
 	{
 		UndoLogNumber logno_prev = UndoRecPtrGetLogNo(hdr->previous_chunk);
