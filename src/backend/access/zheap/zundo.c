@@ -1685,7 +1685,7 @@ UndoRecordBulkFetchPage(UndoRecPtr *from_urecptr, int undo_apply_size,
 	 * Allocate initial memory to hold the undo record info, we can expand it
 	 * if needed.
 	 */
-	urp_array = (UndoRecInfo *) palloc(sizeof(UndoRecInfo) * urp_array_size);
+	urp_array = (UndoRecInfo *) palloc0(sizeof(UndoRecInfo) * urp_array_size);
 	urecptr = *from_urecptr;
 
 	prev_urec_ptr = InvalidUndoRecPtr;
@@ -1710,11 +1710,10 @@ UndoRecordBulkFetchPage(UndoRecPtr *from_urecptr, int undo_apply_size,
 		else
 		{
 			/*
-			 * Do more checks whether the log containing our record has been
-			 * discarded. Note that caller should recognize himself whether
-			 * the record has already been applied, so we don't care about the
-			 * race conditions such as record discarded immediately after our
-			 * check. These check are only an optimization.
+			 * Retrieve persistence from the slot. Also, once we have the slot
+			 * locked, check if the log has been discarded. We don't care that
+			 * the undo log can be discarded after our check - such race
+			 * conditions will be detected below.
 			 */
 			LWLockAcquire(&slot->meta_lock, LW_SHARED);
 			if (logno != slot->logno)
@@ -1739,10 +1738,13 @@ UndoRecordBulkFetchPage(UndoRecPtr *from_urecptr, int undo_apply_size,
 			reader_inited = true;
 		}
 
-		/* Allocate memory for next undo record. */
-		uur = palloc0(sizeof(UnpackedUndoRecord));
-
+		/* Try to read the record. */
 		node = UndoReadOneRecord(&r, urecptr);
+		if (node == NULL)
+			goto out_discarded;
+
+		/* Allocate memory for the unpacked undo record. */
+		uur = palloc0(sizeof(UnpackedUndoRecord));
 
 		/*
 		 * As soon as the transaction id is changed we can stop fetching the
@@ -1803,7 +1805,10 @@ UndoRecordBulkFetchPage(UndoRecPtr *from_urecptr, int undo_apply_size,
 	return urp_array;
 
 out_discarded:
-	UndoRSReaderClose(&r);
+	if (reader_inited)
+		UndoRSReaderClose(&r);
+	for (int i = 0; i < urp_index; i++)
+		pfree(urp_array[i].uur);
 	pfree(urp_array);
 	*nrecords = 0;
 	return NULL;

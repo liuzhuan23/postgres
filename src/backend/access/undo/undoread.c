@@ -65,16 +65,30 @@ undo_read_block(UndoCachedBuffer *cached_buffer,
 								  RBM_NORMAL,
 								  NULL,
 								  relpersistence);
-	cached_buffer->pinned_block = blockno;
+	/* The buffer could have been discarded. */
+	if (cached_buffer->pinned_buffer != InvalidBuffer)
+		cached_buffer->pinned_block = blockno;
+	else
+		cached_buffer->pinned_block = InvalidBlockNumber;
 
 	return cached_buffer->pinned_buffer;
 }
 
+/*
+ * Read 'nbytes' bytes starting at position 'urp' into memory starting at
+ * 'data', skipping page headers. Returns undo pointer immediately following
+ * the last byte read.
+ *
+ * 'allow_discarded' controls what should happen if any part of the required
+ * undo log is discared. If it's true, return the pointer to the first
+ * discarded byte. If false, raise an ERROR.
+ */
 static UndoRecPtr
 undo_read_bytes(UndoCachedBuffer *cached_buffer,
 				char relpersistence,
 				UndoRecPtr urp,
 				size_t nbytes,
+				bool allow_discarded,
 				char *data)
 {
 	size_t		data_off = 0;
@@ -89,6 +103,16 @@ undo_read_bytes(UndoCachedBuffer *cached_buffer,
 			page_off = SizeOfUndoPageHeaderData;
 
 		undo_read_block(cached_buffer, relpersistence, urp);
+
+		/* Stop reading if the underlying block has been discarded. */
+		if (cached_buffer->pinned_buffer == InvalidBuffer)
+		{
+			if (allow_discarded)
+				return urp;
+			else
+				elog(ERROR, "undo log at " UndoRecPtrFormat " is discarded",
+					 urp);
+		}
 
 		page = BufferGetPage(cached_buffer->pinned_buffer);
 
@@ -119,23 +143,31 @@ undo_read_bytes(UndoCachedBuffer *cached_buffer,
 	return urp;
 }
 
-static UndoPageHeaderData
+/*
+ * Read undo page header into memory 'uph' points to. Return true if
+ * succeeded, false if the undo page has been discarded.
+ */
+static bool
 undo_read_page_header(UndoCachedBuffer *cached_buffer,
 					  char relpersistence,
-					  UndoRecPtr urp)
+					  UndoRecPtr urp,
+					  UndoPageHeader uph)
 {
-	UndoPageHeaderData uph;
 	Page		page;
 
 	undo_read_block(cached_buffer, relpersistence, urp);
 
+	/* Discarded? */
+	if (cached_buffer->pinned_buffer == InvalidBuffer)
+		return false;
+
 	page = BufferGetPage(cached_buffer->pinned_buffer);
 
 	LockBuffer(cached_buffer->pinned_buffer, BUFFER_LOCK_SHARE);
-	uph = *(UndoPageHeader) page;
+	memcpy(uph, page, sizeof(UndoPageHeaderData));
 	LockBuffer(cached_buffer->pinned_buffer, BUFFER_LOCK_UNLOCK);
 
-	return uph;
+	return true;
 }
 
 
@@ -163,8 +195,10 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 	int			current_off;
 	UndoPageHeaderData uph;
 
+	if (!undo_read_page_header(cached_buffer, relpersistence, urp_page_start,
+							   &uph))
+		elog(ERROR, "cannot read header of discarded undo page");
 
-	uph = undo_read_page_header(cached_buffer, relpersistence, urp_page_start);
 	current_off = uph.ud_first_chunk;
 
 	while (true)
@@ -176,7 +210,9 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 
 		undo_read_bytes(cached_buffer, relpersistence,
 						urp_page_start + current_off,
-						SizeOfUndoRecordSetChunkHeader, (char *) urs_header);
+						SizeOfUndoRecordSetChunkHeader,
+						false,
+						(char *) urs_header);
 
 		effective_chunk_size = urs_header->size;
 		if (effective_chunk_size == 0)
@@ -215,7 +251,7 @@ urs_chunk_find_start_on_page(UndoCachedBuffer *cached_buffer,
 
 	if (end_location != InvalidUndoRecPtr &&
 		urs_header->size != 0)
-		elog(ERROR, "looking foropen chunk, found closed");
+		elog(ERROR, "looking for open chunk, found closed");
 
 	/* FIXME: verify chunk type */
 
@@ -239,7 +275,9 @@ urs_chunk_find_start(UndoCachedBuffer *cached_buffer,
 	int			off = UndoRecPtrGetPageOffset(urp);
 	UndoRecPtr	urp_chunk_header;
 
-	uph_initial = undo_read_page_header(cached_buffer, relpersistence, urp);
+	if (!undo_read_page_header(cached_buffer, relpersistence, urp,
+							   &uph_initial))
+		elog(ERROR, "cannot read header of discarded undo page");
 
 	if (uph_initial.ud_insertion_point == 0)
 		elog(ERROR, "page not initialized");
@@ -346,11 +384,15 @@ urs_load_preceding_chunks(UndoCachedBuffer *cached_buffer,
 /*
  * Read a number of bytes of undo content, correctly crossing page boundaries
  * if necessary. Returns pointer to the byte after the data.
+ *
+ * For the meaning of 'allow_discarded', see the header comment of
+ * undo_read_bytes().
  */
 UndoRecPtr
 undo_reader_read_bytes(UndoRSReaderState *r,
 					   UndoRecPtr urp,
-					   size_t nbytes)
+					   size_t nbytes,
+					   bool allow_discarded)
 {
 	UndoRecPtr	ret;
 
@@ -360,6 +402,7 @@ undo_reader_read_bytes(UndoRSReaderState *r,
 						  r->relpersistence,
 						  urp,
 						  nbytes,
+						  allow_discarded,
 						  r->buf.data + r->buf.len);
 
 	r->buf.len = nbytes;
@@ -439,28 +482,34 @@ get_next_record_dist(UndoRSReaderState *r)
  * 'urp' points to the position immediately following the length information,
  * 'len' is the remaining amount of data.
  *
+ * For the meaning of 'allow_discarded', see the header comment of
+ * undo_read_bytes().
+ *
  * Returns pointer to the first byte following the last byte read.
  */
 static UndoRecPtr
-read_node_remaining(UndoRSReaderState *r, UndoRecPtr urp, Size len)
+read_node_remaining(UndoRSReaderState *r, UndoRecPtr urp, Size len,
+					bool allow_discarded)
 {
 	WrittenUndoNode	*node = &r->node;
 
 	/* rmid */
 	resetStringInfo(&r->buf);
-	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.rmid));
+	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.rmid),
+								 allow_discarded);
 	memcpy(&node->n.rmid, r->buf.data, sizeof(node->n.rmid));
 	len -= sizeof(node->n.rmid);
 
 	/* type */
 	resetStringInfo(&r->buf);
-	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.type));
+	urp = undo_reader_read_bytes(r, urp, sizeof(node->n.type),
+								 allow_discarded);
 	memcpy(&node->n.type, r->buf.data, sizeof(node->n.type));
 	len -= sizeof(node->n.type);
 
 	/* The actual record data */
 	resetStringInfo(&r->buf);
-	urp = undo_reader_read_bytes(r, urp, len);
+	urp = undo_reader_read_bytes(r, urp, len, allow_discarded);
 	node->n.data = r->buf.data;
 
 	return urp;
@@ -516,7 +565,7 @@ UndoRSReaderInit(UndoRSReaderState *r,
 							 toplevel ? InvalidUndoRecPtr : end,
 							 &last_chunk->header);
 
-	elog(DEBUG1, "found chunk for end urp %lu at %lu, len %lu, end at %lu, continuing from %lu",
+	elog(DEBUG1, "found chunk for end urp %lu at " UndoRecPtrFormat", len %lu, end at %lu, continuing from %lu",
 		 end, last_chunk->urp_chunk_header, last_chunk->header.size, last_chunk->urp_chunk_header + last_chunk->header.size,
 		 last_chunk->header.previous_chunk);
 
@@ -610,7 +659,8 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 	 * this separately.
 	 */
 	resetStringInfo(&r->buf);
-	urp_content = undo_reader_read_bytes(r, r->next_urp, sizeof(rec_len));
+	urp_content = undo_reader_read_bytes(r, r->next_urp, sizeof(rec_len),
+										 false);
 	rec_len = *(Size *) r->buf.data;
 
 	if (length_only)
@@ -640,7 +690,8 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 		r->node.n.length = rec_len;
 
 		/* Read the remaining part of the node. */
-		next = read_node_remaining(r, urp_content, rec_len - sizeof(rec_len));
+		next = read_node_remaining(r, urp_content, rec_len - sizeof(rec_len),
+								   false);
 	}
 
 	if (next >= curchunk->urp_chunk_end)
@@ -715,7 +766,7 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 
 		/* Read the actual record length. */
 		resetStringInfo(&r->buf);
-		undo_reader_read_bytes(r, node->location, sizeof(rec_len));
+		undo_reader_read_bytes(r, node->location, sizeof(rec_len), false);
 		rec_len = *(Size *) r->buf.data;
 		node->n.length = rec_len;
 
@@ -728,7 +779,7 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 
 		/* Read the remaining part. */
 		urp = UndoRecPtrPlusUsableBytes(node->location, sizeof(rec_len));
-		read_node_remaining(r, urp, rec_len - sizeof(rec_len));
+		read_node_remaining(r, urp, rec_len - sizeof(rec_len), false);
 
 		return true;
 	}
@@ -753,7 +804,9 @@ UndoRSReadXactHeader(UndoRSReaderState *r, XactUndoRecordSetHeader *hdr)
 	xact_hdr_urp = UndoRecPtrPlusUsableBytes(first_chunk->urp_chunk_header,
 											 SizeOfUndoRecordSetChunkHeader);
 	undo_read_bytes(&r->cached_buffer, r->relpersistence, xact_hdr_urp,
-					SizeOfXactUndoRecordSetHeader, (char *) hdr);
+					SizeOfXactUndoRecordSetHeader,
+					false,
+					(char *) hdr);
 }
 
 void
@@ -784,9 +837,8 @@ UndoRSReaderInitRandom(UndoRSReaderState *r, char relpersistence)
 }
 
 /*
- * Read undo record that starts at 'urp'.
- *
- * Caller has to guarantee that the record exists.
+ * Read undo record that starts at 'urp' or NULL if the containing undo log
+ * was already discarded.
  *
  * The returned node is only valid until the next call.
  */
@@ -799,12 +851,18 @@ UndoReadOneRecord(UndoRSReaderState *r, UndoRecPtr urp)
 	resetStringInfo(&r->buf);
 
 	/* Read the size info. */
-	undo_reader_read_bytes(r, urp, len_size);
+	undo_reader_read_bytes(r, urp, len_size, true);
+	/* Discarded? */
+	if (r->cached_buffer.pinned_buffer == InvalidBuffer)
+		return NULL;
 	memcpy(&node->length, r->buf.data, len_size);
 
 	/* Read the remaining part. */
 	urp = UndoRecPtrPlusUsableBytes(urp, len_size);
-	read_node_remaining(r, urp, node->length - len_size);
+	read_node_remaining(r, urp, node->length - len_size, true);
+	/* Discarded? */
+	if (r->cached_buffer.pinned_buffer == InvalidBuffer)
+		return NULL;
 
 	return node;
 }
