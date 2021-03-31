@@ -4,6 +4,7 @@
 #include "access/undoxacttest.h"
 #include "access/xactundo.h"
 #include "access/xlogutils.h"
+#include "catalog/pg_control.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/rel.h"
@@ -16,7 +17,7 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 {
 	XactUndoContext undo_context;
 	xu_undoxactest_mod undo_rec;
-
+	XLogRecPtr	recptr;
 	int64		oldval;
 	int64		newval;
 
@@ -52,11 +53,11 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 	MarkBufferDirty(buf);
 
-	if (RelationNeedsWAL(rel))
-	{
+	if (RelationNeedsWAL(rel) || !is_undo)
 		XLogBeginInsert();
+
+	if (RelationNeedsWAL(rel))
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD | REGBUF_KEEP_DATA);
-	}
 
 	if (!is_undo)
 		InsertXactUndoData(&undo_context, 1, true);
@@ -67,7 +68,6 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 			.debug_mod = mod,
 			.debug_oldval = oldval,
 			.reloid = RelationGetRelid(rel)};
-		XLogRecPtr	recptr;
 		uint8		info = XLOG_UNDOXACTTEST_MOD;
 
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
@@ -76,6 +76,18 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 		if (!is_undo)
 			SetXactUndoPageLSNs(&undo_context, recptr);
+	}
+	else if (!is_undo)
+	{
+		char	data[1];
+
+		/*
+		 * Insert a dummy record to which we can attach the undo-record-set
+		 * metadata (e.g. adjustment of the page insertion point).
+		 */
+		XLogRegisterData(data, 1);
+		recptr = XLogInsert(RM_XLOG_ID, XLOG_NOOP);
+		SetXactUndoPageLSNs(&undo_context, recptr);
 	}
 
 	END_CRIT_SECTION();
@@ -164,7 +176,16 @@ undoxacttest_redo(XLogReaderState *record)
 void
 undoxacttest_undo(const WrittenUndoNode *record, FullTransactionId fxid)
 {
-	const xu_undoxactest_mod *uxt_r = (const xu_undoxactest_mod *) record->n.data;
+	const xu_undoxactest_mod *uxt_r;
+
+	/*
+	 * The end of transaction or subtransaction is not interesting for
+	 * us. Should we process the records in batches?
+	 */
+	if (record == NULL)
+		return;
+
+	uxt_r = (const xu_undoxactest_mod *) record->n.data;
 
 	elog(DEBUG1, "called for record of type %d, length %zu at %lu: %ld",
 		 record->n.type, record->n.length, record->location,
