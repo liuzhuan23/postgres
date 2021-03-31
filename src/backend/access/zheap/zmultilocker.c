@@ -670,7 +670,7 @@ GetLockerTransInfo(Relation rel, ItemPointer tid, Buffer buf,
 		*trans_slot = InvalidXactSlotId;
 
 	oldestFullXidHavingUndo = FullTransactionIdFromU64(
-															pg_atomic_read_u64(&ProcGlobal->oldestFullXidHavingUndo));
+		pg_atomic_read_u64(&ProcGlobal->oldestFullXidHavingUndo));
 	trans_slots = GetTransactionsSlotsForPage(rel, buf, &total_trans_slots,
 											  &tpd_blkno);
 
@@ -696,14 +696,12 @@ GetLockerTransInfo(Relation rel, ItemPointer tid, Buffer buf,
 			UndoRecPtr	out_urec_ptr PG_USED_FOR_ASSERTS_ONLY;
 
 			out_urec_ptr = InvalidUndoRecPtr;
-			/*
-			 * urec = UndoFetchRecord(urec_ptr,
-			 * 					   ItemPointerGetBlockNumber(tid),
-			 * 					   ItemPointerGetOffsetNumber(tid),
-			 * 					   InvalidTransactionId,
-			 * 					   &out_urec_ptr,
-			 * 					   ZHeapSatisfyUndoRecord);
-			 */
+			urec = UndoFetchRecord(urec_ptr,
+								   ItemPointerGetBlockNumber(tid),
+								   ItemPointerGetOffsetNumber(tid),
+								   InvalidTransactionId,
+								   &out_urec_ptr,
+								   ZHeapSatisfyUndoRecord);
 
 			/*
 			 * We couldn't find any undo record for the tuple corresponding to
@@ -756,13 +754,13 @@ GetLockerTransInfo(Relation rel, ItemPointer tid, Buffer buf,
 
 			urec_ptr = urec->uur_blkprev;
 
-			//UndoRecordRelease(urec);
+			UndoRecordRelease(urec);
 			urec = NULL;
 		} while (UndoRecPtrIsValid(urec_ptr));
 
 		if (urec)
 		{
-			//UndoRecordRelease(urec);
+			UndoRecordRelease(urec);
 			urec = NULL;
 		}
 
