@@ -135,7 +135,7 @@ test_undoread_insert(PG_FUNCTION_ARGS)
 	/* Since we do not modify relation pages, no WAL needs to be written. */
 
 	START_CRIT_SECTION();
-	InsertXactUndoData(&undo_context, 0, true);
+	InsertXactUndoData(&undo_context, 0);
 	END_CRIT_SECTION();
 
 	CleanupXactUndoInsertion(&undo_context);

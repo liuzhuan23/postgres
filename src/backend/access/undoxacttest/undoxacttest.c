@@ -60,7 +60,7 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD | REGBUF_KEEP_DATA);
 
 	if (!is_undo)
-		InsertXactUndoData(&undo_context, 1, true);
+		InsertXactUndoData(&undo_context, 1);
 
 	if (RelationNeedsWAL(rel))
 	{

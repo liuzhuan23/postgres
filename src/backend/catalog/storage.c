@@ -209,7 +209,7 @@ log_undo_smgr_create(xu_smgr_create *undo_rec)
 	XLogBeginInsert();
 
 	/* Insert the UNDO record. */
-	InsertXactUndoData(&undo_context, 0, true);
+	InsertXactUndoData(&undo_context, 0);
 
 	/* Insert XLOG_SMGR_PRECREATE record to WAL. */
 	xlrec.rnode = undo_rec->rnode;

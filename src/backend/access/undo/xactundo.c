@@ -258,18 +258,17 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 /*
  * Insert transactional undo data.
  *
- * reg_bufs tells whether the undo buffers should be registered for
- * XLogInsert(). Caller might want to do it later if XLogBeginInsert() hasn't
- * been called yet.
+ * If first_block_id is negative, the caller is responsible for registering
+ * the buffers himself.
  */
 void
-InsertXactUndoData(XactUndoContext *ctx, uint8 first_block_id, bool reg_bufs)
+InsertXactUndoData(XactUndoContext *ctx, int first_block_id)
 {
 	UndoRecordSet *urs = XactUndo.record_set[ctx->plevel];
 
 	Assert(urs != NULL);
 	UndoInsert(urs, ctx->data.data, ctx->data.len);
-	if (reg_bufs)
+	if (first_block_id >= 0)
 		UndoXLogRegisterBuffers(urs, first_block_id);
 }
 

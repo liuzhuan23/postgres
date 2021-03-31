@@ -33,8 +33,7 @@ extern void ResetXactUndo(void);
 extern bool XactHasUndo(void);
 extern UndoRecPtr PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 									  Size record_size);
-extern void InsertXactUndoData(XactUndoContext *ctx, uint8 first_block_id,
-							   bool reg_bufs);
+extern void InsertXactUndoData(XactUndoContext *ctx, int first_block_id);
 extern void RegisterXactUndoBuffers(XactUndoContext *ctx,
 									uint8 first_block_id);
 extern void SetXactUndoPageLSNs(XactUndoContext *ctx, XLogRecPtr lsn);

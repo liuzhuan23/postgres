@@ -2159,7 +2159,7 @@ log_undo_db_create(Oid db_id, Oid tablespace_id)
 	XLogBeginInsert();
 
 	/* Insert the UNDO record. */
-	InsertXactUndoData(&undo_context, 0, true);
+	InsertXactUndoData(&undo_context, 0);
 
 	/* Insert XLOG_DBASE_PRECREATE record to WAL. */
 	xlrec.db_id = db_id;

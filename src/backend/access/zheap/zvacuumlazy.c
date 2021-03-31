@@ -336,7 +336,7 @@ reacquire_slot:
 	 * Insert it. Undo buffers will be registered during WAL insertion
 	 * below.
 	 */
-	InsertXactUndoData(&xuctx, 0, false);
+	InsertXactUndoData(&xuctx, -1);
 
 	/*
 	 * We're sending the undo record for debugging purpose. So, just send the

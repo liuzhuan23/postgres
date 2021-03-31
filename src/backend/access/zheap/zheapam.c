@@ -455,7 +455,7 @@ reacquire_buffer:
 		 */
 		SerializeUndoData(&xuctx.data, RM_ZHEAP_ID, UNDO_ZHEAP_INSERT, rdt);
 		/* log_zheap_insert() will register the undo buffers. */
-		InsertXactUndoData(&xuctx, 0, false);
+		InsertXactUndoData(&xuctx, -1);
 
 		/* Set the transaction slot for the inserted tuple. */
 		PageSetUNDO(undorecord, buffer, trans_slot_id, true, fxid,
@@ -875,7 +875,7 @@ check_tup_satisfies_update:
 	/* Serialize the record. */
 	SerializeUndoData(&xuctx.data, RM_ZHEAP_ID, UNDO_ZHEAP_DELETE, rdt);
 	/* Insert it. log_zheap_delete() will register the undo buffers. */
-	InsertXactUndoData(&xuctx, 0, false);
+	InsertXactUndoData(&xuctx, -1);
 
 	PageSetUNDO(undorecord, buffer, trans_slot_id, true, fxid,
 				urecptr, NULL, 0);
@@ -2202,7 +2202,7 @@ reacquire_buffer:
 	}
 
 	/* log_zheap_update() will register the undo buffers. */
-	InsertXactUndoData(&xuctx, 0, false);
+	InsertXactUndoData(&xuctx, -1);
 
 	if (use_inplace_update)
 		PageSetUNDO(undorecord, buffer, oldtup_new_trans_slot, true,
@@ -4346,7 +4346,7 @@ zheap_lock_tuple_guts(Buffer buf, char relpersistence, ZHeapTuple zhtup,
 
 	SerializeUndoData(&xuctx.data, RM_ZHEAP_ID, undorecord.uur_type, rdt);
 	/* log_zheap_lock_tuple() will register the undo buffers. */
-	InsertXactUndoData(&xuctx, 0, false);
+	InsertXactUndoData(&xuctx, -1);
 
 	/*
 	 * For lockers, we only set the slot on tuple when the lock mode is
@@ -8418,7 +8418,7 @@ reacquire_buffer:
 			SerializeUndoData(&xuctx.data, RM_ZHEAP_ID,
 							  UNDO_ZHEAP_MULTI_INSERT, rdt);
 			/* log_zheap_multi_insert() will register the buffers. */
-			InsertXactUndoData(&xuctx, 0, false);
+			InsertXactUndoData(&xuctx, -1);
 
 			/*
 			 * We're sending the undo record for debugging purpose. So, just
