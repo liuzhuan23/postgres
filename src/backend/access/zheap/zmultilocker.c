@@ -48,14 +48,12 @@ ZCurrentXactHasTupleLockMode(ZHeapTuple zhtup, UndoRecPtr urec_ptr,
 	memcpy(&hdr, zhtup->t_data, SizeofZHeapTupleHeader);
 	do
 	{
-		/*
-		 * urec = UndoFetchRecord(urec_ptr,
-		 * 					   ItemPointerGetBlockNumber(&zhtup->t_self),
-		 * 					   ItemPointerGetOffsetNumber(&zhtup->t_self),
-		 * 					   InvalidTransactionId,
-		 * 					   NULL,
-		 * 					   ZHeapSatisfyUndoRecord);
-		 */
+		urec = UndoFetchRecord(urec_ptr,
+							   ItemPointerGetBlockNumber(&zhtup->t_self),
+							   ItemPointerGetOffsetNumber(&zhtup->t_self),
+							   InvalidTransactionId,
+							   NULL,
+							   ZHeapSatisfyUndoRecord);
 
 		/* If undo is discarded, we can't proceed further. */
 		if (!urec)
@@ -119,13 +117,13 @@ ZCurrentXactHasTupleLockMode(ZHeapTuple zhtup, UndoRecPtr urec_ptr,
 		}
 		urec_ptr = urec->uur_blkprev;
 
-		//UndoRecordRelease(urec);
+		UndoRecordRelease(urec);
 		urec = NULL;
 	} while (UndoRecPtrIsValid(urec_ptr));
 
 	if (urec)
 	{
-		//UndoRecordRelease(urec);
+		UndoRecordRelease(urec);
 		urec = NULL;
 	}
 
