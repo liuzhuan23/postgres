@@ -32,6 +32,7 @@
 #include "postgres.h"
 
 #include "access/bufmask.h"
+#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/parallel.h"
@@ -137,14 +138,21 @@ static void compute_new_xid_infomask(ZHeapTuple zhtup, Buffer buf,
 									 uint16 *result_infomask, int *result_trans_slot);
 static void log_zheap_insert(ZHeapWALInfo *walinfo, Relation relation,
 							 int options, bool skip_undo,
+							 TransactionId subxact_xid,
 							 XactUndoContext *xuctx);
-static void log_zheap_update(ZHeapWALInfo *oldinfo, ZHeapWALInfo *newinfo,
-							 bool inplace_update, XactUndoContext *xuctx);
-static void log_zheap_delete(ZHeapWALInfo *walinfo, bool changingPart,
-							 SubTransactionId subxid, TransactionId tup_xid,
+static void log_zheap_update(ZHeapWALInfo *old_walinfo, Relation relation,
+							 ZHeapWALInfo *new_walinfo, bool inplace_update,
+							 TransactionId subxact_xid, bool id_changed,
+							 char *old_keys_ext, uint32 old_keys_ext_size,
+							 XactUndoContext *xuctx);
+static void log_zheap_delete(ZHeapWALInfo *walinfo, Relation relation,
+							 bool changingPart, SubTransactionId subxid,
+							 TransactionId tup_xid, TransactionId subxact_xid,
+							 char *old_keys_ext, uint32 old_keys_ext_size,
 							 XactUndoContext *xuctx);
 static void log_zheap_multi_insert(ZHeapMultiInsertWALInfo *walinfo,
 								   bool skip_undo, char *scratch,
+								   TransactionId subxact_xid,
 								   XactUndoContext *xuctx);
 static void log_zheap_lock_tuple(ZHeapWALInfo *walinfo, TransactionId tup_xid,
 								 int trans_slot_id, bool hasSubXactLock,
@@ -159,6 +167,10 @@ static bool RefetchAndCheckTupleStatus(Relation relation, Buffer buffer,
 									   TransactionId *single_locker_xid,
 									   LockTupleMode *mode, ZHeapTupleData *zhtup);
 static bool CheckZheapPageSlotsAreEmpty(Page page);
+static char *extract_toasted_identity_keys(ZHeapTuple tuple,
+										   Relation relation,
+										   Bitmapset *id_attrs,
+										   uint32 *res_size_p);
 
 /*
  * Subroutine for zheap_insert(). Prepares a tuple for insertion.
@@ -273,6 +285,7 @@ zheap_insert(Relation relation, ZHeapTuple tup, CommandId cid,
 	ZHeapPrepareUndoInfo zh_undo_info;
 	XactUndoContext	xuctx;
 	UndoRecData	*rdt = NULL;
+	TransactionId	subxact_xid = InvalidTransactionId;
 
 	/*
 	 * We can skip inserting undo records if the tuples are to be marked as
@@ -422,6 +435,14 @@ reacquire_buffer:
 		PageHasFreeLinePointers((PageHeader) page))
 		TPDPageLock(relation, buffer);
 
+	/*
+	 * The subtransaction XID is needed for logical decoding - retrieve it now
+	 * because it does not work in the critical section.
+	 */
+	if (RelationNeedsWAL(relation) &&
+		RelationIsLogicallyLogged(relation) && IsSubTransaction())
+		subxact_xid = GetCurrentTransactionId();
+
 	/* No ereport(ERROR) from here till changes are logged */
 	START_CRIT_SECTION();
 
@@ -478,7 +499,8 @@ reacquire_buffer:
 		ins_wal_info.all_visible_cleared = all_visible_cleared;
 		ins_wal_info.undorecord = NULL;
 
-		log_zheap_insert(&ins_wal_info, relation, options, skip_undo, &xuctx);
+		log_zheap_insert(&ins_wal_info, relation, options, skip_undo,
+						 subxact_xid, &xuctx);
 	}
 
 	END_CRIT_SECTION();
@@ -610,6 +632,9 @@ zheap_delete(Relation relation, ItemPointer tid,
 	ZHeapTupleTransInfo zinfo;
 	XactUndoContext	xuctx;
 	UndoRecData	*rdt;
+	TransactionId	subxact_xid = InvalidTransactionId;
+	char *old_keys_ext = NULL;
+	uint32		old_keys_ext_size = 0;
 
 	Assert(ItemPointerIsValid(tid));
 
@@ -862,6 +887,30 @@ check_tup_satisfies_update:
 	vm_status = visibilitymap_get_status(relation,
 										 BufferGetBlockNumber(buffer), &vmbuffer);
 
+	/*
+	 * The subtransaction XID is needed for logical decoding - retrieve it now
+	 * because it does not work in the critical section.
+	 */
+	if (RelationNeedsWAL(relation) &&
+		RelationIsLogicallyLogged(relation) && IsSubTransaction())
+		subxact_xid = GetCurrentTransactionId();
+
+	/*
+	 * See zheap_update for comments on a similar problem, although the
+	 * situation is a bit simpler here: there's nothing like key change here.
+	 */
+	if (RelationIsLogicallyLogged(relation) &&
+		ZHeapTupleHasExternal(&zheaptup))
+	{
+		Bitmapset  *id_attrs;
+
+		id_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_IDENTITY_KEY);
+		old_keys_ext = extract_toasted_identity_keys(&zheaptup,
+													 relation,
+													 id_attrs,
+													 &old_keys_ext_size);
+	}
+
 	START_CRIT_SECTION();
 
 	if ((vm_status & VISIBILITYMAP_ALL_VISIBLE) ||
@@ -911,9 +960,13 @@ check_tup_satisfies_update:
 		del_wal_info.all_visible_cleared = all_visible_cleared;
 		del_wal_info.undorecord = &undorecord;
 
-		log_zheap_delete(&del_wal_info, changingPart, subxid, zinfo.xid,
-						 &xuctx);
+		log_zheap_delete(&del_wal_info, relation, changingPart, subxid,
+						 zinfo.xid, subxact_xid, old_keys_ext,
+						 old_keys_ext_size, &xuctx);
 	}
+
+	if (old_keys_ext)
+		pfree(old_keys_ext);
 
 	END_CRIT_SECTION();
 
@@ -1270,6 +1323,7 @@ zheap_update(Relation relation, ItemPointer otid, ZHeapTuple newtup,
 	SubTransactionId tup_subxid = InvalidSubTransactionId;
 	Bitmapset  *inplace_upd_attrs = NULL;
 	Bitmapset  *key_attrs = NULL;
+	Bitmapset  *id_attrs = NULL;
 	Bitmapset  *interesting_attrs = NULL;
 	bool		computed_modified_attrs = false;
 	Bitmapset  *modified_attrs = NULL;
@@ -1310,6 +1364,8 @@ zheap_update(Relation relation, ItemPointer otid, ZHeapTuple newtup,
 	bool		use_inplace_update;
 	bool		in_place_updated_or_locked = false;
 	bool		key_intact = false;
+	bool		id_intact = false;
+	bool		id_changed;
 	bool		checked_lockers = false;
 	bool		locker_remains = false;
 	bool		any_multi_locker_member_alive = false;
@@ -1326,6 +1382,9 @@ zheap_update(Relation relation, ItemPointer otid, ZHeapTuple newtup,
 	Size	undo_rec_size, undo_rec_size_old;
 	XactUndoContext		xuctx;
 	uint8	undo_rec_type;
+	TransactionId	subxact_xid = InvalidTransactionId;
+	char *old_keys_ext = NULL;
+	uint32		old_keys_ext_size = 0;
 
 	Assert(ItemPointerIsValid(otid));
 
@@ -1356,6 +1415,7 @@ zheap_update(Relation relation, ItemPointer otid, ZHeapTuple newtup,
 	 */
 	inplace_upd_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_ALL);
 	key_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_KEY);
+	id_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_IDENTITY_KEY);
 
 	block = ItemPointerGetBlockNumber(otid);
 	buffer = ReadBuffer(relation, block);
@@ -1401,6 +1461,7 @@ check_tup_satisfies_update:
 			 * grab weaker lock type.  See heap_update.
 			 */
 			key_intact = !bms_overlap(modified_attrs, key_attrs);
+			id_intact = !bms_overlap(modified_attrs, id_attrs);
 			*lockmode = key_intact ? LockTupleNoKeyExclusive :
 				LockTupleExclusive;
 		}
@@ -2069,6 +2130,56 @@ reacquire_buffer:
 	 */
 	XLogEnsureRecordSpace(8, 0);
 
+	/*
+	 * During logical decoding we won't be able to retrieve the TOAST data
+	 * (the corresponding tuples might be VACUUMed at the time or the table
+	 * might no longer exist), so write also the TOASTed key attributes to
+	 * WAL.
+	 *
+	 * One might think that we can simply flatten the whole old tuple and
+	 * write it to WAL, as it happens with the heap AM, however heap AM does
+	 * not need the old tuple for recovery. It's obvious that both REDO and
+	 * UNDO require exactly the original tuple. So instead of logging both the
+	 * original and the flattened tuple, we log the original one plus the
+	 * external key attributes. This preprocessing needs to allocate memory,
+	 * so do it before the critical section.
+	 *
+	 * XXX In theory, the maximum size of the WAL record may be insufficient
+	 * if there are multiple TOASTed attributes in the tuple. The old tuple is
+	 * also flattened for the heap AM and it seems to work, see heap_update().
+	 *
+	 * Note that with REPLICA_IDENTITY_FULL we don't care about identity
+	 * columns.
+	 */
+	id_changed = (!id_intact ||
+				  relation->rd_rel->relreplident == REPLICA_IDENTITY_FULL);
+	if (RelationIsLogicallyLogged(relation) && id_changed)
+	{
+		ZHeapTupleData	keytup;
+
+		/*
+		 * oldtup points to a place that can change due to in-place update, so
+		 * get the tuple data from the undo record.
+		 */
+		keytup.t_data = (ZHeapTupleHeader) undorecord.uur_tuple.data;
+		keytup.t_len = undorecord.uur_tuple.len;
+		keytup.t_tableOid = oldtup.t_tableOid;
+		keytup.t_self = oldtup.t_self;
+
+		if (ZHeapTupleHasExternal(&keytup))
+			old_keys_ext = extract_toasted_identity_keys(&keytup,
+														 relation,
+														 id_attrs,
+														 &old_keys_ext_size);
+	}
+
+	/*
+	 * The subtransaction XID is needed for logical decoding - retrieve it now
+	 * because it does not work in the critical section.
+	 */
+	if (RelationIsLogicallyLogged(relation) && IsSubTransaction())
+		subxact_xid = GetCurrentTransactionId();
+
 	START_CRIT_SECTION();
 
 	if ((vm_status & VISIBILITYMAP_ALL_VISIBLE) ||
@@ -2246,21 +2357,6 @@ reacquire_buffer:
 		ZHeapWALInfo oldup_wal_info,
 					newup_wal_info;
 
-		/*
-		 * For logical decoding we need combocids to properly decode the
-		 * catalog.
-		 */
-		if (RelationIsAccessibleInLogicalDecoding(relation))
-		{
-			/*
-			 * Fixme: This won't work as it needs to access cmin/cmax which we
-			 * probably needs to retrieve from UNDO.
-			 */
-			/*
-			 * log_heap_new_cid(relation, &oldtup); log_heap_new_cid(relation,
-			 * heaptup);
-			 */
-		}
 		oldup_wal_info.buffer = buffer;
 		oldup_wal_info.ztuple = &oldtup;
 		oldup_wal_info.urecptr = urecptr;
@@ -2279,9 +2375,13 @@ reacquire_buffer:
 		newup_wal_info.prev_urecptr = InvalidUndoRecPtr;
 		newup_wal_info.prior_trans_slot_id = InvalidXactSlotId;
 
-		log_zheap_update(&oldup_wal_info, &newup_wal_info,
-						 use_inplace_update, &xuctx);
+		log_zheap_update(&oldup_wal_info, relation, &newup_wal_info,
+						 use_inplace_update, subxact_xid, id_changed,
+						 old_keys_ext, old_keys_ext_size, &xuctx);
 	}
+
+	if (old_keys_ext)
+		pfree(old_keys_ext);
 
 	END_CRIT_SECTION();
 
@@ -5753,7 +5853,8 @@ zheap_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
  */
 static void
 log_zheap_insert(ZHeapWALInfo *walinfo, Relation relation,
-				 int options, bool skip_undo, XactUndoContext *xuctx)
+				 int options, bool skip_undo, TransactionId subxact_xid,
+				 XactUndoContext *xuctx)
 {
 	xl_undo_header xlundohdr;
 	xl_zheap_insert xlrec;
@@ -5763,8 +5864,13 @@ log_zheap_insert(ZHeapWALInfo *walinfo, Relation relation,
 	uint8		info = XLOG_ZHEAP_INSERT;
 	int			bufflags = 0;
 
-	/* zheap doesn't support catalog relations. */
-	Assert(!RelationIsAccessibleInLogicalDecoding(relation));
+	/*
+	 * zheap doesn't support catalog relations, however "user catalog" tables
+	 * are allowed. XXX Special macro for this case, similar to
+	 * RelationIsAccessibleInLogicalDecoding()?
+	 */
+	Assert(!(XLogLogicalInfoActive() && RelationNeedsWAL(relation) &&
+			 IsCatalogRelation(relation)));
 
 	/*
 	 * If this is the single and first tuple on page, we can reinit the page
@@ -5802,19 +5908,37 @@ log_zheap_insert(ZHeapWALInfo *walinfo, Relation relation,
 		xlrec.flags |= XLZ_INSERT_IS_FROZEN;
 	Assert(ItemPointerGetBlockNumber(&(walinfo->ztuple->t_self)) == BufferGetBlockNumber(walinfo->buffer));
 
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZHeapInsert);
+
 	/*
 	 * For logical decoding, we need the tuple even if we're doing a full page
 	 * write, so make sure it's included even if we take a full-page image.
 	 * (XXX We could alternatively store a pointer into the FPW).
+	 *
+	 * Also include subtransaction XID so that we can discard changes done by
+	 * aborted subtransactions during logical decoding.
 	 */
 	if (RelationIsLogicallyLogged(relation))
 	{
+		TransactionId	top_xid;
+
 		xlrec.flags |= XLZ_INSERT_CONTAINS_NEW_TUPLE;
 		bufflags |= REGBUF_KEEP_DATA;
+
+		if (IsToastRelation(relation))
+			xlrec.flags |= XLZ_INSERT_ON_TOAST_RELATION;
+
+		if (subxact_xid != InvalidTransactionId &&
+			subxact_xid != (top_xid = GetTopTransactionIdIfAny()))
+		{
+			Assert(top_xid != InvalidTransactionId);
+
+			xlrec.flags |= XLZ_INSERT_CONTAINS_SUBXID;
+			XLogRegisterData((char *) &subxact_xid, sizeof(subxact_xid));
+		}
 	}
 
-	XLogBeginInsert();
-	XLogRegisterData((char *) &xlrec, SizeOfZHeapInsert);
 
 	/* Register undo data only if required. */
 	if (!skip_undo)
@@ -5886,10 +6010,18 @@ log_zheap_insert(ZHeapWALInfo *walinfo, Relation relation,
  *
  * new_walinfo has the necessary wal information about the new tuple which
  * is inserted in case of a non-inplace update.
+ *
+ * id_changed tells whether the UPDATE command changes the identity key.
+ *
+ * old_keys_ext external contains external attributes contained in the
+ * identity key.
  */
 static void
-log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
-				 bool inplace_update, XactUndoContext *xuctx)
+log_zheap_update(ZHeapWALInfo *old_walinfo, Relation relation,
+				 ZHeapWALInfo *new_walinfo, bool inplace_update,
+				 TransactionId subxact_xid, bool id_changed,
+				 char *old_keys_ext, uint32 old_keys_ext_size,
+				 XactUndoContext *xuctx)
 {
 	xl_undo_header xlundohdr,
 				xlnewundohdr;
@@ -5898,6 +6030,7 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
 	xl_zheap_update xlrec;
 	ZHeapTuple	difftup;
 	ZHeapTupleHeader zhtuphdr;
+	int		zhtuplen;
 	uint16		prefix_suffix[2];
 	uint16		prefixlen = 0,
 				suffixlen = 0;
@@ -5911,8 +6044,10 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
 	int			bufflags = REGBUF_STANDARD;
 	uint8		info = XLOG_ZHEAP_UPDATE;
 	uint8		block_id;
+	bool		need_tuple_data = RelationIsLogicallyLogged(relation);
 
 	zhtuphdr = (ZHeapTupleHeader) old_walinfo->undorecord->uur_tuple.data;
+	zhtuplen = old_walinfo->undorecord->uur_tuple.len;
 
 	if (inplace_update)
 	{
@@ -5946,7 +6081,8 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
 	 * prefix-suffix compression.
 	 */
 	if (old_walinfo->buffer == new_walinfo->buffer
-		&& !XLogCheckBufferNeedsBackup(new_walinfo->buffer))
+		&& !XLogCheckBufferNeedsBackup(new_walinfo->buffer) &&
+		!need_tuple_data)
 	{
 		Assert(oldp != NULL && newp != NULL);
 
@@ -6020,6 +6156,20 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
 	}
 
 	/*
+	 * To be consistent with the heap AM, logical decoding output plugin
+	 * should only receive the old tuple if the key has changed.
+	 */
+	if (id_changed)
+	{
+		Assert(need_tuple_data);
+
+		xlrec.flags |= XLZ_UPDATE_IDENTITY_CHANGED;
+
+		if (old_keys_ext)
+			xlrec.flags |= XLZ_UPDATE_CONTAINS_OLD_KEYS_EXT;
+	}
+
+	/*
 	 * If full_page_writes is enabled, and the buffer image is not included in
 	 * the WAL then we can rely on the tuple in the page to regenerate the
 	 * undo tuple during recovery.  For detail comments related to handling of
@@ -6029,7 +6179,8 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, ZHeapWALInfo *new_walinfo,
 prepare_xlog:
 
 	GetFullPageWriteInfo(&RedoRecPtr, &doPageWrites);
-	if (!doPageWrites || XLogCheckBufferNeedsBackup(old_walinfo->buffer))
+	if (!doPageWrites || XLogCheckBufferNeedsBackup(old_walinfo->buffer) ||
+		need_tuple_data)
 	{
 		xlrec.flags |= XLZ_HAS_UPDATE_UNDOTUPLE;
 
@@ -6037,10 +6188,25 @@ prepare_xlog:
 		xlundotuphdr.t_infomask = zhtuphdr->t_infomask;
 		xlundotuphdr.t_hoff = zhtuphdr->t_hoff;
 	}
-
 	XLogBeginInsert();
 	XLogRegisterData((char *) &xlundohdr, SizeOfUndoHeader);
 	XLogRegisterData((char *) &xlrec, SizeOfZHeapUpdate);
+
+	/* See log_zheap_delete() for comments. */
+	if (need_tuple_data)
+	{
+		TransactionId	top_xid;
+
+		if (subxact_xid != InvalidTransactionId &&
+			subxact_xid != (top_xid = GetTopTransactionIdIfAny()))
+		{
+			Assert(top_xid != InvalidTransactionId);
+
+			xlrec.flags |= XLZ_UPDATE_CONTAINS_SUBXID;
+			XLogRegisterData((char *) &subxact_xid, sizeof(subxact_xid));
+		}
+	}
+
 	if (old_walinfo->prior_trans_slot_id > ZHEAP_PAGE_TRANS_SLOTS)
 	{
 		xlrec.flags |= XLZ_UPDATE_OLD_CONTAINS_TPD_SLOT;
@@ -6057,13 +6223,34 @@ prepare_xlog:
 							 sizeof(new_walinfo->new_trans_slot_id));
 		}
 	}
+	if (xlrec.flags & XLZ_UPDATE_CONTAINS_OLD_KEYS_EXT)
+	{
+		/*
+		 * If we write the keys, the containing tuple must exist. The keys
+		 * chunk is written first because, unlike the tuple, it contains size
+		 * info and thus can be skipped easily during REDO.
+		 */
+		Assert(xlrec.flags & XLZ_HAS_UPDATE_UNDOTUPLE);
+
+		Assert(old_keys_ext_size > 0);
+
+		/* size word, followed by the actual data. */
+		XLogRegisterData((char *) &old_keys_ext_size,
+						 sizeof(old_keys_ext_size));
+		XLogRegisterData((char *) old_keys_ext, old_keys_ext_size);
+	}
 	if (xlrec.flags & XLZ_HAS_UPDATE_UNDOTUPLE)
 	{
 		XLogRegisterData((char *) &xlundotuphdr, SizeOfZHeapHeader);
+
 		/* PG73FORMAT: write bitmap [+ padding] [+ oid] + data */
 		XLogRegisterData((char *) zhtuphdr + SizeofZHeapTupleHeader,
-						 old_walinfo->undorecord->uur_tuple.len - SizeofZHeapTupleHeader);
+						 zhtuplen - SizeofZHeapTupleHeader);
 	}
+
+	/* The new tuple needs to be stored explicitly for logical decoding. */
+	if (need_tuple_data)
+		bufflags |= REGBUF_KEEP_DATA;
 
 	XLogRegisterBuffer(0, new_walinfo->buffer, bufflags);
 	if (old_walinfo->buffer != new_walinfo->buffer)
@@ -6166,6 +6353,9 @@ prepare_xlog:
 	if (recptr == InvalidXLogRecPtr)
 	{
 		ResetRegisteredTPDBuffers();
+		/* A new decision about the old tuple may be needed. */
+		if (!need_tuple_data)
+			xlrec.flags &= ~XLZ_HAS_UPDATE_UNDOTUPLE;
 		goto prepare_xlog;
 	}
 
@@ -6225,13 +6415,19 @@ CheckZheapPageSlotsAreEmpty(Page page)
 
 /*
  * log_zheap_delete - Perform XLogInsert for a zheap-delete operation.
+ *
+ * old_keys_ext external contains external attributes contained in the
+ * identity key.
  */
 static void
-log_zheap_delete(ZHeapWALInfo *walinfo, bool changingPart,
+log_zheap_delete(ZHeapWALInfo *walinfo, Relation relation,
+				 bool changingPart,
 				 SubTransactionId subxid, TransactionId tup_xid,
-				 XactUndoContext *xuctx)
+				 TransactionId subxact_xid, char *old_keys_ext,
+				 uint32 old_keys_ext_size, XactUndoContext *xuctx)
 {
 	ZHeapTupleHeader zhtuphdr = NULL;
+	int	zhtuplen;
 	xl_undo_header xlundohdr;
 	xl_zheap_delete xlrec;
 	xl_zheap_header xlhdr;
@@ -6255,11 +6451,25 @@ log_zheap_delete(ZHeapWALInfo *walinfo, bool changingPart,
 	if (subxid != InvalidSubTransactionId)
 		xlrec.flags |= XLZ_DELETE_CONTAINS_SUBXACT;
 
+	zhtuphdr = (ZHeapTupleHeader) walinfo->undorecord->uur_tuple.data;
+	zhtuplen =  walinfo->undorecord->uur_tuple.len;
+
+	/*
+	 * The external (TOASTed) keys need to be logged separate from the tuple.
+	 */
+	if (old_keys_ext)
+	{
+		Assert(RelationIsLogicallyLogged(relation));
+
+		xlrec.flags |= XLZ_DELETE_CONTAINS_OLD_KEYS_EXT;
+	}
+
 	/*
 	 * If full_page_writes is enabled, and the buffer image is not included in
 	 * the WAL then we can rely on the tuple in the page to regenerate the
 	 * undo tuple during recovery as the tuple state must be same as now,
-	 * otherwise we need to store it explicitly.
+	 * otherwise we need to store it explicitly. Regardless, the tuple has to
+	 * be stored if logical decoding is active.
 	 *
 	 * Since we don't yet have the insert lock, including the page image
 	 * decision could change later and in that case we need prepare the WAL
@@ -6267,11 +6477,10 @@ log_zheap_delete(ZHeapWALInfo *walinfo, bool changingPart,
 	 */
 prepare_xlog:
 	GetFullPageWriteInfo(&RedoRecPtr, &doPageWrites);
-	if (!doPageWrites || XLogCheckBufferNeedsBackup(walinfo->buffer))
+	if (!doPageWrites || XLogCheckBufferNeedsBackup(walinfo->buffer) ||
+		RelationIsLogicallyLogged(relation))
 	{
 		xlrec.flags |= XLZ_HAS_DELETE_UNDOTUPLE;
-
-		zhtuphdr = (ZHeapTupleHeader) walinfo->undorecord->uur_tuple.data;
 
 		xlhdr.t_infomask2 = zhtuphdr->t_infomask2;
 		xlhdr.t_infomask = zhtuphdr->t_infomask;
@@ -6283,15 +6492,55 @@ prepare_xlog:
 	XLogBeginInsert();
 	XLogRegisterData((char *) &xlundohdr, SizeOfUndoHeader);
 	XLogRegisterData((char *) &xlrec, SizeOfZHeapDelete);
+
+	/*
+	 * Include subtransaction XID so that we can discard changes done by
+	 * aborted subtransactions during logical decoding.
+	 *
+	 * A separate flag is used here because XLZ_DELETE_CONTAINS_SUBXACT does
+	 * not actually require any additional space and we should only store the
+	 * subtransaction XID if necessary.
+	 */
+	if (RelationIsLogicallyLogged(relation))
+	{
+		TransactionId	top_xid;
+
+		/*
+		 * Note that the subxid parameter is just a counter that starts from
+		 * TopSubTransactionId for each transaction, but we need the real XID
+		 * of the subtransaction.
+		 */
+		if (subxact_xid != InvalidTransactionId &&
+			subxact_xid != (top_xid = GetTopTransactionIdIfAny()))
+		{
+			Assert(top_xid != InvalidTransactionId);
+
+			xlrec.flags |= XLZ_DELETE_CONTAINS_SUBXID;
+			XLogRegisterData((char *) &subxact_xid, sizeof(subxact_xid));
+		}
+	}
+
 	if (xlrec.flags & XLZ_DELETE_CONTAINS_TPD_SLOT)
 		XLogRegisterData((char *) &walinfo->prior_trans_slot_id,
 						 sizeof(walinfo->prior_trans_slot_id));
+	if (xlrec.flags & XLZ_DELETE_CONTAINS_OLD_KEYS_EXT)
+	{
+		/* The key data is related to the old tuple. */
+		Assert(xlrec.flags & XLZ_HAS_DELETE_UNDOTUPLE);
+
+		Assert(old_keys_ext_size > 0);
+
+		/* size word, followed by the actual data. */
+		XLogRegisterData((char *) &old_keys_ext_size,
+						 sizeof(old_keys_ext_size));
+		XLogRegisterData((char *) old_keys_ext, old_keys_ext_size);
+	}
 	if (xlrec.flags & XLZ_HAS_DELETE_UNDOTUPLE)
 	{
 		XLogRegisterData((char *) &xlhdr, SizeOfZHeapHeader);
 		/* PG73FORMAT: write bitmap [+ padding] [+ oid] + data */
 		XLogRegisterData((char *) zhtuphdr + SizeofZHeapTupleHeader,
-						 walinfo->undorecord->uur_tuple.len - SizeofZHeapTupleHeader);
+						 zhtuplen - SizeofZHeapTupleHeader);
 	}
 
 	XLogRegisterBuffer(0, walinfo->buffer, REGBUF_STANDARD);
@@ -6310,6 +6559,9 @@ prepare_xlog:
 	if (recptr == InvalidXLogRecPtr)
 	{
 		ResetRegisteredTPDBuffers();
+		/* A new decision about the old tuple may be needed. */
+		if (!RelationIsLogicallyLogged(relation))
+			xlrec.flags &= ~XLZ_HAS_DELETE_UNDOTUPLE;
 		goto prepare_xlog;
 	}
 	PageSetLSN(page, recptr);
@@ -6333,7 +6585,8 @@ prepare_xlog:
  */
 static void
 log_zheap_multi_insert(ZHeapMultiInsertWALInfo *multi_walinfo, bool skip_undo,
-					   char *scratch, XactUndoContext *xuctx)
+					   char *scratch, TransactionId subxact_xid,
+					   XactUndoContext *xuctx)
 {
 	xl_undo_header xlundohdr;
 	XLogRecPtr	recptr;
@@ -6366,6 +6619,25 @@ log_zheap_multi_insert(ZHeapMultiInsertWALInfo *multi_walinfo, bool skip_undo,
 		xlrec->flags |= XLZ_INSERT_IS_FROZEN;
 	xlrec->ntuples = multi_walinfo->curpage_ntuples;
 	scratchptr += SizeOfZHeapMultiInsert;
+
+	/*
+	 * Include subtransaction XID so that we can discard changes done by
+	 * aborted subtransactions during logical decoding.
+	 */
+	if (need_tuple_data)
+	{
+		TransactionId	top_xid;
+
+		if (subxact_xid != InvalidTransactionId &&
+			subxact_xid != (top_xid = GetTopTransactionIdIfAny()))
+		{
+			Assert(top_xid != InvalidTransactionId);
+
+			xlrec->flags |= XLZ_INSERT_CONTAINS_SUBXID;
+			memcpy(scratchptr, &subxact_xid, sizeof(subxact_xid));
+			scratchptr += sizeof(subxact_xid);
+		}
+	}
 
 	/* copy the offset ranges as well */
 	memcpy((char *) scratchptr,
@@ -8097,6 +8369,7 @@ zheap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	FullTransactionId fxid = GetTopFullTransactionId();
 	bool		lock_reacquired;
 	bool		skip_undo;
+	TransactionId	subxact_xid = InvalidTransactionId;
 
 	needwal = RelationNeedsWAL(relation);
 	saveFreeSpace = RelationGetTargetPageFreeSpace(relation,
@@ -8128,6 +8401,10 @@ zheap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	 * which are not stored in scratch area. In future, if we reduce the
 	 * number of transaction slots to one, we may need to allocate twice the
 	 * BLCKSZ of scratch area.
+	 *
+	 * FIXME: xl_multi_insert_ztuple has datalen field which isn't stored on
+	 * the data page, so (at least in theory) the scratch space might be
+	 * insufficient. Compute the exact space needed or allocate (2 * BLCKSZ).
 	 */
 	if (needwal)
 		scratch = palloc(BLCKSZ);
@@ -8303,6 +8580,14 @@ reacquire_buffer:
 		undorecord->uur_payload.maxlen = payload_max_len;
 		undorecord->uur_payload.len = 0;
 
+		/*
+		 * The subtransaction XID is needed for logical decoding - retrieve it now
+		 * because it does not work in the critical section.
+		 */
+		if (needwal && RelationIsLogicallyLogged(relation) &&
+			IsSubTransaction())
+			subxact_xid = GetCurrentTransactionId();
+
 		/* No ereport(ERROR) from here till changes are logged */
 		START_CRIT_SECTION();
 
@@ -8471,7 +8756,8 @@ reacquire_buffer:
 			ins_wal_info.curpage_ntuples = nthispage;
 			ins_wal_info.ndone = ndone;
 
-			log_zheap_multi_insert(&ins_wal_info, skip_undo, scratch, &xuctx);
+			log_zheap_multi_insert(&ins_wal_info, skip_undo, scratch,
+								   subxact_xid, &xuctx);
 		}
 
 		END_CRIT_SECTION();
@@ -9091,4 +9377,118 @@ RefetchAndCheckTupleStatus(Relation relation,
 	}
 
 	return true;
+}
+
+/*
+ * Fetch TOASTed attributes of tuple which belong to the logical replication
+ * identity key and return them in an array, one immediately following another
+ * (unaligned). *res_size_p receives the array size.
+ *
+ * id_attrs is a set that determines which attributes constitute the identity
+ * key.
+ */
+static char *
+extract_toasted_identity_keys(ZHeapTuple tuple, Relation relation,
+							  Bitmapset *id_attrs, uint32 *res_size_p)
+{
+	TupleDesc	desc = RelationGetDescr(relation);
+	Datum	*values;
+	bool	*isnull, *serialize;
+	int	i;
+	Pointer	value;
+	int	bool_arr_size = desc->natts * sizeof(bool);
+	char	*result = NULL;
+	uint32	res_size = 0;
+
+	/*
+	 * Check which of the external attributes are part of the identity key,
+	 * and compute their total size.
+	 */
+	values = (Datum *) palloc(desc->natts * sizeof(Datum));
+	isnull = (bool *) palloc(bool_arr_size);
+	zheap_deform_tuple(tuple, desc, values, isnull, desc->natts);
+	serialize = (bool *) palloc0(bool_arr_size);
+	for (i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute	att;
+		int16	attnum;
+
+		if (isnull[i])
+			continue;
+
+		att = TupleDescAttr(desc, i);
+		attnum = att->attnum;
+		Assert(attnum == (i + 1));
+
+		/* Only interested in varlena attributes. */
+		if (att->attbyval || att->attlen != -1)
+			continue;
+
+		/* Process the identity attributes.  */
+		if (relation->rd_rel->relreplident == REPLICA_IDENTITY_FULL ||
+			bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, id_attrs))
+		{
+			Pointer	value = DatumGetPointer(values[i]);
+
+			if (VARATT_IS_EXTERNAL(value))
+			{
+				Size	val_size;
+
+				/*
+				 * The old tuple should just have been read from disk, so no
+				 * other kinds of external attributes should have been set.
+				 */
+				Assert(VARATT_IS_EXTERNAL_ONDISK(value));
+
+				val_size = toast_raw_datum_size(values[i]);
+
+				/* Check for overflow */
+				if ((res_size + val_size) < res_size)
+					ereport(ERROR,
+							(errmsg("external identity key does not fit into WAL")));
+
+				res_size += val_size;
+				serialize[i] = true;
+			}
+		}
+	}
+
+	/* Serialize the keys if found some above. */
+	if (res_size > 0)
+	{
+		char	*c;
+
+		c = result = (char *) palloc(res_size);
+
+		/* The actual serialization of the attributes. */
+		for (i = 0; i < desc->natts; i++)
+		{
+			char	*data;
+
+			if (!serialize[i])
+				continue;
+
+			value = DatumGetPointer(values[i]);
+			/*
+			 * TODO Don't we need zheap_tuple_fetch_attr() /
+			 * zheap_tuple_untoast_attr()? Even ztuptoaster.c uses the
+			 * heap_tuple..() functions. While the scan might work
+			 * (e.g. visibility is checked according to the actual AM of the
+			 * table), I'm not sure if the fastgetattr() macro can be used for
+			 * zheap, see toast_fetch_datum().
+			 */
+			data = (char *) detoast_attr((struct varlena *) value);
+			memcpy(c, data, VARSIZE(data));
+			c += VARSIZE(data);
+			Assert((c - result) <= res_size);
+			pfree(data);
+		}
+	}
+
+	pfree(values);
+	pfree(isnull);
+	pfree(serialize);
+
+	*res_size_p = res_size;
+	return result;
 }

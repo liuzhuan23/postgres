@@ -28,8 +28,10 @@
 
 #include "postgres.h"
 
+#include "access/heaptoast.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
+#include "catalog/catalog.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -38,6 +40,7 @@
 #include "replication/origin.h"
 #include "replication/reorderbuffer.h"
 #include "replication/snapbuild.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -1743,6 +1746,123 @@ LogicalConfirmReceivedLocation(XLogRecPtr lsn)
 		MyReplicationSlot->data.confirmed_flush = lsn;
 		SpinLockRelease(&MyReplicationSlot->mutex);
 	}
+}
+
+/*
+ * Build a heap tuple representing the configured REPLICA IDENTITY to represent
+ * the old tuple in a UPDATE or DELETE.
+ *
+ * Returns NULL if there's no need to log an identity or if there's no suitable
+ * key in the Relation relation.
+ *
+ * key_changed should be false if caller knows that no replica identity
+ * columns changed value.  It's always true in the DELETE case.
+ *
+ * *copy is set to true if the returned tuple is a modified copy rather than
+ * the same tuple that was passed in
+ */
+HeapTuple
+ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_changed, bool *copy,
+					   bool decoding)
+{
+	TupleDesc	desc = RelationGetDescr(relation);
+	Oid			replidindex;
+	Relation	idx_rel;
+	char		replident = relation->rd_rel->relreplident;
+	HeapTuple	key_tuple = NULL;
+	bool		nulls[MaxHeapAttributeNumber];
+	Datum		values[MaxHeapAttributeNumber];
+	int			natt;
+
+	*copy = false;
+
+	if (!RelationIsLogicallyLogged(relation))
+		return NULL;
+
+	if (replident == REPLICA_IDENTITY_NOTHING)
+		return NULL;
+
+	if (replident == REPLICA_IDENTITY_FULL)
+	{
+		/*
+		 * When logging the entire old tuple, it very well could contain
+		 * toasted columns. If so, force them to be inlined.
+		 *
+		 * If the function is used during logical decoding, it should receive
+		 * the tuple flattened (or at least the external key attributes
+		 * inlined) because the TOAST data is no longer guaranteed to exist at
+		 * decoding time (it could have been VACUUMed or the user table could
+		 * have been dropped). Furthermore, toast_flatten_tuple() does not
+		 * handle zheap format.
+		 */
+		if (!decoding && HeapTupleHasExternal(tp))
+		{
+			*copy = true;
+			tp = toast_flatten_tuple(tp, RelationGetDescr(relation));
+		}
+		return tp;
+	}
+
+	/* if the key hasn't changed and we're only logging the key, we're done */
+	if (!key_changed)
+		return NULL;
+
+	/* find the replica identity index */
+	replidindex = RelationGetReplicaIndex(relation);
+	if (!OidIsValid(replidindex))
+	{
+		elog(DEBUG4, "could not find configured replica identity for table \"%s\"",
+			 RelationGetRelationName(relation));
+		return NULL;
+	}
+
+	idx_rel = RelationIdGetRelation(replidindex);
+
+	Assert(CheckRelationLockedByMe(idx_rel, AccessShareLock, true) ||
+		   decoding);
+
+	/* deform tuple, so we have fast access to columns */
+	heap_deform_tuple(tp, desc, values, nulls);
+
+	/* set all columns to NULL, regardless of whether they actually are */
+	memset(nulls, 1, sizeof(nulls));
+
+	/*
+	 * Now set all columns contained in the index to NOT NULL, they cannot
+	 * currently be NULL.
+	 */
+	for (natt = 0; natt < IndexRelationGetNumberOfKeyAttributes(idx_rel); natt++)
+	{
+		int			attno = idx_rel->rd_index->indkey.values[natt];
+
+		if (attno < 0)
+			elog(ERROR, "system column in index");
+		nulls[attno - 1] = false;
+	}
+
+	key_tuple = heap_form_tuple(desc, values, nulls);
+	*copy = true;
+	RelationClose(idx_rel);
+
+	/*
+	 * If the tuple, which by here only contains indexed columns, still has
+	 * toasted columns, force them to be inlined. This is somewhat unlikely
+	 * since there's limits on the size of indexed columns, so we don't
+	 * duplicate toast_flatten_tuple()s functionality in the above loop over
+	 * the indexed columns, even if it would be more efficient.
+	 */
+	if (!decoding && HeapTupleHasExternal(key_tuple))
+	{
+		HeapTuple	oldtup = key_tuple;
+
+		/* See the notes on flattening above. */
+		Assert(!decoding);
+
+		key_tuple = toast_flatten_tuple(oldtup, RelationGetDescr(relation));
+		heap_freetuple(oldtup);
+	}
+
+	return key_tuple;
 }
 
 /*

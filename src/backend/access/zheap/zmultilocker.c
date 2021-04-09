@@ -195,10 +195,12 @@ ZGetMultiLockMembers(Relation rel, ZHeapTuple zhtup, Buffer buf,
 		 * We need to process the undo chain only for in-progress
 		 * transactions.
 		 */
-		if (FullTransactionIdOlderThanAllUndo(epoch_xid))
+		if (FullTransactionIdEquals(epoch_xid, InvalidFullTransactionId) ||
+			FullTransactionIdOlderThanAllUndo(epoch_xid))
 			continue;
 
 		urec_ptr = trans_slots[slot_no].urec_ptr;
+
 		trans_slot_id = slot_no + 1;
 		memcpy(&hdr, zhtup->t_data, SizeofZHeapTupleHeader);
 
@@ -316,13 +318,13 @@ ZGetMultiLockMembers(Relation rel, ZHeapTuple zhtup, Buffer buf,
 			 */
 			urec_ptr = urec->uur_blkprev;
 
-			//UndoRecordRelease(urec);
+			UndoRecordRelease(urec);
 			urec = NULL;
 		} while (UndoRecPtrIsValid(urec_ptr));
 
 		if (urec)
 		{
-			//UndoRecordRelease(urec);
+			UndoRecordRelease(urec);
 			urec = NULL;
 		}
 	}

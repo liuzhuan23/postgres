@@ -56,6 +56,7 @@
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "port/pg_bitutils.h"
+#include "replication/logical.h"
 #include "storage/bufmgr.h"
 #include "storage/freespace.h"
 #include "storage/lmgr.h"
@@ -101,8 +102,6 @@ static void MultiXactIdWait(MultiXactId multi, MultiXactStatus status, uint16 in
 static bool ConditionalMultiXactIdWait(MultiXactId multi, MultiXactStatus status,
 									   uint16 infomask, Relation rel, int *remaining);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
-static HeapTuple ExtractReplicaIdentity(Relation rel, HeapTuple tup, bool key_changed,
-										bool *copy);
 
 
 /*
@@ -2938,7 +2937,8 @@ l1:
 	 * Compute replica identity tuple before entering the critical section so
 	 * we don't PANIC upon a memory allocation failure.
 	 */
-	old_key_tuple = ExtractReplicaIdentity(relation, &tp, true, &old_key_copied);
+	old_key_tuple = ExtractReplicaIdentity(relation, &tp, true, &old_key_copied,
+										   false);
 
 	/*
 	 * If this is the first possibly-multixact-able operation in the current
@@ -3877,7 +3877,7 @@ l2:
 	 */
 	old_key_tuple = ExtractReplicaIdentity(relation, &oldtup,
 										   bms_overlap(modified_attrs, id_attrs),
-										   &old_key_copied);
+										   &old_key_copied, false);
 
 	/* NO EREPORT(ERROR) from here till changes are logged */
 	START_CRIT_SECTION();
@@ -7950,108 +7950,6 @@ log_heap_new_cid(Relation relation, HeapTuple tup)
 	recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_NEW_CID);
 
 	return recptr;
-}
-
-/*
- * Build a heap tuple representing the configured REPLICA IDENTITY to represent
- * the old tuple in a UPDATE or DELETE.
- *
- * Returns NULL if there's no need to log an identity or if there's no suitable
- * key defined.
- *
- * key_changed should be false if caller knows that no replica identity
- * columns changed value.  It's always true in the DELETE case.
- *
- * *copy is set to true if the returned tuple is a modified copy rather than
- * the same tuple that was passed in.
- */
-static HeapTuple
-ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_changed,
-					   bool *copy)
-{
-	TupleDesc	desc = RelationGetDescr(relation);
-	char		replident = relation->rd_rel->relreplident;
-	Bitmapset  *idattrs;
-	HeapTuple	key_tuple;
-	bool		nulls[MaxHeapAttributeNumber];
-	Datum		values[MaxHeapAttributeNumber];
-
-	*copy = false;
-
-	if (!RelationIsLogicallyLogged(relation))
-		return NULL;
-
-	if (replident == REPLICA_IDENTITY_NOTHING)
-		return NULL;
-
-	if (replident == REPLICA_IDENTITY_FULL)
-	{
-		/*
-		 * When logging the entire old tuple, it very well could contain
-		 * toasted columns. If so, force them to be inlined.
-		 */
-		if (HeapTupleHasExternal(tp))
-		{
-			*copy = true;
-			tp = toast_flatten_tuple(tp, desc);
-		}
-		return tp;
-	}
-
-	/* if the key hasn't changed and we're only logging the key, we're done */
-	if (!key_changed)
-		return NULL;
-
-	/* find out the replica identity columns */
-	idattrs = RelationGetIndexAttrBitmap(relation,
-										 INDEX_ATTR_BITMAP_IDENTITY_KEY);
-
-	/*
-	 * If there's no defined replica identity columns, treat as !key_changed.
-	 * (This case should not be reachable from heap_update, since that should
-	 * calculate key_changed accurately.  But heap_delete just passes constant
-	 * true for key_changed, so we can hit this case in deletes.)
-	 */
-	if (bms_is_empty(idattrs))
-		return NULL;
-
-	/*
-	 * Construct a new tuple containing only the replica identity columns,
-	 * with nulls elsewhere.  While we're at it, assert that the replica
-	 * identity columns aren't null.
-	 */
-	heap_deform_tuple(tp, desc, values, nulls);
-
-	for (int i = 0; i < desc->natts; i++)
-	{
-		if (bms_is_member(i + 1 - FirstLowInvalidHeapAttributeNumber,
-						  idattrs))
-			Assert(!nulls[i]);
-		else
-			nulls[i] = true;
-	}
-
-	key_tuple = heap_form_tuple(desc, values, nulls);
-	*copy = true;
-
-	bms_free(idattrs);
-
-	/*
-	 * If the tuple, which by here only contains indexed columns, still has
-	 * toasted columns, force them to be inlined. This is somewhat unlikely
-	 * since there's limits on the size of indexed columns, so we don't
-	 * duplicate toast_flatten_tuple()s functionality in the above loop over
-	 * the indexed columns, even if it would be more efficient.
-	 */
-	if (HeapTupleHasExternal(key_tuple))
-	{
-		HeapTuple	oldtup = key_tuple;
-
-		key_tuple = toast_flatten_tuple(oldtup, desc);
-		heap_freetuple(oldtup);
-	}
-
-	return key_tuple;
 }
 
 /*

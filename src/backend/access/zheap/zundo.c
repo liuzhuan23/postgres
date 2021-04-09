@@ -1879,7 +1879,7 @@ UndoFetchRecord(UndoRecPtr urp, BlockNumber blkno, OffsetNumber offset,
 		/* Was the record discarded ? */
 		if (node == NULL)
 		{
-			pfree(urec);
+			UndoRecordRelease(urec);
 			UndoRSReaderClose(&r);
 			return NULL;
 		}
@@ -1893,6 +1893,12 @@ UndoFetchRecord(UndoRecPtr urp, BlockNumber blkno, OffsetNumber offset,
 			break;
 
 		urp = urec->uur_blkprev;
+		if (urp == InvalidUndoRecPtr)
+		{
+			UndoRecordRelease(urec);
+			urec = NULL;
+			break;
+		}
 
 		/* Reset the current undorecord before fetching the next. */
 		ResetUndoRecord(urec);

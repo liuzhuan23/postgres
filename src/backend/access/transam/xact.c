@@ -6473,8 +6473,12 @@ xact_redo(XLogReaderState *record)
  * record.
  */
 bool
-IsSubTransactionAssignmentPending(void)
+IsSubTransactionAssignmentPending(RmgrId rmid)
 {
+	/* The zheap AM has to handle the subxid on its own. */
+	if (rmid == RM_ZHEAP_ID || rmid == RM_ZHEAP2_ID)
+		return false;
+
 	/* wal_level has to be logical */
 	if (!XLogLogicalInfoActive())
 		return false;
@@ -6503,7 +6507,8 @@ IsSubTransactionAssignmentPending(void)
 void
 MarkSubTransactionAssigned(void)
 {
-	Assert(IsSubTransactionAssignmentPending());
+	/* Any rmid other than RM_ZHEAP_ID can be used here. */
+	Assert(IsSubTransactionAssignmentPending(RM_HEAP_ID));
 
 	CurrentTransactionState->assigned = true;
 }

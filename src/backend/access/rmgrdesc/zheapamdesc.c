@@ -32,37 +32,48 @@ zheap_desc(StringInfo buf, XLogReaderState *record)
 	}
 	else if (info == XLOG_ZHEAP_INSERT)
 	{
-		xl_undo_header *xlundohdr = (xl_undo_header *) rec;
-		xl_zheap_insert *xlrec = (xl_zheap_insert *) ((char *) xlundohdr + SizeOfUndoHeader);
+		xl_zheap_insert *xlrec = (xl_zheap_insert *) rec;
+		char	*c = (char *) xlrec + SizeOfZHeapInsert;
+		xl_undo_header xlundohdr;
 
-		appendStringInfo(buf, "off %u, blkprev %lu", xlrec->offnum, xlundohdr->blkprev);
+		memcpy(&xlundohdr, c, SizeOfUndoHeader);
+
+		appendStringInfo(buf, "off %u, blkprev %lu", xlrec->offnum, xlundohdr.blkprev);
 	}
 	else if (info == XLOG_ZHEAP_MULTI_INSERT)
 	{
 		xl_undo_header *xlundohdr = (xl_undo_header *) rec;
-		xl_zheap_multi_insert *xlrec = (xl_zheap_multi_insert *) ((char *) xlundohdr + SizeOfUndoHeader);
+		xl_zheap_multi_insert xlrec;
 
-		appendStringInfo(buf, "%d tuples", xlrec->ntuples);
+		memcpy(&xlrec, (char *) xlundohdr + SizeOfUndoHeader,
+			   SizeOfZHeapMultiInsert);
+
+		appendStringInfo(buf, "%d tuples", xlrec.ntuples);
 	}
 	else if (info == XLOG_ZHEAP_DELETE)
 	{
 		xl_undo_header *xlundohdr = (xl_undo_header *) rec;
-		xl_zheap_delete *xlrec = (xl_zheap_delete *) ((char *) xlundohdr + SizeOfUndoHeader);
+		xl_zheap_delete xlrec;
+
+		memcpy(&xlrec,  (char *) xlundohdr + SizeOfUndoHeader,
+			   SizeOfZHeapDelete);
 
 		appendStringInfo(buf, "off %u, trans_slot %u, hasUndoTuple: %c, blkprev %lu",
-						 xlrec->offnum, xlrec->trans_slot_id,
-						 (xlrec->flags & XLZ_HAS_DELETE_UNDOTUPLE) ? 'T' : 'F',
+						 xlrec.offnum, xlrec.trans_slot_id,
+						 (xlrec.flags & XLZ_HAS_DELETE_UNDOTUPLE) ? 'T' : 'F',
 						 xlundohdr->blkprev);
 	}
 	else if (info == XLOG_ZHEAP_UPDATE)
 	{
 		xl_undo_header *xlundohdr = (xl_undo_header *) rec;
-		xl_zheap_update *xlrec = (xl_zheap_update *) ((char *) xlundohdr + SizeOfUndoHeader);
+		xl_zheap_update xlrec;
+
+		memcpy(&xlrec, (char *) xlundohdr + SizeOfUndoHeader, SizeOfZHeapUpdate);
 
 		appendStringInfo(buf, "oldoff %u, trans_slot %u, hasUndoTuple: %c, newoff: %u, blkprev %lu",
-						 xlrec->old_offnum, xlrec->old_trans_slot_id,
-						 (xlrec->flags & XLZ_HAS_UPDATE_UNDOTUPLE) ? 'T' : 'F',
-						 xlrec->new_offnum,
+						 xlrec.old_offnum, xlrec.old_trans_slot_id,
+						 (xlrec.flags & XLZ_HAS_UPDATE_UNDOTUPLE) ? 'T' : 'F',
+						 xlrec.new_offnum,
 						 xlundohdr->blkprev);
 	}
 	else if (info == XLOG_ZHEAP_FREEZE_XACT_SLOT)
@@ -81,10 +92,12 @@ zheap_desc(StringInfo buf, XLogReaderState *record)
 	else if (info == XLOG_ZHEAP_LOCK)
 	{
 		xl_undo_header *xlundohdr = (xl_undo_header *) rec;
-		xl_zheap_lock *xlrec = (xl_zheap_lock *) ((char *) xlundohdr + SizeOfUndoHeader);
+		xl_zheap_lock xlrec;
 
+		memcpy(&xlrec, (char *) xlundohdr + SizeOfUndoHeader,
+			   SizeOfZHeapLock);
 		appendStringInfo(buf, "off %u, xid %u, trans_slot_id %u",
-						 xlrec->offnum, xlrec->prev_xid, xlrec->trans_slot_id);
+						 xlrec.offnum, xlrec.prev_xid, xlrec.trans_slot_id);
 	}
 }
 

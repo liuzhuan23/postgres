@@ -43,7 +43,7 @@ CREATE TABLE toasted_key (
 ALTER TABLE toasted_key ALTER COLUMN toasted_key SET STORAGE EXTERNAL;
 ALTER TABLE toasted_key ALTER COLUMN toasted_col1 SET STORAGE EXTERNAL;
 
-INSERT INTO toasted_key(toasted_key, toasted_col1) VALUES(repeat('1234567890', 200), repeat('9876543210', 200));
+INSERT INTO toasted_key(toasted_key, toasted_col1) VALUES(repeat('1234567890', 201), repeat('9876543210', 201));
 
 -- test update of a toasted key without changing it
 UPDATE toasted_key SET toasted_col2 = toasted_col1;

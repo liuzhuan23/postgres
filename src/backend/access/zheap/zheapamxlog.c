@@ -34,8 +34,9 @@ static void
 zheap_xlog_insert(XLogReaderState *record)
 {
 	XLogRecPtr	lsn = record->EndRecPtr;
-	xl_undo_header *xlundohdr = NULL;
 	xl_zheap_insert *xlrec = (xl_zheap_insert *) XLogRecGetData(record);
+	xl_undo_header xlundohdr;
+	char	*c = (char *) xlrec + SizeOfZHeapInsert;
 	Buffer		buffer;
 	Page		page;
 	union
@@ -52,10 +53,16 @@ zheap_xlog_insert(XLogReaderState *record)
 	BlockNumber blkno;
 	ItemPointerData target_tid;
 	XLogRedoAction action;
-	int		   *tpd_trans_slot_id = NULL;
+	char		   *tpd_trans_slot_id_ptr = NULL;
 	FullTransactionId fxid = XLogRecGetFullXid(record);
 	bool		skip_undo;
 	ZHeapPrepareUndoInfo zh_undo_info;
+
+	/*
+	 * subxid is only needed for logical decoding, skip it during normal redo.
+	 */
+	if (xlrec->flags & XLZ_INSERT_CONTAINS_SUBXID)
+		c += sizeof(TransactionId);
 
 	/*
 	 * We can skip inserting undo records if the tuples are to be marked as
@@ -65,13 +72,13 @@ zheap_xlog_insert(XLogReaderState *record)
 
 	if (!skip_undo)
 	{
-		xlundohdr = (xl_undo_header *) ((char *) xlrec + SizeOfZHeapInsert);
+		memcpy(&xlundohdr, c, SizeOfUndoHeader);
 
 		if (xlrec->flags & XLZ_INSERT_CONTAINS_TPD_SLOT)
-			tpd_trans_slot_id = (int *) ((char *) xlundohdr + SizeOfUndoHeader);
+			tpd_trans_slot_id_ptr = c + SizeOfUndoHeader;
 	}
 	else if (xlrec->flags & XLZ_INSERT_CONTAINS_TPD_SLOT)
-		tpd_trans_slot_id = (int *) ((char *) xlrec + SizeOfZHeapInsert);
+		tpd_trans_slot_id_ptr = c;
 
 	XLogRecGetBlockTag(record, 0, NULL, &target_node, NULL, &blkno);
 	ItemPointerSetBlockNumber(&target_tid, blkno);
@@ -112,10 +119,10 @@ zheap_xlog_insert(XLogReaderState *record)
 		 */
 		uint32		dummy_specToken = 1;
 
-		zh_undo_info.reloid = xlundohdr->reloid;
+		zh_undo_info.reloid = xlundohdr.reloid;
 		zh_undo_info.blkno = ItemPointerGetBlockNumber(&target_tid);
 		zh_undo_info.offnum = ItemPointerGetOffsetNumber(&target_tid);
-		zh_undo_info.prev_urecptr = xlundohdr->blkprev;
+		zh_undo_info.prev_urecptr = xlundohdr.blkprev;
 		zh_undo_info.fxid = fxid;
 		zh_undo_info.cid = FirstCommandId;
 
@@ -192,8 +199,9 @@ zheap_xlog_insert(XLogReaderState *record)
 
 		if (!skip_undo)
 		{
-			if (tpd_trans_slot_id)
-				trans_slot_id = *tpd_trans_slot_id;
+			if (tpd_trans_slot_id_ptr)
+				memcpy(&trans_slot_id , tpd_trans_slot_id_ptr,
+					   sizeof(trans_slot_id));
 			else
 				trans_slot_id = ZHeapTupleHeaderGetXactSlot(zhtup);
 
@@ -220,8 +228,13 @@ zheap_xlog_insert(XLogReaderState *record)
 		action = XLogReadTPDBuffer(record, 1);
 		if (action == BLK_NEEDS_REDO)
 		{
+			int			trans_slot_id;
+
+			memcpy(&trans_slot_id , tpd_trans_slot_id_ptr,
+				   sizeof(trans_slot_id));
+
 			TPDPageSetUndo(buffer,
-						   *tpd_trans_slot_id,
+						   trans_slot_id,
 						   true,
 						   fxid,
 						   urecptr,
@@ -242,7 +255,8 @@ zheap_xlog_delete(XLogReaderState *record)
 	XLogRecPtr	lsn = record->EndRecPtr;
 	xl_undo_header *xlundohdr = (xl_undo_header *) XLogRecGetData(record);
 	Size		recordlen = XLogRecGetDataLen(record);
-	xl_zheap_delete *xlrec;
+	xl_zheap_delete xlrec;
+	char	*data;
 	Buffer		buffer;
 	Page		page;
 	ZHeapTupleData zheaptup;
@@ -257,17 +271,29 @@ zheap_xlog_delete(XLogReaderState *record)
 	ItemId		lp = NULL;
 	FullTransactionId fxid = XLogRecGetFullXid(record);
 	SubTransactionId dummy_subXactToken = InvalidSubTransactionId;
-	int		   *tpd_trans_slot_id = NULL;
+	int		tpd_trans_slot_id = InvalidXactSlotId;
 	UndoRecData	*rdt;
 	StringInfo	buf;
 
-	xlrec = (xl_zheap_delete *) ((char *) xlundohdr + SizeOfUndoHeader);
-	if (xlrec->flags & XLZ_DELETE_CONTAINS_TPD_SLOT)
-		tpd_trans_slot_id = (int *) ((char *) xlrec + SizeOfZHeapDelete);
+	data = (char *) xlundohdr + SizeOfUndoHeader;
+	memcpy(&xlrec, data, SizeOfZHeapDelete);
+	data += SizeOfZHeapDelete;
+
+	/*
+	 * subxid is only needed for logical decoding, skip it during normal redo.
+	 */
+	if (xlrec.flags & XLZ_DELETE_CONTAINS_SUBXID)
+		data += sizeof(TransactionId);
+
+	if (xlrec.flags & XLZ_DELETE_CONTAINS_TPD_SLOT)
+	{
+		memcpy(&tpd_trans_slot_id, data, sizeof(tpd_trans_slot_id));
+		data += sizeof(tpd_trans_slot_id);
+	}
 
 	XLogRecGetBlockTag(record, 0, NULL, &target_node, NULL, &blkno);
 	ItemPointerSetBlockNumber(&target_tid, blkno);
-	ItemPointerSetOffsetNumber(&target_tid, xlrec->offnum);
+	ItemPointerSetOffsetNumber(&target_tid, xlrec.offnum);
 
 	reln = CreateFakeRelcacheEntry(target_node);
 
@@ -275,7 +301,7 @@ zheap_xlog_delete(XLogReaderState *record)
 	 * The visibility map may need to be fixed even if the heap page is
 	 * already up-to-date.
 	 */
-	if (xlrec->flags & XLZ_DELETE_ALL_VISIBLE_CLEARED)
+	if (xlrec.flags & XLZ_DELETE_ALL_VISIBLE_CLEARED)
 	{
 		Buffer		vmbuffer = InvalidBuffer;
 
@@ -288,10 +314,10 @@ zheap_xlog_delete(XLogReaderState *record)
 
 	page = BufferGetPage(buffer);
 
-	if (PageGetMaxOffsetNumber(page) >= xlrec->offnum)
-		lp = PageGetItemId(page, xlrec->offnum);
+	if (PageGetMaxOffsetNumber(page) >= xlrec.offnum)
+		lp = PageGetItemId(page, xlrec.offnum);
 
-	if (PageGetMaxOffsetNumber(page) < xlrec->offnum || !ItemIdIsNormal(lp))
+	if (PageGetMaxOffsetNumber(page) < xlrec.offnum || !ItemIdIsNormal(lp))
 		elog(PANIC, "invalid lp");
 
 	zheaptup.t_tableOid = RelationGetRelid(reln);
@@ -300,12 +326,24 @@ zheap_xlog_delete(XLogReaderState *record)
 	zheaptup.t_self = target_tid;
 
 	/*
+	 * The old tuple key is only needed for logical decoding, skip it during
+	 * normal redo.
+	 */
+	if (xlrec.flags & XLZ_DELETE_CONTAINS_OLD_KEYS_EXT)
+	{
+		uint32	old_keys_ext_size;
+
+		memcpy(&old_keys_ext_size, data, sizeof(old_keys_ext_size));
+		Assert(old_keys_ext_size > 0);
+		data += sizeof(old_keys_ext_size) + old_keys_ext_size;
+	}
+
+	/*
 	 * If the WAL stream contains undo tuple, then replace it with the
 	 * explicitly stored tuple.
 	 */
-	if (xlrec->flags & XLZ_HAS_DELETE_UNDOTUPLE)
+	if (xlrec.flags & XLZ_HAS_DELETE_UNDOTUPLE)
 	{
-		char	   *data;
 		xl_zheap_header xlhdr;
 		union
 		{
@@ -315,25 +353,13 @@ zheap_xlog_delete(XLogReaderState *record)
 		ZHeapTupleHeader zhtup;
 		Size		datalen;
 
-		if (xlrec->flags & XLZ_DELETE_CONTAINS_TPD_SLOT)
-		{
-			data = (char *) xlrec + SizeOfZHeapDelete +
-				sizeof(*tpd_trans_slot_id);
-			datalen = recordlen - SizeOfUndoHeader - SizeOfZHeapDelete -
-				SizeOfZHeapHeader - sizeof(*tpd_trans_slot_id);
-		}
-		else
-		{
-			data = (char *) xlrec + SizeOfZHeapDelete;
-			datalen = recordlen - SizeOfUndoHeader - SizeOfZHeapDelete -
-				SizeOfZHeapHeader;
-		}
 		memcpy((char *) &xlhdr, data, SizeOfZHeapHeader);
 		data += SizeOfZHeapHeader;
 
 		zhtup = &tbuf.hdr;
 		MemSet((char *) zhtup, 0, SizeofZHeapTupleHeader);
 		/* PG73FORMAT: get bitmap [+ padding] [+ oid] + data */
+		datalen = recordlen - (data - XLogRecGetData(record));
 		memcpy((char *) zhtup + SizeofZHeapTupleHeader,
 			   data,
 			   datalen);
@@ -354,7 +380,7 @@ zheap_xlog_delete(XLogReaderState *record)
 	 * ensure that the undo pointer in DO and REDO function remains the same
 	 * is true.
 	 */
-	if (xlrec->flags & XLZ_DELETE_CONTAINS_SUBXACT)
+	if (xlrec.flags & XLZ_DELETE_CONTAINS_SUBXACT)
 		dummy_subXactToken = 1;
 
 	/* prepare an undo record */
@@ -365,12 +391,11 @@ zheap_xlog_delete(XLogReaderState *record)
 	zh_undo_info.fxid = fxid;
 	zh_undo_info.cid = FirstCommandId;
 	zheap_prepare_undodelete(&zh_undo_info,
-							 &zheaptup,
-							 xlrec->prevxid,
-							 tpd_trans_slot_id ? *tpd_trans_slot_id : InvalidXactSlotId,
-							 dummy_subXactToken,
-							 &undorecord, record);
-
+									   &zheaptup,
+									   xlrec.prevxid,
+									   tpd_trans_slot_id,
+									   dummy_subXactToken,
+									   &undorecord, record);
 	/* Serialize the record. */
 	rdt = PrepareZHeapUndoRecord(&undorecord);
 	buf = makeStringInfo();
@@ -384,14 +409,14 @@ zheap_xlog_delete(XLogReaderState *record)
 	{
 		zheaptup.t_data = (ZHeapTupleHeader) PageGetItem(page, lp);
 		zheaptup.t_len = ItemIdGetLength(lp);
-		ZHeapTupleHeaderSetXactSlot(zheaptup.t_data, xlrec->trans_slot_id);
+		ZHeapTupleHeaderSetXactSlot(zheaptup.t_data, xlrec.trans_slot_id);
 		zheaptup.t_data->t_infomask &= ~ZHEAP_VIS_STATUS_MASK;
-		zheaptup.t_data->t_infomask = xlrec->infomask;
+		zheaptup.t_data->t_infomask = xlrec.infomask;
 
-		if (xlrec->flags & XLZ_DELETE_IS_PARTITION_MOVE)
+		if (xlrec.flags & XLZ_DELETE_IS_PARTITION_MOVE)
 			ZHeapTupleHeaderSetMovedPartitions(zheaptup.t_data);
 
-		PageSetUNDO(undorecord, buffer, xlrec->trans_slot_id,
+		PageSetUNDO(undorecord, buffer, xlrec.trans_slot_id,
 					false, fxid, urecptr, NULL, 0);
 
 		/* Mark the page as a candidate for pruning */
@@ -407,7 +432,7 @@ zheap_xlog_delete(XLogReaderState *record)
 		if (action == BLK_NEEDS_REDO)
 		{
 			TPDPageSetUndo(buffer,
-						   xlrec->trans_slot_id,
+						   xlrec.trans_slot_id,
 						   true,
 						   fxid,
 						   urecptr,
@@ -434,11 +459,14 @@ zheap_xlog_update(XLogReaderState *record)
 {
 	XLogRecPtr	lsn = record->EndRecPtr;
 	xl_undo_header *xlundohdr;
-	xl_undo_header *xlnewundohdr = NULL;
+	xl_undo_header xlnewundohdr;
+	bool	have_newundohdr = false;
 	xl_zheap_header xlhdr;
 	Size		recordlen;
 	Size		freespace = 0;
-	xl_zheap_update *xlrec;
+	xl_zheap_update	xlrec;
+	char	*data;
+	Size		datalen;
 	Buffer		oldbuffer,
 				newbuffer;
 	Page		oldpage,
@@ -464,8 +492,9 @@ zheap_xlog_update(XLogReaderState *record)
 	Relation	reln;
 	ItemId		lp = NULL;
 	FullTransactionId fxid = XLogRecGetFullXid(record);
-	int		   *old_tup_trans_slot_id = NULL;
-	int		   *new_trans_slot_id = NULL;
+	int		old_tup_trans_slot_id = InvalidXactSlotId;
+	int		new_trans_slot_id = InvalidXactSlotId;
+	bool	have_new_slot = false;
 	int			trans_slot_id;
 	bool		inplace_update;
 	ZHeapPrepareUndoInfo gen_undo_info;
@@ -475,29 +504,42 @@ zheap_xlog_update(XLogReaderState *record)
 	uint8	undo_rec_type;
 	Size	undo_rec_size_old;
 
-	xlundohdr = (xl_undo_header *) XLogRecGetData(record);
-	xlrec = (xl_zheap_update *) ((char *) xlundohdr + SizeOfUndoHeader);
 	recordlen = XLogRecGetDataLen(record);
+	xlundohdr = (xl_undo_header *) XLogRecGetData(record);
 
-	if (xlrec->flags & XLZ_UPDATE_OLD_CONTAINS_TPD_SLOT)
+	data = ((char *) xlundohdr + SizeOfUndoHeader);
+	memcpy(&xlrec, data, SizeOfZHeapUpdate);
+	data += SizeOfZHeapUpdate;
+
+	/*
+	 * subxid is only needed for logical decoding, skip it during normal redo.
+	 */
+	if (xlrec.flags & XLZ_UPDATE_CONTAINS_SUBXID)
+		data += sizeof(TransactionId);
+
+	if (xlrec.flags & XLZ_UPDATE_OLD_CONTAINS_TPD_SLOT)
 	{
-		old_tup_trans_slot_id = (int *) ((char *) xlrec + SizeOfZHeapUpdate);
+		memcpy(&old_tup_trans_slot_id, data, sizeof(old_tup_trans_slot_id));
+		data += sizeof(old_tup_trans_slot_id);
 	}
-	if (xlrec->flags & XLZ_NON_INPLACE_UPDATE)
-	{
-		inplace_update = false;
-		if (old_tup_trans_slot_id)
-			xlnewundohdr = (xl_undo_header *) ((char *) old_tup_trans_slot_id + sizeof(*old_tup_trans_slot_id));
-		else
-			xlnewundohdr = (xl_undo_header *) ((char *) xlrec + SizeOfZHeapUpdate);
 
-		if (xlrec->flags & XLZ_UPDATE_NEW_CONTAINS_TPD_SLOT)
-			new_trans_slot_id = (int *) ((char *) xlnewundohdr + SizeOfUndoHeader);
+	if (xlrec.flags & XLZ_NON_INPLACE_UPDATE)
+	{
+		/* There is an additional undo header for non-inplace-update. */
+		memcpy(&xlnewundohdr, data, SizeOfUndoHeader);
+		data += SizeOfUndoHeader;
+		have_newundohdr = true;
+
+		if (xlrec.flags & XLZ_UPDATE_NEW_CONTAINS_TPD_SLOT)
+		{
+			memcpy(&new_trans_slot_id, data, sizeof(new_trans_slot_id));
+			data += sizeof(new_trans_slot_id);
+			have_new_slot = true;
+		}
+		inplace_update = false;
 	}
 	else
-	{
 		inplace_update = true;
-	}
 
 	XLogRecGetBlockTag(record, 0, NULL, &rnode, NULL, &newblk);
 	if (XLogRecGetBlockTag(record, 1, NULL, NULL, NULL, &oldblk))
@@ -508,8 +550,8 @@ zheap_xlog_update(XLogReaderState *record)
 	else
 		oldblk = newblk;
 
-	ItemPointerSet(&oldtid, oldblk, xlrec->old_offnum);
-	ItemPointerSet(&newtid, newblk, xlrec->new_offnum);
+	ItemPointerSet(&oldtid, oldblk, xlrec.old_offnum);
+	ItemPointerSet(&newtid, newblk, xlrec.new_offnum);
 
 	reln = CreateFakeRelcacheEntry(rnode);
 
@@ -517,7 +559,7 @@ zheap_xlog_update(XLogReaderState *record)
 	 * The visibility map may need to be fixed even if the zheap page is
 	 * already up-to-date.
 	 */
-	if (xlrec->flags & XLZ_UPDATE_OLD_ALL_VISIBLE_CLEARED)
+	if (xlrec.flags & XLZ_UPDATE_OLD_ALL_VISIBLE_CLEARED)
 	{
 		Buffer		vmbuffer = InvalidBuffer;
 
@@ -530,10 +572,10 @@ zheap_xlog_update(XLogReaderState *record)
 
 	oldpage = BufferGetPage(oldbuffer);
 
-	if (PageGetMaxOffsetNumber(oldpage) >= xlrec->old_offnum)
-		lp = PageGetItemId(oldpage, xlrec->old_offnum);
+	if (PageGetMaxOffsetNumber(oldpage) >= xlrec.old_offnum)
+		lp = PageGetItemId(oldpage, xlrec.old_offnum);
 
-	if (PageGetMaxOffsetNumber(oldpage) < xlrec->old_offnum || !ItemIdIsNormal(lp))
+	if (PageGetMaxOffsetNumber(oldpage) < xlrec.old_offnum || !ItemIdIsNormal(lp))
 		elog(PANIC, "invalid lp");
 
 	oldtup.t_tableOid = RelationGetRelid(reln);
@@ -542,58 +584,25 @@ zheap_xlog_update(XLogReaderState *record)
 	oldtup.t_self = oldtid;
 
 	/*
+	 * The old tuple key is only needed for logical decoding, skip it during
+	 * normal redo.
+	 */
+	if (xlrec.flags & XLZ_UPDATE_CONTAINS_OLD_KEYS_EXT)
+	{
+		uint32	old_keys_ext_size;
+
+		memcpy(&old_keys_ext_size, data, sizeof(old_keys_ext_size));
+		Assert(old_keys_ext_size > 0);
+		data += sizeof(old_keys_ext_size) + old_keys_ext_size;
+	}
+
+	/*
 	 * If the WAL stream contains undo tuple, then replace it with the
 	 * explicitly stored tuple.
 	 */
-	if (xlrec->flags & XLZ_HAS_UPDATE_UNDOTUPLE)
+	if (xlrec.flags & XLZ_HAS_UPDATE_UNDOTUPLE)
 	{
 		ZHeapTupleHeader zhtup;
-		Size		datalen;
-		char	   *data;
-
-		/* There is an additional undo header for non-inplace-update. */
-		if (inplace_update)
-		{
-			if (old_tup_trans_slot_id)
-			{
-				data = (char *) ((char *) old_tup_trans_slot_id + sizeof(*old_tup_trans_slot_id));
-				datalen = recordlen - SizeOfUndoHeader - SizeOfZHeapUpdate -
-					sizeof(*old_tup_trans_slot_id) - SizeOfZHeapHeader;
-			}
-			else
-			{
-				data = (char *) xlrec + SizeOfZHeapUpdate;
-				datalen = recordlen - SizeOfUndoHeader - SizeOfZHeapUpdate - SizeOfZHeapHeader;
-			}
-		}
-		else
-		{
-			if (old_tup_trans_slot_id && new_trans_slot_id)
-			{
-				datalen = recordlen - (2 * SizeOfUndoHeader) - SizeOfZHeapUpdate -
-					sizeof(*old_tup_trans_slot_id) - sizeof(*new_trans_slot_id) -
-					SizeOfZHeapHeader;
-				data = (char *) ((char *) new_trans_slot_id + sizeof(*new_trans_slot_id));
-			}
-			else if (new_trans_slot_id)
-			{
-				datalen = recordlen - (2 * SizeOfUndoHeader) - SizeOfZHeapUpdate -
-					sizeof(*new_trans_slot_id) - SizeOfZHeapHeader;
-				data = (char *) ((char *) new_trans_slot_id + sizeof(*new_trans_slot_id));
-			}
-			else if (old_tup_trans_slot_id)
-			{
-				datalen = recordlen - (2 * SizeOfUndoHeader) - SizeOfZHeapUpdate -
-					sizeof(*old_tup_trans_slot_id) - SizeOfZHeapHeader;
-				data = (char *) xlnewundohdr + SizeOfUndoHeader;
-			}
-			else
-			{
-				datalen = recordlen - (2 * SizeOfUndoHeader) - SizeOfZHeapUpdate -
-					SizeOfZHeapHeader;
-				data = (char *) xlnewundohdr + SizeOfUndoHeader;
-			}
-		}
 
 		memcpy((char *) &xlhdr, data, SizeOfZHeapHeader);
 		data += SizeOfZHeapHeader;
@@ -601,16 +610,16 @@ zheap_xlog_update(XLogReaderState *record)
 		zhtup = &tbuf.hdr;
 		MemSet((char *) zhtup, 0, SizeofZHeapTupleHeader);
 		/* PG73FORMAT: get bitmap [+ padding] [+ oid] + data */
+		datalen = recordlen - (data - XLogRecGetData(record));
 		memcpy((char *) zhtup + SizeofZHeapTupleHeader,
 			   data,
 			   datalen);
-		datalen += SizeofZHeapTupleHeader;
 		zhtup->t_infomask2 = xlhdr.t_infomask2;
 		zhtup->t_infomask = xlhdr.t_infomask;
 		zhtup->t_hoff = xlhdr.t_hoff;
 
 		oldtup.t_data = zhtup;
-		oldtup.t_len = datalen;
+		oldtup.t_len = datalen + SizeofZHeapTupleHeader;
 	}
 
 	/* prepare an undo record */
@@ -623,27 +632,26 @@ zheap_xlog_update(XLogReaderState *record)
 
 	zh_up_undo_info.gen_info = &gen_undo_info;
 	zh_up_undo_info.inplace_update = inplace_update;
-	zh_up_undo_info.prevxid = xlrec->prevxid;
+	zh_up_undo_info.prevxid = xlrec.prevxid;
 	zh_up_undo_info.old_undorec = &undorecord;
 	zh_up_undo_info.new_undorec = &newundorecord;
 	zh_up_undo_info.new_block = ItemPointerGetBlockNumber(&newtid);
-	zh_up_undo_info.hasSubXactLock = xlrec->flags & XLZ_UPDATE_CONTAINS_SUBXACT;
+	zh_up_undo_info.hasSubXactLock = xlrec.flags & XLZ_UPDATE_CONTAINS_SUBXACT;
 	zh_up_undo_info.recovery_tid = &newtid;
-	zh_up_undo_info.new_trans_slot_id = (new_trans_slot_id) ?
-		*new_trans_slot_id : InvalidXactSlotId;
-	zh_up_undo_info.tup_trans_slot_id = (old_tup_trans_slot_id) ?
-		*old_tup_trans_slot_id : InvalidXactSlotId;
+	zh_up_undo_info.new_trans_slot_id = new_trans_slot_id;
+	zh_up_undo_info.tup_trans_slot_id = old_tup_trans_slot_id;
+
+	newundorecord.uur_blkprev = (have_newundohdr) ? xlnewundohdr.blkprev :
+		InvalidUndoRecPtr;
 
 	zheap_prepare_undoupdate(&zh_up_undo_info, &oldtup, record);
 
-	zh_up_undo_info.new_undorec->uur_blkprev = (xlnewundohdr) ?
-		(xlnewundohdr->blkprev) : InvalidUndoRecPtr;
 
 	/* Serialize the record(s). */
 	rdt = PrepareZHeapUndoRecord(&undorecord);
 	undo_rec_size_old = GetUndoDataSize(rdt);
 	buf = makeStringInfo();
-	undo_rec_type = (xlrec->flags & XLZ_NON_INPLACE_UPDATE) ?
+	undo_rec_type = (xlrec.flags & XLZ_NON_INPLACE_UPDATE) ?
 		UNDO_ZHEAP_UPDATE : UNDO_ZHEAP_INPLACE_UPDATE;
 	SerializeUndoData(buf, RM_ZHEAP_ID, undo_rec_type, rdt);
 
@@ -672,11 +680,11 @@ zheap_xlog_update(XLogReaderState *record)
 	if (oldaction == BLK_NEEDS_REDO)
 	{
 		oldtup.t_data->t_infomask &= ~ZHEAP_VIS_STATUS_MASK;
-		oldtup.t_data->t_infomask = xlrec->old_infomask;
-		ZHeapTupleHeaderSetXactSlot(oldtup.t_data, xlrec->old_trans_slot_id);
+		oldtup.t_data->t_infomask = xlrec.old_infomask;
+		ZHeapTupleHeaderSetXactSlot(oldtup.t_data, xlrec.old_trans_slot_id);
 
 		if (oldblk != newblk)
-			PageSetUNDO(undorecord, oldbuffer, xlrec->old_trans_slot_id,
+			PageSetUNDO(undorecord, oldbuffer, xlrec.old_trans_slot_id,
 						false, fxid, urecptr, NULL, 0);
 
 		/* Mark the page as a candidate for pruning */
@@ -711,7 +719,7 @@ zheap_xlog_update(XLogReaderState *record)
 	 * The visibility map may need to be fixed even if the zheap page is
 	 * already up-to-date.
 	 */
-	if (xlrec->flags & XLZ_UPDATE_NEW_ALL_VISIBLE_CLEARED)
+	if (xlrec.flags & XLZ_UPDATE_NEW_ALL_VISIBLE_CLEARED)
 	{
 		Buffer		vmbuffer = InvalidBuffer;
 
@@ -731,19 +739,19 @@ zheap_xlog_update(XLogReaderState *record)
 		Size		tuplen;
 		uint32		newlen;
 
-		if (PageGetMaxOffsetNumber(newpage) + 1 < xlrec->new_offnum)
+		if (PageGetMaxOffsetNumber(newpage) + 1 < xlrec.new_offnum)
 			elog(PANIC, "invalid max offset number");
 
 		recdata = XLogRecGetBlockData(record, 0, &datalen);
 		recdata_end = recdata + datalen;
 
-		if (xlrec->flags & XLZ_UPDATE_PREFIX_FROM_OLD)
+		if (xlrec.flags & XLZ_UPDATE_PREFIX_FROM_OLD)
 		{
 			Assert(newblk == oldblk);
 			memcpy(&prefixlen, recdata, sizeof(uint16));
 			recdata += sizeof(uint16);
 		}
-		if (xlrec->flags & XLZ_UPDATE_SUFFIX_FROM_OLD)
+		if (xlrec.flags & XLZ_UPDATE_SUFFIX_FROM_OLD)
 		{
 			Assert(newblk == oldblk);
 			memcpy(&suffixlen, recdata, sizeof(uint16));
@@ -804,8 +812,8 @@ zheap_xlog_update(XLogReaderState *record)
 		newtup->t_infomask2 = xlhdr.t_infomask2;
 		newtup->t_infomask = xlhdr.t_infomask;
 		newtup->t_hoff = xlhdr.t_hoff;
-		if (new_trans_slot_id)
-			trans_slot_id = *new_trans_slot_id;
+		if (have_new_slot)
+			trans_slot_id = new_trans_slot_id;
 		else
 			trans_slot_id = ZHeapTupleHeaderGetXactSlot(newtup);
 
@@ -825,12 +833,12 @@ zheap_xlog_update(XLogReaderState *record)
 				ZPageSetPrunable(newpage, XLogRecGetXid(record));
 			}
 
-			PageSetUNDO(undorecord, newbuffer, xlrec->old_trans_slot_id,
+			PageSetUNDO(undorecord, newbuffer, xlrec.old_trans_slot_id,
 						false, fxid, urecptr, NULL, 0);
 		}
 		else
 		{
-			if (ZPageAddItem(newbuffer, NULL, (Item) newtup, newlen, xlrec->new_offnum,
+			if (ZPageAddItem(newbuffer, NULL, (Item) newtup, newlen, xlrec.new_offnum,
 							 true, true, true) == InvalidOffsetNumber)
 				elog(PANIC, "failed to add tuple");
 			PageSetUNDO((newbuffer == oldbuffer) ? undorecord : newundorecord,
@@ -864,12 +872,12 @@ zheap_xlog_update(XLogReaderState *record)
 				usedoff[0] = undorecord.uur_offset;
 				ucnt = 1;
 			}
-			if (xlrec->old_trans_slot_id > ZHEAP_PAGE_TRANS_SLOTS)
+			if (xlrec.old_trans_slot_id > ZHEAP_PAGE_TRANS_SLOTS)
 			{
 				if (inplace_update)
 				{
 					TPDPageSetUndo(oldbuffer,
-								   xlrec->old_trans_slot_id,
+								   xlrec.old_trans_slot_id,
 								   true,
 								   fxid,
 								   urecptr,
@@ -879,7 +887,7 @@ zheap_xlog_update(XLogReaderState *record)
 				else
 				{
 					TPDPageSetUndo(oldbuffer,
-								   xlrec->old_trans_slot_id,
+								   xlrec.old_trans_slot_id,
 								   true,
 								   fxid,
 								   (oldblk == newblk) ? newurecptr : urecptr,
@@ -897,7 +905,7 @@ zheap_xlog_update(XLogReaderState *record)
 		if (XLogReadTPDBuffer(record, 3) == BLK_NEEDS_REDO)
 		{
 			TPDPageSetUndo(newbuffer,
-						   *new_trans_slot_id,
+						   new_trans_slot_id,
 						   true,
 						   fxid,
 						   newurecptr,
@@ -906,10 +914,10 @@ zheap_xlog_update(XLogReaderState *record)
 			TPDPageSetLSN(newpage, lsn);
 		}
 	}
-	else if (new_trans_slot_id && (*new_trans_slot_id > ZHEAP_PAGE_TRANS_SLOTS))
+	else if (have_new_slot && (new_trans_slot_id > ZHEAP_PAGE_TRANS_SLOTS))
 	{
 		TPDPageSetUndo(newbuffer,
-					   *new_trans_slot_id,
+					   new_trans_slot_id,
 					   true,
 					   fxid,
 					   newurecptr,
@@ -1290,7 +1298,8 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 {
 	XLogRecPtr	lsn = record->EndRecPtr;
 	xl_undo_header *xlundohdr;
-	xl_zheap_multi_insert *xlrec;
+	char	*data;
+	xl_zheap_multi_insert xlrec;
 	RelFileNode rnode;
 	BlockNumber blkno;
 	Buffer		buffer;
@@ -1319,7 +1328,15 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 	bool		skip_undo;
 
 	xlundohdr = (xl_undo_header *) XLogRecGetData(record);
-	xlrec = (xl_zheap_multi_insert *) ((char *) xlundohdr + SizeOfUndoHeader);
+	data = (char *) xlundohdr + SizeOfUndoHeader;
+	memcpy(&xlrec, data, SizeOfZHeapMultiInsert);
+	data += SizeOfZHeapMultiInsert;
+
+	/*
+	 * subxid is only needed for logical decoding, skip it during normal redo.
+	 */
+	if (xlrec.flags & XLZ_INSERT_CONTAINS_SUBXID)
+		data += sizeof(TransactionId);
 
 	XLogRecGetBlockTag(record, 0, NULL, &rnode, NULL, &blkno);
 
@@ -1327,7 +1344,7 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 	 * The visibility map may need to be fixed even if the heap page is
 	 * already up-to-date.
 	 */
-	if (xlrec->flags & XLZ_INSERT_ALL_VISIBLE_CLEARED)
+	if (xlrec.flags & XLZ_INSERT_ALL_VISIBLE_CLEARED)
 	{
 		Relation	reln = CreateFakeRelcacheEntry(rnode);
 		Buffer		vmbuffer = InvalidBuffer;
@@ -1341,7 +1358,7 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 	if (isinit)
 	{
 		/* It has asked for page init, insert should not have tpd slot. */
-		Assert(!(xlrec->flags & XLZ_INSERT_CONTAINS_TPD_SLOT));
+		Assert(!(xlrec.flags & XLZ_INSERT_CONTAINS_TPD_SLOT));
 		buffer = XLogInitBufferForRedo(record, 0);
 		page = BufferGetPage(buffer);
 		ZheapInitPage(page, BufferGetPageSize(buffer));
@@ -1351,7 +1368,7 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 		action = XLogReadBufferForRedo(record, 0, &buffer);
 
 	/* allocate the information related to offset ranges */
-	ranges_data = (char *) xlrec + SizeOfZHeapMultiInsert;
+	ranges_data = data;
 
 	/* fetch number of distinct ranges */
 	nranges = *(int *) ranges_data;
@@ -1372,7 +1389,13 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 	 * We can skip inserting undo records if the tuples are to be marked as
 	 * frozen.
 	 */
-	skip_undo = (xlrec->flags & XLZ_INSERT_IS_FROZEN);
+	/*
+	 * FIXME ranges_data should now be at the end of the data, the offsets
+	 * should probably be retrieved from zfree_offset_ranges. Another reason
+	 * to consider this code broken is that zfree_offset_ranges->nranges is
+	 * not initialized aove.
+	 */
+	skip_undo = (xlrec.flags & XLZ_INSERT_IS_FROZEN);
 	if (!skip_undo)
 	{
 		ZHeapPrepareUndoInfo zh_undo_info;
@@ -1429,10 +1452,10 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 	}
 
 	/* Get the tpd transaction slot number */
-	if (xlrec->flags & XLZ_INSERT_CONTAINS_TPD_SLOT)
+	if (xlrec.flags & XLZ_INSERT_CONTAINS_TPD_SLOT)
 	{
-		tpd_trans_slot_id = (int *) ((char *) xlrec + SizeOfZHeapMultiInsert +
-									 ranges_data_size);
+		/* The slot id should be located where the offsets array ends. */
+		memcpy(&tpd_trans_slot_id, ranges_data, sizeof(tpd_trans_slot_id));
 	}
 
 	/* Apply the wal for data */
@@ -1455,7 +1478,7 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 		endptr = tupdata + len;
 
 		offnum = zfree_offset_ranges->startOffset[j];
-		for (i = 0; i < xlrec->ntuples; i++)
+		for (i = 0; i < xlrec.ntuples; i++)
 		{
 			xl_multi_insert_ztuple *xlhdr;
 
@@ -1548,7 +1571,7 @@ zheap_xlog_multi_insert(XLogReaderState *record)
 		 * We need to replay the record for TPD only when this record contains
 		 * slot from TPD.
 		 */
-		Assert(xlrec->flags & XLZ_INSERT_CONTAINS_TPD_SLOT);
+		Assert(xlrec.flags & XLZ_INSERT_CONTAINS_TPD_SLOT);
 		action = XLogReadTPDBuffer(record, 1);
 		if (action == BLK_NEEDS_REDO)
 		{
@@ -1751,8 +1774,7 @@ zheap_xlog_confirm(XLogReaderState *record)
 		}
 		else
 		{
-			Assert(xlrec->flags == XLZ_SPEC_INSERT_FAILED ||
-				   xlrec->flags == XLZ_INSERT_IS_SPECULATIVE);
+			Assert(xlrec->flags == XLZ_SPEC_INSERT_FAILED);
 			ItemIdSetDeadExtended(lp, xlrec->trans_slot_id);
 			ZPageSetPrunable(page, XLogRecGetXid(record));
 		}
