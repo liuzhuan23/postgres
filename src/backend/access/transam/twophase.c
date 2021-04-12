@@ -1048,8 +1048,12 @@ StartPrepare(GlobalTransaction gxact)
 														  &hdr.initfileinval);
 	hdr.gidlen = strlen(gxact->gid) + 1;	/* Include '\0' */
 
-	GetCurrentUndoRange(&hdr.urs_begin, &hdr.urs_end,
-						UNDOPERSISTENCE_PERMANENT);
+	if (!GetCurrentUndoRange(&hdr.urs_begin, &hdr.urs_end,
+							 UNDOPERSISTENCE_PERMANENT))
+	{
+		hdr.urs_begin = InvalidUndoRecPtr;
+		hdr.urs_end = InvalidUndoRecPtr;
+	}
 
 	save_state_data(&hdr, sizeof(TwoPhaseFileHeader));
 	save_state_data(gxact->gid, hdr.gidlen);

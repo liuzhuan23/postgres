@@ -45,6 +45,7 @@ typedef struct ZHeapScanDescData
 	int			rs_ntuples;		/* number of visible tuples on page */
 
 	ZHeapTuple	rs_visztuples[MaxZHeapTuplesPerPage];
+	MemoryContext	rs_visztuples_cxt;
 } ZHeapScanDescData;
 
 typedef struct ZHeapScanDescData *ZHeapScanDesc;

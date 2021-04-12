@@ -191,6 +191,9 @@ zheap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_strategy = NULL;	/* set in zinitscan */
 	scan->rs_startblock = 0;	/* set in initscan */
 	scan->rs_ntuples = 0;
+	scan->rs_visztuples_cxt = AllocSetContextCreate(CurrentMemoryContext,
+													"zheapgetpage",
+													ALLOCSET_DEFAULT_SIZES);
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -266,6 +269,7 @@ zheap_endscan(TableScanDesc sscan)
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
 
+	MemoryContextDelete(scan->rs_visztuples_cxt);
 	pfree(scan);
 }
 
@@ -357,6 +361,7 @@ zheapgetpage(TableScanDesc sscan, BlockNumber page)
 	bool		all_visible;
 	uint8		vmstatus;
 	Buffer		vmbuffer = InvalidBuffer;
+	MemoryContext	oldcxt;
 
 	Assert(page < scan->rs_nblocks);
 
@@ -447,6 +452,13 @@ zheapgetpage(TableScanDesc sscan, BlockNumber page)
 		vmbuffer = InvalidBuffer;
 	}
 
+	/*
+	 * All the tuples on the page will be in a separate context so that the
+	 * scan user does not delete them accidentally.
+	 */
+	MemoryContextReset(scan->rs_visztuples_cxt);
+	oldcxt = MemoryContextSwitchTo(scan->rs_visztuples_cxt);
+
 	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dp, lineoff);
 		 lineoff <= lines;
 		 lineoff++, lpp++)
@@ -486,6 +498,7 @@ zheapgetpage(TableScanDesc sscan, BlockNumber page)
 				scan->rs_visztuples[ntup++] = resulttup;
 		}
 	}
+	MemoryContextSwitchTo(oldcxt);
 
 	UnlockReleaseBuffer(buffer);
 

@@ -47,15 +47,16 @@ undo_read_block(UndoCachedBuffer *cached_buffer,
 	RelFileNode rnode;
 	BlockNumber blockno = UndoRecPtrGetBlockNum(urp);
 
-	if (cached_buffer->pinned_block == blockno)
+	UndoRecPtrAssignRelFileNode(rnode, urp);
+
+	if (cached_buffer->pinned_block == blockno &&
+		rnode.relNode == cached_buffer->pinned_log)
 	{
 		Assert(BufferIsValid(cached_buffer->pinned_buffer));
 		return cached_buffer->pinned_buffer;
 	}
 	else
 		undo_release_buffer(cached_buffer);
-
-	UndoRecPtrAssignRelFileNode(rnode, urp);
 
 	cached_buffer->pinned_buffer =
 		ReadBufferWithoutRelcache(SMGR_UNDO,
@@ -67,7 +68,10 @@ undo_read_block(UndoCachedBuffer *cached_buffer,
 								  relpersistence);
 	/* The buffer could have been discarded. */
 	if (cached_buffer->pinned_buffer != InvalidBuffer)
+	{
 		cached_buffer->pinned_block = blockno;
+		cached_buffer->pinned_log = rnode.relNode;
+	}
 	else
 		cached_buffer->pinned_block = InvalidBlockNumber;
 

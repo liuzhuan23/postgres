@@ -441,7 +441,7 @@ extern void UnregisterXactCallback(XactCallback callback, void *arg);
 extern void RegisterSubXactCallback(SubXactCallback callback, void *arg);
 extern void UnregisterSubXactCallback(SubXactCallback callback, void *arg);
 
-extern bool IsSubTransactionAssignmentPending(void);
+extern bool IsSubTransactionAssignmentPending(RmgrId rmid);
 extern void MarkSubTransactionAssigned(void);
 
 extern int	xactGetCommittedChildren(TransactionId **ptr);

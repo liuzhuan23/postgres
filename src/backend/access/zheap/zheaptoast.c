@@ -319,8 +319,10 @@ zheap_toast_insert_or_update(Relation rel, ZHeapTuple newtup,
 		if ((ttc.ttc_flags & TOAST_HAS_NULLS) != 0)
 			new_header_len += BITMAPLEN(numAttrs);
 		new_header_len = MAXALIGN(new_header_len);
-		new_data_len = heap_compute_data_size(tupleDesc,
-											  toast_values, toast_isnull);
+		new_data_len = zheap_compute_data_size(tupleDesc,
+											   toast_values,
+											   toast_isnull,
+											   new_header_len);
 		new_tuple_len = new_header_len + new_data_len;
 
 		/*
@@ -330,18 +332,18 @@ zheap_toast_insert_or_update(Relation rel, ZHeapTuple newtup,
 		result_tuple->t_len = new_tuple_len;
 		result_tuple->t_self = newtup->t_self;
 		result_tuple->t_tableOid = newtup->t_tableOid;
-		new_data = (ZHeapTupleHeader) ((char *) result_tuple + HEAPTUPLESIZE);
+		new_data = (ZHeapTupleHeader) ((char *) result_tuple + ZHEAPTUPLESIZE);
 		result_tuple->t_data = new_data;
 
 		/*
 		 * Copy the existing tuple header, but adjust natts and t_hoff.
 		 */
-		memcpy(new_data, olddata, SizeofHeapTupleHeader);
-		HeapTupleHeaderSetNatts(new_data, numAttrs);
+		memcpy(new_data, olddata, SizeofZHeapTupleHeader);
+		ZHeapTupleHeaderSetNatts(new_data, numAttrs);
 		new_data->t_hoff = new_header_len;
 
 		/* Copy over the data, and fill the null bitmap if needed */
-		heap_fill_tuple(tupleDesc,
+		zheap_fill_tuple(tupleDesc,
 						toast_values,
 						toast_isnull,
 						(char *) new_data + new_header_len,

@@ -36,6 +36,10 @@ typedef struct UndoCachedBuffer
 {
 	Buffer		pinned_buffer;
 	BlockNumber pinned_block;
+	/* XXX Should we introduce InvalidLogNumber? Currently we consider it
+	 * valid iff pinned_block is valid.
+	 */
+	UndoLogNumber	pinned_log;
 } UndoCachedBuffer;
 
 typedef struct UndoRSReaderState
