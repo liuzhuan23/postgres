@@ -116,9 +116,9 @@ typedef struct xl_zheap_insert
 	 * XLOG_INCLUDE_XID flag because zheap stores the top-level XID anyway. If
 	 * we just reverted the meaning of that flag for zheap and used it to
 	 * store the subtransaction XID, it wouldn't suffice because the flag only
-	 * ensures that the assignment is recorded once per subtransaction. However,
-	 * if the WAL record contains the top-level XID, then the sub-XID needs to
-	 * be present in each record.
+	 * ensures that the assignment is recorded once per subtransaction.
+	 * However each record (which was issued in a subtransaction) needs the
+	 * subtransaction XID for logical decoding to work.
 	 */
 
 	/* xl_zheap_header & TUPLE DATA in backup block 0 */
