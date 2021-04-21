@@ -1327,7 +1327,8 @@ apply_handle_update(StringInfo s)
 	/* Also populate extraUpdatedCols, in case we have generated columns */
 	fill_extraUpdatedCols(target_rte, rel->localrel);
 
-	PushActiveSnapshot(GetTransactionSnapshot());
+	estate->es_snapshot = GetTransactionSnapshot();
+	PushActiveSnapshot(estate->es_snapshot);
 
 	/* Build the search tuple. */
 	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
@@ -1457,7 +1458,8 @@ apply_handle_delete(StringInfo s)
 	resultRelInfo = makeNode(ResultRelInfo);
 	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0);
 
-	PushActiveSnapshot(GetTransactionSnapshot());
+	estate->es_snapshot = GetTransactionSnapshot();
+	PushActiveSnapshot(estate->es_snapshot);
 
 	/* Build the search tuple. */
 	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));

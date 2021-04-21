@@ -6161,12 +6161,13 @@ log_zheap_update(ZHeapWALInfo *old_walinfo, Relation relation,
 	 */
 	if (id_changed)
 	{
-		Assert(need_tuple_data);
-
 		xlrec.flags |= XLZ_UPDATE_IDENTITY_CHANGED;
 
 		if (old_keys_ext)
+		{
+			Assert(need_tuple_data);
 			xlrec.flags |= XLZ_UPDATE_CONTAINS_OLD_KEYS_EXT;
+		}
 	}
 
 	/*
