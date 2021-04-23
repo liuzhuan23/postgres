@@ -3005,7 +3005,7 @@ parse_next_page(UndoScanState *state, MemoryContext context, bool records)
 	 */
 	oldcontext = MemoryContextSwitchTo(context);
 	parse_undo_page(&state->parser, BufferGetPage(buffer),
-					UndoRecPtrGetOffset(state->cur_page) / BLCKSZ,
+					(state->cur_page % UndoLogSegmentSize) / BLCKSZ,
 					&state->seg, records);
 	state->cur_page += BLCKSZ;
 	MemoryContextSwitchTo(oldcontext);
