@@ -3157,13 +3157,18 @@ get_next_undo_log_chunk(PG_FUNCTION_ARGS, FuncCallContext *funcctx)
 		hdr = &chunk->type_header.xact;
 		xid = XidFromFullTransactionId(hdr->fxid);
 		values[5] = CStringGetTextDatum("xact");
-		/*
-		 * Print out t/f rather than true/false so it's consistent with the
-		 * 'discarded' bool value.
-		 */
-		values[6] = CStringGetTextDatum(psprintf("(xid=%u, applied=%s)",
-												 xid, hdr->applied ?
-												 "t" : "f"));
+
+		/* Print the type header (only contained in the first chunk). */
+		if (chunk->hdr.previous_chunk == InvalidUndoRecPtr)
+		{
+			/*
+			 * Print out t/f rather than true/false so it's consistent with
+			 * the 'discarded' bool value.
+			 */
+			values[6] = CStringGetTextDatum(psprintf("(xid=%u, applied=%s)",
+													 xid, hdr->applied ?
+													 "t" : "f"));
+		}
 	}
 	else
 	{
