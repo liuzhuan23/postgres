@@ -56,10 +56,10 @@ typedef struct UndoRSReaderState
 	StringInfoData buf;
 
 	/*
-	 * Record lenghts in varbyte format. The individual record pointers are
-	 * derived from these values, relative to end_readind.
+	 * Record distances in varbyte format. The individual record pointers are
+	 * derived from these values, relative to end_reading.
 	 */
-	StringInfoData	rec_lengths;
+	StringInfoData	rec_dists;
 
 	/* Pointer to the last processed byte of rec_lengths.data. */
 	char	*backward_cur;

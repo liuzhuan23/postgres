@@ -374,15 +374,15 @@ undo_reader_release_buffer(UndoRSReaderState *r)
 }
 
 /*
- * Store the record length in a "varbyte" format. This is beneficial because
- * the record length is usually requires one or two bytes.
+ * Store distance between two records in a "varbyte" format. This is
+ * beneficial because the distance is usually requires one or two bytes.
  *
  * We use the same scheme like encode_varbyte() in ginpostinglist.c, but
  * eventually write the bytes in reverse order. The point is that the records
  * will also be fetched so.
  */
 static void
-store_record_length(UndoRSReaderState *r, Size rec_len)
+store_record_dist(UndoRSReaderState *r, UndoRecPtr rec_dist)
 {
 	/*
 	 * We can use 7 bits of each byte, thus 8 bytes of the source value should
@@ -396,24 +396,24 @@ store_record_length(UndoRSReaderState *r, Size rec_len)
 	char *p = last;
 	int	nbytes;
 
-	while (rec_len > 0x7F)
+	while (rec_dist > 0x7F)
 	{
-		*(p--) = 0x80 | (rec_len & 0x7F);
-		rec_len >>= 7;
+		*(p--) = 0x80 | (rec_dist & 0x7F);
+		rec_dist >>= 7;
 	}
-	*p = (unsigned char) rec_len;
+	*p = (unsigned char) rec_dist;
 
 	nbytes = last - p + 1;
 	Assert(nbytes > 0 && nbytes <= MaxBytesPerValue);
 
-	appendBinaryStringInfo(&r->rec_lengths, p, nbytes);
+	appendBinaryStringInfo(&r->rec_dists, p, nbytes);
 }
 
 /*
- * Decode the next (in the backward direction) entry of r->rec_lengths.
+ * Decode the next (in the backward direction) entry of r->rec_dists.
  */
-static Size
-get_next_record_length(UndoRSReaderState *r)
+static UndoRecPtr
+get_next_record_dist(UndoRSReaderState *r)
 {
 	char	*p	= r->backward_cur;
 	Size	result = 0;
@@ -548,7 +548,7 @@ UndoRSReaderInit(UndoRSReaderState *r,
 
 	r->current_chunk = 1;
 
-	initStringInfo(&r->rec_lengths);
+	initStringInfo(&r->rec_dists);
 }
 
 /*
@@ -619,12 +619,13 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 		UndoLogOffset	next_off;
 
 		/*
-		 * Store the length, as it usually takes much less space than the
-		 * pointer. In fact we store difference of the record pointers because
-		 * the last record in the chunk may be followed by unused bytes.
+		 * Store the distance from the previous record, as it usually takes
+		 * much less space than the pointer. It'd be simpler to store the
+		 * record length, but the last record in the chunk may be followed by
+		 * unused bytes.
 		 */
 		if (r->last_record != InvalidUndoRecPtr)
-			store_record_length(r, r->next_urp - r->last_record);
+			store_record_dist(r, r->next_urp - r->last_record);
 		r->last_record = r->next_urp;
 
 		/* Compute where the next records should start. */
@@ -659,12 +660,12 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 	return true;
 
 done:
-	/* Make sure the last record length is stored. */
+	/* Make sure the last record is stored. */
 	if (length_only && r->last_record != InvalidUndoRecPtr)
 	{
 		Assert(r->last_record < r->end_reading);
 
-		store_record_length(r, r->end_reading - r->last_record);
+		store_record_dist(r, r->end_reading - r->last_record);
 	}
 
 	return false;
@@ -677,7 +678,7 @@ done:
 bool
 UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 {
-	StringInfo	rl = &r->rec_lengths;
+	StringInfo	rl = &r->rec_dists;
 
 	if (rl->len == 0)
 	{
@@ -706,7 +707,7 @@ UndoRSReaderReadOneBackward(UndoRSReaderState *r)
 		UndoRecPtr	urp, urp_diff;
 		WrittenUndoNode *node = &r->node;
 
-		urp_diff = get_next_record_length(r);
+		urp_diff = get_next_record_dist(r);
 		Assert(r->backward_cur >= rl->data);
 
 		/* Compute position of the next record. */
@@ -743,6 +744,6 @@ UndoRSReaderClose(UndoRSReaderState *r)
 	if (r->buf.data)
 		pfree(r->buf.data);
 
-	if (r->rec_lengths.data)
-		pfree(r->rec_lengths.data);
+	if (r->rec_dists.data)
+		pfree(r->rec_dists.data);
 }
