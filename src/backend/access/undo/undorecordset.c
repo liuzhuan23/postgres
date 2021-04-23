@@ -2241,7 +2241,7 @@ GetAllUndoRecordSets(void)
 			{
 				/* TODO Shared lock on the buffers should be enough. */
 				read_undo_header((void *) &xact_hdr,
-								 sizeof(XactUndoRecordSetHeader),
+								 SizeOfXactUndoRecordSetHeader,
 								 UndoRecPtrPlusUsableBytes(chunk_start,
 														   SizeOfUndoRecordSetChunkHeader),
 								 buffers,

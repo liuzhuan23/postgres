@@ -584,9 +584,9 @@ UndoRSReaderReadOneForward(UndoRSReaderState *r, bool length_only)
 				UndoRecPtrPlusUsableBytes(curchunk->urp_chunk_header, SizeOfUndoRecordSetChunkHeader);
 
 			/* and then over the type specific header */
-			/* FIXME: use proper size of type specific header */
 			if (curchunk->header.previous_chunk == InvalidUndoRecPtr)
-				r->next_urp = UndoRecPtrPlusUsableBytes(r->next_urp, 16);
+				r->next_urp = UndoRecPtrPlusUsableBytes(r->next_urp,
+														SizeOfXactUndoRecordSetHeader);
 		}
 		else
 		{

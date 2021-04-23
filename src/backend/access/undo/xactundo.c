@@ -210,7 +210,7 @@ PrepareXactUndoData(XactUndoContext *ctx, char persistence,
 		hdr.applied = false;
 
 		urs = UndoCreate(URST_TRANSACTION, persistence, 1,
-						 sizeof(hdr), (char *) &hdr);
+						 SizeOfXactUndoRecordSetHeader, (char *) &hdr);
 		XactUndo.record_set[plevel] = urs;
 	}
 
@@ -739,10 +739,10 @@ GetCurrentUndoRange(UndoRecPtr *begin, UndoRecPtr *end,
 	if (first_rec > 0)
 	{
 		Assert(first_rec >= (SizeOfUndoRecordSetChunkHeader +
-							 sizeof(XactUndoRecordSetHeader)));
+							 SizeOfXactUndoRecordSetHeader));
 		*begin = UndoRecPtrMinusUsableBytes(first_rec,
 											SizeOfUndoRecordSetChunkHeader +
-											sizeof(XactUndoRecordSetHeader));
+											SizeOfXactUndoRecordSetHeader);
 	}
 	*end = XactUndo.end_location[plevel];
 
