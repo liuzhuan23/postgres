@@ -1711,7 +1711,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	test = table_tuple_lock(relation, conflictTid,
 							estate->es_snapshot,
 							existing, estate->es_output_cid,
-							lockmode, LockWaitBlock, 0,
+							lockmode, LockWaitBlock, TUPLE_LOCK_FLAG_WEIRD,
 							&tmfd);
 	switch (test)
 	{
