@@ -79,6 +79,7 @@
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
+#include "executor/nodeResultCache.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -139,6 +140,7 @@ bool		enable_incremental_sort = true;
 bool		enable_hashagg = true;
 bool		enable_nestloop = true;
 bool		enable_material = true;
+bool		enable_resultcache = true;
 bool		enable_mergejoin = true;
 bool		enable_hashjoin = true;
 bool		enable_gathermerge = true;
@@ -147,6 +149,7 @@ bool		enable_partitionwise_aggregate = false;
 bool		enable_parallel_append = true;
 bool		enable_parallel_hash = true;
 bool		enable_partition_pruning = true;
+bool		enable_async_append = true;
 
 typedef struct
 {
@@ -1284,6 +1287,101 @@ cost_tidscan(Path *path, PlannerInfo *root,
 }
 
 /*
+ * cost_tidrangescan
+ *	  Determines and sets the costs of scanning a relation using a range of
+ *	  TIDs for 'path'
+ *
+ * 'baserel' is the relation to be scanned
+ * 'tidrangequals' is the list of TID-checkable range quals
+ * 'param_info' is the ParamPathInfo if this is a parameterized path, else NULL
+ */
+void
+cost_tidrangescan(Path *path, PlannerInfo *root,
+				  RelOptInfo *baserel, List *tidrangequals,
+				  ParamPathInfo *param_info)
+{
+	Selectivity selectivity;
+	double		pages;
+	Cost		startup_cost = 0;
+	Cost		run_cost = 0;
+	QualCost	qpqual_cost;
+	Cost		cpu_per_tuple;
+	QualCost	tid_qual_cost;
+	double		ntuples;
+	double		nseqpages;
+	double		spc_random_page_cost;
+	double		spc_seq_page_cost;
+
+	/* Should only be applied to base relations */
+	Assert(baserel->relid > 0);
+	Assert(baserel->rtekind == RTE_RELATION);
+
+	/* Mark the path with the correct row estimate */
+	if (param_info)
+		path->rows = param_info->ppi_rows;
+	else
+		path->rows = baserel->rows;
+
+	/* Count how many tuples and pages we expect to scan */
+	selectivity = clauselist_selectivity(root, tidrangequals, baserel->relid,
+										 JOIN_INNER, NULL);
+	pages = ceil(selectivity * baserel->pages);
+
+	if (pages <= 0.0)
+		pages = 1.0;
+
+	/*
+	 * The first page in a range requires a random seek, but each subsequent
+	 * page is just a normal sequential page read. NOTE: it's desirable for
+	 * TID Range Scans to cost more than the equivalent Sequential Scans,
+	 * because Seq Scans have some performance advantages such as scan
+	 * synchronization and parallelizability, and we'd prefer one of them to
+	 * be picked unless a TID Range Scan really is better.
+	 */
+	ntuples = selectivity * baserel->tuples;
+	nseqpages = pages - 1.0;
+
+	if (!enable_tidscan)
+		startup_cost += disable_cost;
+
+	/*
+	 * The TID qual expressions will be computed once, any other baserestrict
+	 * quals once per retrieved tuple.
+	 */
+	cost_qual_eval(&tid_qual_cost, tidrangequals, root);
+
+	/* fetch estimated page cost for tablespace containing table */
+	get_tablespace_page_costs(baserel->reltablespace,
+							  &spc_random_page_cost,
+							  &spc_seq_page_cost);
+
+	/* disk costs; 1 random page and the remainder as seq pages */
+	run_cost += spc_random_page_cost + spc_seq_page_cost * nseqpages;
+
+	/* Add scanning CPU costs */
+	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
+
+	/*
+	 * XXX currently we assume TID quals are a subset of qpquals at this
+	 * point; they will be removed (if possible) when we create the plan, so
+	 * we subtract their cost from the total qpqual cost.  (If the TID quals
+	 * can't be removed, this is a mistake and we're going to underestimate
+	 * the CPU cost a bit.)
+	 */
+	startup_cost += qpqual_cost.startup + tid_qual_cost.per_tuple;
+	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple -
+		tid_qual_cost.per_tuple;
+	run_cost += cpu_per_tuple * ntuples;
+
+	/* tlist eval costs are paid per output row, not per tuple scanned */
+	startup_cost += path->pathtarget->cost.startup;
+	run_cost += path->pathtarget->cost.per_tuple * path->rows;
+
+	path->startup_cost = startup_cost;
+	path->total_cost = startup_cost + run_cost;
+}
+
+/*
  * cost_subqueryscan
  *	  Determines and returns the cost of scanning a subquery RTE.
  *
@@ -1874,7 +1972,8 @@ cost_incremental_sort(Path *path,
 
 	/* Estimate number of groups with equal presorted keys. */
 	if (!unknown_varno)
-		input_groups = estimate_num_groups(root, presortedExprs, input_tuples, NULL);
+		input_groups = estimate_num_groups(root, presortedExprs, input_tuples,
+										   NULL, NULL);
 
 	group_tuples = input_tuples / input_groups;
 	group_input_run_cost = input_run_cost / input_groups;
@@ -2303,6 +2402,147 @@ cost_material(Path *path,
 
 	path->startup_cost = startup_cost;
 	path->total_cost = startup_cost + run_cost;
+}
+
+/*
+ * cost_resultcache_rescan
+ *	  Determines the estimated cost of rescanning a ResultCache node.
+ *
+ * In order to estimate this, we must gain knowledge of how often we expect to
+ * be called and how many distinct sets of parameters we are likely to be
+ * called with. If we expect a good cache hit ratio, then we can set our
+ * costs to account for that hit ratio, plus a little bit of cost for the
+ * caching itself.  Caching will not work out well if we expect to be called
+ * with too many distinct parameter values.  The worst-case here is that we
+ * never see any parameter value twice, in which case we'd never get a cache
+ * hit and caching would be a complete waste of effort.
+ */
+static void
+cost_resultcache_rescan(PlannerInfo *root, ResultCachePath *rcpath,
+						Cost *rescan_startup_cost, Cost *rescan_total_cost)
+{
+	EstimationInfo estinfo;
+	Cost		input_startup_cost = rcpath->subpath->startup_cost;
+	Cost		input_total_cost = rcpath->subpath->total_cost;
+	double		tuples = rcpath->subpath->rows;
+	double		calls = rcpath->calls;
+	int			width = rcpath->subpath->pathtarget->width;
+
+	double		hash_mem_bytes;
+	double		est_entry_bytes;
+	double		est_cache_entries;
+	double		ndistinct;
+	double		evict_ratio;
+	double		hit_ratio;
+	Cost		startup_cost;
+	Cost		total_cost;
+
+	/* available cache space */
+	hash_mem_bytes = get_hash_mem() * 1024L;
+
+	/*
+	 * Set the number of bytes each cache entry should consume in the cache.
+	 * To provide us with better estimations on how many cache entries we can
+	 * store at once, we make a call to the executor here to ask it what
+	 * memory overheads there are for a single cache entry.
+	 *
+	 * XXX we also store the cache key, but that's not accounted for here.
+	 */
+	est_entry_bytes = relation_byte_size(tuples, width) +
+		ExecEstimateCacheEntryOverheadBytes(tuples);
+
+	/* estimate on the upper limit of cache entries we can hold at once */
+	est_cache_entries = floor(hash_mem_bytes / est_entry_bytes);
+
+	/* estimate on the distinct number of parameter values */
+	ndistinct = estimate_num_groups(root, rcpath->param_exprs, calls, NULL,
+									&estinfo);
+
+	/*
+	 * When the estimation fell back on using a default value, it's a bit too
+	 * risky to assume that it's ok to use a Result Cache.  The use of a
+	 * default could cause us to use a Result Cache when it's really
+	 * inappropriate to do so.  If we see that this has been done, then we'll
+	 * assume that every call will have unique parameters, which will almost
+	 * certainly mean a ResultCachePath will never survive add_path().
+	 */
+	if ((estinfo.flags & SELFLAG_USED_DEFAULT) != 0)
+		ndistinct = calls;
+
+	/*
+	 * Since we've already estimated the maximum number of entries we can
+	 * store at once and know the estimated number of distinct values we'll be
+	 * called with, we'll take this opportunity to set the path's est_entries.
+	 * This will ultimately determine the hash table size that the executor
+	 * will use.  If we leave this at zero, the executor will just choose the
+	 * size itself.  Really this is not the right place to do this, but it's
+	 * convenient since everything is already calculated.
+	 */
+	rcpath->est_entries = Min(Min(ndistinct, est_cache_entries),
+							  PG_UINT32_MAX);
+
+	/*
+	 * When the number of distinct parameter values is above the amount we can
+	 * store in the cache, then we'll have to evict some entries from the
+	 * cache.  This is not free. Here we estimate how often we'll incur the
+	 * cost of that eviction.
+	 */
+	evict_ratio = 1.0 - Min(est_cache_entries, ndistinct) / ndistinct;
+
+	/*
+	 * In order to estimate how costly a single scan will be, we need to
+	 * attempt to estimate what the cache hit ratio will be.  To do that we
+	 * must look at how many scans are estimated in total for this node and
+	 * how many of those scans we expect to get a cache hit.
+	 */
+	hit_ratio = 1.0 / ndistinct * Min(est_cache_entries, ndistinct) -
+		(ndistinct / calls);
+
+	/* Ensure we don't go negative */
+	hit_ratio = Max(hit_ratio, 0.0);
+
+	/*
+	 * Set the total_cost accounting for the expected cache hit ratio.  We
+	 * also add on a cpu_operator_cost to account for a cache lookup. This
+	 * will happen regardless of whether it's a cache hit or not.
+	 */
+	total_cost = input_total_cost * (1.0 - hit_ratio) + cpu_operator_cost;
+
+	/* Now adjust the total cost to account for cache evictions */
+
+	/* Charge a cpu_tuple_cost for evicting the actual cache entry */
+	total_cost += cpu_tuple_cost * evict_ratio;
+
+	/*
+	 * Charge a 10th of cpu_operator_cost to evict every tuple in that entry.
+	 * The per-tuple eviction is really just a pfree, so charging a whole
+	 * cpu_operator_cost seems a little excessive.
+	 */
+	total_cost += cpu_operator_cost / 10.0 * evict_ratio * tuples;
+
+	/*
+	 * Now adjust for storing things in the cache, since that's not free
+	 * either.  Everything must go in the cache.  We don't proportion this
+	 * over any ratio, just apply it once for the scan.  We charge a
+	 * cpu_tuple_cost for the creation of the cache entry and also a
+	 * cpu_operator_cost for each tuple we expect to cache.
+	 */
+	total_cost += cpu_tuple_cost + cpu_operator_cost * tuples;
+
+	/*
+	 * Getting the first row must be also be proportioned according to the
+	 * expected cache hit ratio.
+	 */
+	startup_cost = input_startup_cost * (1.0 - hit_ratio);
+
+	/*
+	 * Additionally we charge a cpu_tuple_cost to account for cache lookups,
+	 * which we'll do regardless of whether it was a cache hit or not.
+	 */
+	startup_cost += cpu_tuple_cost;
+
+	*rescan_startup_cost = startup_cost;
+	*rescan_total_cost = total_cost;
 }
 
 /*
@@ -4045,6 +4285,11 @@ cost_rescan(PlannerInfo *root, Path *path,
 				*rescan_total_cost = run_cost;
 			}
 			break;
+		case T_ResultCache:
+			/* All the hard work is done by cost_resultcache_rescan */
+			cost_resultcache_rescan(root, (ResultCachePath *) path,
+									rescan_startup_cost, rescan_total_cost);
+			break;
 		default:
 			*rescan_startup_cost = path->startup_cost;
 			*rescan_total_cost = path->total_cost;
@@ -4191,21 +4436,50 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
 	{
-		/*
-		 * Estimate that the operator will be applied to about half of the
-		 * array elements before the answer is determined.
-		 */
 		ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) node;
 		Node	   *arraynode = (Node *) lsecond(saop->args);
 		QualCost	sacosts;
+		QualCost	hcosts;
+		int			estarraylen = estimate_array_length(arraynode);
 
 		set_sa_opfuncid(saop);
 		sacosts.startup = sacosts.per_tuple = 0;
 		add_function_cost(context->root, saop->opfuncid, NULL,
 						  &sacosts);
-		context->total.startup += sacosts.startup;
-		context->total.per_tuple += sacosts.per_tuple *
-			estimate_array_length(arraynode) * 0.5;
+
+		if (OidIsValid(saop->hashfuncid))
+		{
+			/* Handle costs for hashed ScalarArrayOpExpr */
+			hcosts.startup = hcosts.per_tuple = 0;
+
+			add_function_cost(context->root, saop->hashfuncid, NULL, &hcosts);
+			context->total.startup += sacosts.startup + hcosts.startup;
+
+			/* Estimate the cost of building the hashtable. */
+			context->total.startup += estarraylen * hcosts.per_tuple;
+
+			/*
+			 * XXX should we charge a little bit for sacosts.per_tuple when
+			 * building the table, or is it ok to assume there will be zero
+			 * hash collision?
+			 */
+
+			/*
+			 * Charge for hashtable lookups.  Charge a single hash and a
+			 * single comparison.
+			 */
+			context->total.per_tuple += hcosts.per_tuple + sacosts.per_tuple;
+		}
+		else
+		{
+			/*
+			 * Estimate that the operator will be applied to about half of the
+			 * array elements before the answer is determined.
+			 */
+			context->total.startup += sacosts.startup;
+			context->total.per_tuple += sacosts.per_tuple *
+				estimate_array_length(arraynode) * 0.5;
+		}
 	}
 	else if (IsA(node, Aggref) ||
 			 IsA(node, WindowFunc))

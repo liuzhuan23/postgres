@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 package Solution;
 
 #
@@ -279,6 +282,8 @@ sub GenerateFiles
 		HAVE_GETTIMEOFDAY                           => undef,
 		HAVE_GSSAPI_GSSAPI_H                        => undef,
 		HAVE_GSSAPI_H                               => undef,
+		HAVE_HMAC_CTX_FREE                          => undef,
+		HAVE_HMAC_CTX_NEW                           => undef,
 		HAVE_HISTORY_H                              => undef,
 		HAVE_HISTORY_TRUNCATE_FILE                  => undef,
 		HAVE_IFADDRS_H                              => undef,
@@ -298,6 +303,7 @@ sub GenerateFiles
 		HAVE_LIBCRYPTO                              => undef,
 		HAVE_LIBLDAP                                => undef,
 		HAVE_LIBLDAP_R                              => undef,
+		HAVE_LIBLZ4                                 => undef,
 		HAVE_LIBM                                   => undef,
 		HAVE_LIBPAM                                 => undef,
 		HAVE_LIBREADLINE                            => undef,
@@ -311,6 +317,7 @@ sub GenerateFiles
 		HAVE_LOCALE_T               => 1,
 		HAVE_LONG_INT_64            => undef,
 		HAVE_LONG_LONG_INT_64       => 1,
+		HAVE_LZ4_H                  => undef,
 		HAVE_MBARRIER_H             => undef,
 		HAVE_MBSTOWCS_L             => 1,
 		HAVE_MEMORY_H               => 1,
@@ -333,6 +340,7 @@ sub GenerateFiles
 		HAVE_PSTAT                  => undef,
 		HAVE_PS_STRINGS             => undef,
 		HAVE_PTHREAD                => undef,
+		HAVE_PTHREAD_BARRIER_WAIT   => undef,
 		HAVE_PTHREAD_IS_THREADED_NP => undef,
 		HAVE_PTHREAD_PRIO_INHERIT   => undef,
 		HAVE_PWRITE                 => undef,
@@ -387,6 +395,7 @@ sub GenerateFiles
 		HAVE_STRUCT_TM_TM_ZONE                   => undef,
 		HAVE_SYNC_FILE_RANGE                     => undef,
 		HAVE_SYMLINK                             => 1,
+		HAVE_SYNCFS                              => undef,
 		HAVE_SYSLOG                              => undef,
 		HAVE_SYS_EPOLL_H                         => undef,
 		HAVE_SYS_EVENT_H                         => undef,
@@ -484,6 +493,7 @@ sub GenerateFiles
 		USE_ICU => $self->{options}->{icu} ? 1 : undef,
 		USE_LIBXML                 => undef,
 		USE_LIBXSLT                => undef,
+		USE_LZ4                    => undef,
 		USE_LDAP                   => $self->{options}->{ldap} ? 1 : undef,
 		USE_LLVM                   => undef,
 		USE_NAMED_POSIX_SEMAPHORES => undef,
@@ -525,6 +535,12 @@ sub GenerateFiles
 		$define{HAVE_LIBXSLT} = 1;
 		$define{USE_LIBXSLT}  = 1;
 	}
+	if ($self->{options}->{lz4})
+	{
+		$define{HAVE_LIBLZ4} = 1;
+		$define{HAVE_LZ4_H}  = 1;
+		$define{USE_LZ4}     = 1;
+	}
 	if ($self->{options}->{openssl})
 	{
 		$define{USE_OPENSSL} = 1;
@@ -537,6 +553,8 @@ sub GenerateFiles
 			$define{HAVE_ASN1_STRING_GET0_DATA} = 1;
 			$define{HAVE_BIO_GET_DATA}          = 1;
 			$define{HAVE_BIO_METH_NEW}          = 1;
+			$define{HAVE_HMAC_CTX_FREE}         = 1;
+			$define{HAVE_HMAC_CTX_NEW}          = 1;
 			$define{HAVE_OPENSSL_INIT_SSL}      = 1;
 		}
 	}
@@ -662,16 +680,6 @@ sub GenerateFiles
 		print "Generating pltclerrcodes.h...\n";
 		system(
 			'perl src/pl/tcl/generate-pltclerrcodes.pl src/backend/utils/errcodes.txt > src/pl/tcl/pltclerrcodes.h'
-		);
-	}
-
-	if (IsNewer(
-			'src/backend/utils/sort/qsort_tuple.c',
-			'src/backend/utils/sort/gen_qsort_tuple.pl'))
-	{
-		print "Generating qsort_tuple.c...\n";
-		system(
-			'perl src/backend/utils/sort/gen_qsort_tuple.pl > src/backend/utils/sort/qsort_tuple.c'
 		);
 	}
 
@@ -1052,6 +1060,11 @@ sub AddProject
 		$proj->AddIncludeDir($self->{options}->{xslt} . '\include');
 		$proj->AddLibrary($self->{options}->{xslt} . '\lib\libxslt.lib');
 	}
+	if ($self->{options}->{lz4})
+	{
+		$proj->AddIncludeDir($self->{options}->{lz4} . '\include');
+		$proj->AddLibrary($self->{options}->{lz4} . '\lib\liblz4.lib');
+	}
 	if ($self->{options}->{uuid})
 	{
 		$proj->AddIncludeDir($self->{options}->{uuid} . '\include');
@@ -1163,6 +1176,7 @@ sub GetFakeConfigure
 	$cfg .= ' --with-uuid'          if ($self->{options}->{uuid});
 	$cfg .= ' --with-libxml'        if ($self->{options}->{xml});
 	$cfg .= ' --with-libxslt'       if ($self->{options}->{xslt});
+	$cfg .= ' --with-lz4'           if ($self->{options}->{lz4});
 	$cfg .= ' --with-gssapi'        if ($self->{options}->{gss});
 	$cfg .= ' --with-icu'           if ($self->{options}->{icu});
 	$cfg .= ' --with-tcl'           if ($self->{options}->{tcl});

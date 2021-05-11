@@ -63,6 +63,10 @@ extern BitmapOrPath *create_bitmap_or_path(PlannerInfo *root,
 										   List *bitmapquals);
 extern TidPath *create_tidscan_path(PlannerInfo *root, RelOptInfo *rel,
 									List *tidquals, Relids required_outer);
+extern TidRangePath *create_tidrangescan_path(PlannerInfo *root,
+											  RelOptInfo *rel,
+											  List *tidrangequals,
+											  Relids required_outer);
 extern AppendPath *create_append_path(PlannerInfo *root, RelOptInfo *rel,
 									  List *subpaths, List *partial_subpaths,
 									  List *pathkeys, Relids required_outer,
@@ -78,6 +82,13 @@ extern GroupResultPath *create_group_result_path(PlannerInfo *root,
 												 PathTarget *target,
 												 List *havingqual);
 extern MaterialPath *create_material_path(RelOptInfo *rel, Path *subpath);
+extern ResultCachePath *create_resultcache_path(PlannerInfo *root,
+												RelOptInfo *rel,
+												Path *subpath,
+												List *param_exprs,
+												List *hash_operators,
+												bool singlerow,
+												double calls);
 extern UniquePath *create_unique_path(PlannerInfo *root, RelOptInfo *rel,
 									  Path *subpath, SpecialJoinInfo *sjinfo);
 extern GatherPath *create_gather_path(PlannerInfo *root,
@@ -256,11 +267,12 @@ extern LockRowsPath *create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 										  Path *subpath, List *rowMarks, int epqParam);
 extern ModifyTablePath *create_modifytable_path(PlannerInfo *root,
 												RelOptInfo *rel,
+												Path *subpath,
 												CmdType operation, bool canSetTag,
 												Index nominalRelation, Index rootRelation,
 												bool partColsUpdated,
-												List *resultRelations, List *subpaths,
-												List *subroots,
+												List *resultRelations,
+												List *updateColnosLists,
 												List *withCheckOptionLists, List *returningLists,
 												List *rowMarks, OnConflictExpr *onconflict,
 												int epqParam);

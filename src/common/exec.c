@@ -49,7 +49,6 @@
 #define getcwd(cwd,len)  GetCurrentDirectory(len, cwd)
 #endif
 
-static int	validate_exec(const char *path);
 static int	resolve_symlinks(char *path);
 
 #ifdef WIN32
@@ -63,7 +62,7 @@ static BOOL GetTokenUser(HANDLE hToken, PTOKEN_USER *ppTokenUser);
  *		  -1 if the regular file "path" does not exist or cannot be executed.
  *		  -2 if the file is otherwise valid but cannot be read.
  */
-static int
+int
 validate_exec(const char *path)
 {
 	struct stat buf;
@@ -407,7 +406,7 @@ pclose_check(FILE *stream)
 	{
 		/* pclose() itself failed, and hopefully set errno */
 		log_error(errcode(ERRCODE_SYSTEM_ERROR),
-				  _("pclose failed: %m"));
+				  _("%s() failed: %m"), "pclose");
 	}
 	else
 	{

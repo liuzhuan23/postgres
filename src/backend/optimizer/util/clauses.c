@@ -106,6 +106,7 @@ static bool contain_leaked_vars_walker(Node *node, void *context);
 static Relids find_nonnullable_rels_walker(Node *node, bool top_level);
 static List *find_nonnullable_vars_walker(Node *node, bool top_level);
 static bool is_strict_saop(ScalarArrayOpExpr *expr, bool falseOK);
+static bool convert_saop_to_hashed_saop_walker(Node *node, void *context);
 static Node *eval_const_expressions_mutator(Node *node,
 											eval_const_expressions_context *context);
 static bool contain_non_const_walker(Node *node, void *context);
@@ -432,6 +433,16 @@ contain_mutable_functions_walker(Node *node, void *context)
  * subsequent planning need not consider volatility within those, since
  * the executor won't change its evaluation rules for a SubPlan based on
  * volatility.
+ *
+ * For some node types, for example, RestrictInfo and PathTarget, we cache
+ * whether we found any volatile functions or not and reuse that value in any
+ * future checks for that node.  All of the logic for determining if the
+ * cached value should be set to VOLATILITY_NOVOLATILE or VOLATILITY_VOLATILE
+ * belongs in this function.  Any code which makes changes to these nodes
+ * which could change the outcome this function must set the cached value back
+ * to VOLATILITY_UNKNOWN.  That allows this function to redetermine the
+ * correct value during the next call, should we need to redetermine if the
+ * node contains any volatile functions again in the future.
  */
 bool
 contain_volatile_functions(Node *clause)
@@ -459,6 +470,63 @@ contain_volatile_functions_walker(Node *node, void *context)
 	{
 		/* NextValueExpr is volatile */
 		return true;
+	}
+
+	if (IsA(node, RestrictInfo))
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) node;
+
+		/*
+		 * For RestrictInfo, check if we've checked the volatility of it
+		 * before.  If so, we can just use the cached value and not bother
+		 * checking it again.  Otherwise, check it and cache if whether we
+		 * found any volatile functions.
+		 */
+		if (rinfo->has_volatile == VOLATILITY_NOVOLATILE)
+			return false;
+		else if (rinfo->has_volatile == VOLATILITY_VOLATILE)
+			return true;
+		else
+		{
+			bool		hasvolatile;
+
+			hasvolatile = contain_volatile_functions_walker((Node *) rinfo->clause,
+															context);
+			if (hasvolatile)
+				rinfo->has_volatile = VOLATILITY_VOLATILE;
+			else
+				rinfo->has_volatile = VOLATILITY_NOVOLATILE;
+
+			return hasvolatile;
+		}
+	}
+
+	if (IsA(node, PathTarget))
+	{
+		PathTarget *target = (PathTarget *) node;
+
+		/*
+		 * We also do caching for PathTarget the same as we do above for
+		 * RestrictInfos.
+		 */
+		if (target->has_volatile_expr == VOLATILITY_NOVOLATILE)
+			return false;
+		else if (target->has_volatile_expr == VOLATILITY_VOLATILE)
+			return true;
+		else
+		{
+			bool		hasvolatile;
+
+			hasvolatile = contain_volatile_functions_walker((Node *) target->exprs,
+															context);
+
+			if (hasvolatile)
+				target->has_volatile_expr = VOLATILITY_VOLATILE;
+			else
+				target->has_volatile_expr = VOLATILITY_NOVOLATILE;
+
+			return hasvolatile;
+		}
 	}
 
 	/*
@@ -2034,6 +2102,69 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	return eval_const_expressions_mutator(node, &context);
 }
 
+#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
+/*--------------------
+ * convert_saop_to_hashed_saop
+ *
+ * Recursively search 'node' for ScalarArrayOpExprs and fill in the hash
+ * function for any ScalarArrayOpExpr that looks like it would be useful to
+ * evaluate using a hash table rather than a linear search.
+ *
+ * We'll use a hash table if all of the following conditions are met:
+ * 1. The 2nd argument of the array contain only Consts.
+ * 2. useOr is true.
+ * 3. There's valid hash function for both left and righthand operands and
+ *	  these hash functions are the same.
+ * 4. If the array contains enough elements for us to consider it to be
+ *	  worthwhile using a hash table rather than a linear search.
+ */
+void
+convert_saop_to_hashed_saop(Node *node)
+{
+	(void) convert_saop_to_hashed_saop_walker(node, NULL);
+}
+
+static bool
+convert_saop_to_hashed_saop_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) node;
+		Expr	   *arrayarg = (Expr *) lsecond(saop->args);
+		Oid			lefthashfunc;
+		Oid			righthashfunc;
+
+		if (saop->useOr && arrayarg && IsA(arrayarg, Const) &&
+			!((Const *) arrayarg)->constisnull &&
+			get_op_hash_functions(saop->opno, &lefthashfunc, &righthashfunc) &&
+			lefthashfunc == righthashfunc)
+		{
+			Datum		arrdatum = ((Const *) arrayarg)->constvalue;
+			ArrayType  *arr = (ArrayType *) DatumGetPointer(arrdatum);
+			int			nitems;
+
+			/*
+			 * Only fill in the hash functions if the array looks large enough
+			 * for it to be worth hashing instead of doing a linear search.
+			 */
+			nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+
+			if (nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP)
+			{
+				/* Looks good. Fill in the hash functions */
+				saop->hashfuncid = lefthashfunc;
+			}
+			return true;
+		}
+	}
+
+	return expression_tree_walker(node, convert_saop_to_hashed_saop_walker, NULL);
+}
+
+
 /*--------------------
  * estimate_expression_value
  *
@@ -2429,6 +2560,36 @@ eval_const_expressions_mutator(Node *node,
 				newexpr->args = args;
 				newexpr->location = expr->location;
 				return (Node *) newexpr;
+			}
+		case T_NullIfExpr:
+			{
+				NullIfExpr	   *expr;
+				ListCell	   *arg;
+				bool			has_nonconst_input = false;
+
+				/* Copy the node and const-simplify its arguments */
+				expr = (NullIfExpr *) ece_generic_processing(node);
+
+				/* If either argument is NULL they can't be equal */
+				foreach(arg, expr->args)
+				{
+					if (!IsA(lfirst(arg), Const))
+						has_nonconst_input = true;
+					else if (((Const *) lfirst(arg))->constisnull)
+						return (Node *) linitial(expr->args);
+				}
+
+				/*
+				 * Need to get OID of underlying function before checking if
+				 * the function is OK to evaluate.
+				 */
+				set_opfuncid((OpExpr *) expr);
+
+				if (!has_nonconst_input &&
+					ece_function_is_safe(expr->opfuncid, context))
+					return ece_evaluate_expr(expr);
+
+				return (Node *) expr;
 			}
 		case T_ScalarArrayOpExpr:
 			{
@@ -4177,6 +4338,27 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	sqlerrcontext.previous = error_context_stack;
 	error_context_stack = &sqlerrcontext;
 
+	/* If we have prosqlbody, pay attention to that not prosrc */
+	tmp = SysCacheGetAttr(PROCOID,
+						  func_tuple,
+						  Anum_pg_proc_prosqlbody,
+						  &isNull);
+	if (!isNull)
+	{
+		Node	   *n;
+		List	   *querytree_list;
+
+		n = stringToNode(TextDatumGetCString(tmp));
+		if (IsA(n, List))
+			querytree_list = linitial_node(List, castNode(List, n));
+		else
+			querytree_list = list_make1(n);
+		if (list_length(querytree_list) != 1)
+			goto fail;
+		querytree = linitial(querytree_list);
+	}
+	else
+	{
 	/*
 	 * Set up to handle parameters while parsing the function body.  We need a
 	 * dummy FuncExpr node containing the already-simplified arguments to pass
@@ -4220,6 +4402,7 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	querytree = transformTopLevelStmt(pstate, linitial(raw_parsetree_list));
 
 	free_parsestate(pstate);
+	}
 
 	/*
 	 * The single command must be a simple "SELECT expression".
@@ -4723,6 +4906,31 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	sqlerrcontext.previous = error_context_stack;
 	error_context_stack = &sqlerrcontext;
 
+	/* If we have prosqlbody, pay attention to that not prosrc */
+	tmp = SysCacheGetAttr(PROCOID,
+						  func_tuple,
+						  Anum_pg_proc_prosqlbody,
+						  &isNull);
+	if (!isNull)
+	{
+		Node	   *n;
+
+		n = stringToNode(TextDatumGetCString(tmp));
+		if (IsA(n, List))
+			querytree_list = linitial_node(List, castNode(List, n));
+		else
+			querytree_list = list_make1(n);
+		if (list_length(querytree_list) != 1)
+			goto fail;
+		querytree = linitial(querytree_list);
+
+		querytree_list = pg_rewrite_query(querytree);
+		if (list_length(querytree_list) != 1)
+			goto fail;
+		querytree = linitial(querytree_list);
+	}
+	else
+	{
 	/*
 	 * Set up to handle parameters while parsing the function body.  We can
 	 * use the FuncExpr just created as the input for
@@ -4731,18 +4939,6 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	pinfo = prepare_sql_fn_parse_info(func_tuple,
 									  (Node *) fexpr,
 									  fexpr->inputcollid);
-
-	/*
-	 * Also resolve the actual function result tupdesc, if composite.  If the
-	 * function is just declared to return RECORD, dig the info out of the AS
-	 * clause.
-	 */
-	functypclass = get_expr_result_type((Node *) fexpr, NULL, &rettupdesc);
-	if (functypclass == TYPEFUNC_RECORD)
-		rettupdesc = BuildDescFromLists(rtfunc->funccolnames,
-										rtfunc->funccoltypes,
-										rtfunc->funccoltypmods,
-										rtfunc->funccolcollations);
 
 	/*
 	 * Parse, analyze, and rewrite (unlike inline_function(), we can't skip
@@ -4760,6 +4956,19 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	if (list_length(querytree_list) != 1)
 		goto fail;
 	querytree = linitial(querytree_list);
+	}
+
+	/*
+	 * Also resolve the actual function result tupdesc, if composite.  If the
+	 * function is just declared to return RECORD, dig the info out of the AS
+	 * clause.
+	 */
+	functypclass = get_expr_result_type((Node *) fexpr, NULL, &rettupdesc);
+	if (functypclass == TYPEFUNC_RECORD)
+		rettupdesc = BuildDescFromLists(rtfunc->funccolnames,
+										rtfunc->funccoltypes,
+										rtfunc->funccoltypmods,
+										rtfunc->funccolcollations);
 
 	/*
 	 * The single command must be a plain SELECT.

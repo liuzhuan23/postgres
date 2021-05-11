@@ -127,10 +127,25 @@ InitRecoveryTransactionEnvironment(void)
  *
  * Prepare to switch from hot standby mode to normal operation. Shut down
  * recovery-time transaction tracking.
+ *
+ * This must be called even in shutdown of startup process if transaction
+ * tracking has been initialized. Otherwise some locks the tracked
+ * transactions were holding will not be released and and may interfere with
+ * the processes still running (but will exit soon later) at the exit of
+ * startup process.
  */
 void
 ShutdownRecoveryTransactionEnvironment(void)
 {
+	/*
+	 * Do nothing if RecoveryLockLists is NULL because which means that
+	 * transaction tracking has not been yet initialized or has been already
+	 * shutdowned. This prevents transaction tracking from being shutdowned
+	 * unexpectedly more than once.
+	 */
+	if (RecoveryLockLists == NULL)
+		return;
+
 	/* Mark all tracked in-progress transactions as finished. */
 	ExpireAllKnownAssignedTransactionIds();
 
@@ -450,6 +465,34 @@ ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode 
 										   PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
 										   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
 										   true);
+}
+
+/*
+ * Variant of ResolveRecoveryConflictWithSnapshot that works with
+ * FullTransactionId values
+ */
+void
+ResolveRecoveryConflictWithSnapshotFullXid(FullTransactionId latestRemovedFullXid,
+										   RelFileNode node)
+{
+	/*
+	 * ResolveRecoveryConflictWithSnapshot operates on 32-bit TransactionIds,
+	 * so truncate the logged FullTransactionId.  If the logged value is very
+	 * old, so that XID wrap-around already happened on it, there can't be any
+	 * snapshots that still see it.
+	 */
+	FullTransactionId nextXid = ReadNextFullTransactionId();
+	uint64			  diff;
+
+	diff = U64FromFullTransactionId(nextXid) -
+		U64FromFullTransactionId(latestRemovedFullXid);
+	if (diff < MaxTransactionId / 2)
+	{
+		TransactionId latestRemovedXid;
+
+		latestRemovedXid = XidFromFullTransactionId(latestRemovedFullXid);
+		ResolveRecoveryConflictWithSnapshot(latestRemovedXid, node);
+	}
 }
 
 void
@@ -1262,7 +1305,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 		elog(trace_recovery(DEBUG2),
 			 "snapshot of %u running transactions overflowed (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt,
-			 (uint32) (recptr >> 32), (uint32) recptr,
+			 LSN_FORMAT_ARGS(recptr),
 			 CurrRunningXacts->oldestRunningXid,
 			 CurrRunningXacts->latestCompletedXid,
 			 CurrRunningXacts->nextXid);
@@ -1270,7 +1313,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 		elog(trace_recovery(DEBUG2),
 			 "snapshot of %u+%u running transaction ids (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt, CurrRunningXacts->subxcnt,
-			 (uint32) (recptr >> 32), (uint32) recptr,
+			 LSN_FORMAT_ARGS(recptr),
 			 CurrRunningXacts->oldestRunningXid,
 			 CurrRunningXacts->latestCompletedXid,
 			 CurrRunningXacts->nextXid);

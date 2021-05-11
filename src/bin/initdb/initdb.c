@@ -160,6 +160,7 @@ static char *dictionary_file;
 static char *info_schema_file;
 static char *features_file;
 static char *system_constraints_file;
+static char *system_functions_file;
 static char *system_views_file;
 static bool success = false;
 static bool made_new_pgdata = false;
@@ -658,6 +659,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 {
 	{"arabic", "ar"},
 	{"arabic", "Arabic"},
+	{"armenian", "hy"},
+	{"armenian", "Armenian"},
 	{"basque", "eu"},
 	{"basque", "Basque"},
 	{"catalan", "ca"},
@@ -699,6 +702,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"romanian", "ro"},
 	{"russian", "ru"},
 	{"russian", "Russian"},
+	{"serbian", "sr"},
+	{"serbian", "Serbian"},
 	{"spanish", "es"},
 	{"spanish", "Spanish"},
 	{"swedish", "sv"},
@@ -707,6 +712,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"tamil", "Tamil"},
 	{"turkish", "tr"},
 	{"turkish", "Turkish"},
+	{"yiddish", "yi"},
+	{"yiddish", "Yiddish"},
 	{NULL, NULL}				/* end marker */
 };
 
@@ -1433,7 +1440,7 @@ setup_auth(FILE *cmdfd)
 		 * The authid table shouldn't be readable except through views, to
 		 * ensure passwords are not publicly visible.
 		 */
-		"REVOKE ALL on pg_authid FROM public;\n\n",
+		"REVOKE ALL ON pg_authid FROM public;\n\n",
 		NULL
 	};
 
@@ -2502,6 +2509,7 @@ setup_data_file_paths(void)
 	set_input(&info_schema_file, "information_schema.sql");
 	set_input(&features_file, "sql_features.txt");
 	set_input(&system_constraints_file, "system_constraints.sql");
+	set_input(&system_functions_file, "system_functions.sql");
 	set_input(&system_views_file, "system_views.sql");
 
 	if (show_setting || debug)
@@ -2528,6 +2536,8 @@ setup_data_file_paths(void)
 	check_input(dictionary_file);
 	check_input(info_schema_file);
 	check_input(features_file);
+	check_input(system_constraints_file);
+	check_input(system_functions_file);
 	check_input(system_views_file);
 }
 
@@ -2864,6 +2874,8 @@ initialize_data_directory(void)
 	setup_auth(cmdfd);
 
 	setup_run_file(cmdfd, system_constraints_file);
+
+	setup_run_file(cmdfd, system_functions_file);
 
 	setup_depend(cmdfd);
 
@@ -3234,6 +3246,9 @@ main(int argc, char *argv[])
 		get_parent_directory(pg_ctl_path);
 		/* ... and tag on pg_ctl instead */
 		join_path_components(pg_ctl_path, pg_ctl_path, "pg_ctl");
+
+		/* Convert the path to use native separators */
+		make_native_path(pg_ctl_path);
 
 		/* path to pg_ctl, properly quoted */
 		appendShellString(start_db_cmd, pg_ctl_path);

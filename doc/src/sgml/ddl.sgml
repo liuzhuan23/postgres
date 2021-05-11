@@ -916,6 +916,11 @@ CREATE TABLE orders (
    </para>
 
    <para>
+    You can assign your own name for a foreign key constraint,
+    in the usual way.
+   </para>
+
+   <para>
     A foreign key can also constrain and reference a group of columns.
     As usual, it then needs to be written in table constraint form.
     Here is a contrived syntax example:
@@ -931,9 +936,28 @@ CREATE TABLE t1 (
     match the number and type of the referenced columns.
    </para>
 
+   <indexterm>
+    <primary>foreign key</primary>
+    <secondary>self-referential</secondary>
+   </indexterm>
+
    <para>
-    You can assign your own name for a foreign key constraint,
-    in the usual way.
+    Sometimes it is useful for the <quote>other table</quote> of a
+    foreign key constraint to be the same table; this is called
+    a <firstterm>self-referential</firstterm> foreign key.  For
+    example, if you want rows of a table to represent nodes of a tree
+    structure, you could write
+<programlisting>
+CREATE TABLE tree (
+    node_id integer PRIMARY KEY,
+    parent_id integer REFERENCES tree,
+    name text,
+    ...
+);
+</programlisting>
+    A top-level node would have NULL <structfield>parent_id</structfield>,
+    while non-NULL <structfield>parent_id</structfield> entries would be
+    constrained to reference valid rows of the table.
    </para>
 
    <para>
@@ -2382,7 +2406,7 @@ INSERT INTO passwd VALUES
 INSERT INTO passwd VALUES
   ('alice','xxx',2,1,'Alice','098-765-4321',null,'/home/alice','/bin/zsh');
 
--- Be sure to enable row level security on the table
+-- Be sure to enable row-level security on the table
 ALTER TABLE passwd ENABLE ROW LEVEL SECURITY;
 
 -- Create policies
@@ -2493,12 +2517,6 @@ CREATE POLICY admin_local_only ON passwd AS RESTRICTIVE TO admin
  inet_client_addr 
 ------------------
  127.0.0.1
-(1 row)
-
-=&gt; SELECT current_user;
- current_user 
---------------
- admin
 (1 row)
 
 =&gt; TABLE passwd;
@@ -2636,7 +2654,8 @@ SELECT * FROM information WHERE group_id = 2 FOR UPDATE;
    definer function.)  Also, heavy concurrent use of row share locks on the
    referenced table could pose a performance problem, especially if updates
    of it are frequent.  Another solution, practical if updates of the
-   referenced table are infrequent, is to take an exclusive lock on the
+   referenced table are infrequent, is to take an
+   <literal>ACCESS EXCLUSIVE</literal> lock on the
    referenced table when updating it, so that no concurrent transactions
    could be examining old row values.  Or one could just wait for all
    concurrent transactions to end after committing an update of the
@@ -2763,8 +2782,8 @@ CREATE SCHEMA myschema;
 <synopsis>
 <replaceable>database</replaceable><literal>.</literal><replaceable>schema</replaceable><literal>.</literal><replaceable>table</replaceable>
 </synopsis>
-    can be used too, but at present this is just for <foreignphrase>pro
-    forma</foreignphrase> compliance with the SQL standard.  If you write a database name,
+    can be used too, but at present this is just for pro forma
+    compliance with the SQL standard.  If you write a database name,
     it must be the same as the database you are connected to.
    </para>
 
@@ -3896,18 +3915,25 @@ DROP TABLE measurement_y2006m02;
    <para>
      Another option that is often preferable is to remove the partition from
      the partitioned table but retain access to it as a table in its own
-     right:
+     right.  This has two forms:
 
 <programlisting>
 ALTER TABLE measurement DETACH PARTITION measurement_y2006m02;
+ALTER TABLE measurement DETACH PARTITION measurement_y2006m02 CONCURRENTLY;
 </programlisting>
 
-     This allows further operations to be performed on the data before
+     These allow further operations to be performed on the data before
      it is dropped. For example, this is often a useful time to back up
      the data using <command>COPY</command>, <application>pg_dump</application>, or
      similar tools. It might also be a useful time to aggregate data
      into smaller formats, perform other data manipulations, or run
-     reports.
+     reports.  The first form of the command requires an
+     <literal>ACCESS EXCLUSIVE</literal> lock on the parent table.
+     Adding the <literal>CONCURRENTLY</literal> qualifier as in the second
+     form allows the detach operation to require only
+     <literal>SHARE UPDATE EXCLUSIVE</literal> lock on the parent table, but see
+     <link linkend="sql-altertable-detach-partition"><literal>ALTER TABLE ... DETACH PARTITION</literal></link>
+     for details on the restrictions.
    </para>
 
    <para>
@@ -4142,17 +4168,6 @@ ALTER INDEX measurement_city_id_logdate_key
         manner of the user's choosing.  (Note, however, that if constraint
         exclusion is unable to prune child tables effectively, query performance
         might be poor.)
-       </para>
-      </listitem>
-
-      <listitem>
-       <para>
-        Some operations require a stronger lock when using declarative
-        partitioning than when using table inheritance.  For example,
-        removing a partition from a partitioned table requires taking
-        an <literal>ACCESS EXCLUSIVE</literal> lock on the parent table,
-        whereas a <literal>SHARE UPDATE EXCLUSIVE</literal> lock is enough
-        in the case of regular inheritance.
        </para>
       </listitem>
      </itemizedlist>
@@ -4663,16 +4678,6 @@ EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
     Partition pruning can be disabled using the
     <xref linkend="guc-enable-partition-pruning"/> setting.
    </para>
-
-   <note>
-    <para>
-     Execution-time partition pruning currently only occurs for the
-     <literal>Append</literal> and <literal>MergeAppend</literal> node types.
-     It is not yet implemented for the <literal>ModifyTable</literal> node
-     type, but that is likely to be changed in a future release of
-     <productname>PostgreSQL</productname>.
-    </para>
-   </note>
   </sect2>
 
   <sect2 id="ddl-partitioning-constraint-exclusion">
@@ -4829,8 +4834,7 @@ EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
     well, provided that typical queries allow the query planner to prune all
     but a small number of partitions.  Planning times become longer and memory
     consumption becomes higher when more partitions remain after the planner
-    performs partition pruning.  This is particularly true for the
-    <command>UPDATE</command> and <command>DELETE</command> commands.  Another
+    performs partition pruning.  Another
     reason to be concerned about having a large number of partitions is that
     the server's memory consumption may grow significantly over
     time, especially if many sessions touch large numbers of partitions.

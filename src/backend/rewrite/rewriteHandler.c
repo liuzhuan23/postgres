@@ -70,7 +70,6 @@ static List *rewriteTargetListIU(List *targetList,
 								 CmdType commandType,
 								 OverridingKind override,
 								 Relation target_relation,
-								 int result_rti,
 								 RangeTblEntry *values_rte,
 								 int values_rte_index,
 								 Bitmapset **unused_values_attrnos);
@@ -679,20 +678,7 @@ adjustJoinTreeList(Query *parsetree, bool removert, int rt_index)
  * and UPDATE, replace explicit DEFAULT specifications with column default
  * expressions.
  *
- * 2. For an UPDATE on a trigger-updatable view, add tlist entries for any
- * unassigned-to attributes, assigning them their old values.  These will
- * later get expanded to the output values of the view.  (This is equivalent
- * to what the planner's expand_targetlist() will do for UPDATE on a regular
- * table, but it's more convenient to do it here while we still have easy
- * access to the view's original RT index.)  This is only necessary for
- * trigger-updatable views, for which the view remains the result relation of
- * the query.  For auto-updatable views we must not do this, since it might
- * add assignments to non-updatable view columns.  For rule-updatable views it
- * is unnecessary extra work, since the query will be rewritten with a
- * different result relation which will be processed when we recurse via
- * RewriteQuery.
- *
- * 3. Merge multiple entries for the same target attribute, or declare error
+ * 2. Merge multiple entries for the same target attribute, or declare error
  * if we can't.  Multiple entries are only allowed for INSERT/UPDATE of
  * portions of an array or record field, for example
  *			UPDATE table SET foo[2] = 42, foo[4] = 43;
@@ -700,20 +686,13 @@ adjustJoinTreeList(Query *parsetree, bool removert, int rt_index)
  * the expression we want to produce in this case is like
  *		foo = array_set_element(array_set_element(foo, 2, 42), 4, 43)
  *
- * 4. Sort the tlist into standard order: non-junk fields in order by resno,
+ * 3. Sort the tlist into standard order: non-junk fields in order by resno,
  * then junk fields (these in no particular order).
  *
- * We must do items 1,2,3 before firing rewrite rules, else rewritten
- * references to NEW.foo will produce wrong or incomplete results.  Item 4
- * is not needed for rewriting, but will be needed by the planner, and we
+ * We must do items 1 and 2 before firing rewrite rules, else rewritten
+ * references to NEW.foo will produce wrong or incomplete results.  Item 3
+ * is not needed for rewriting, but it is helpful for the planner, and we
  * can do it essentially for free while handling the other items.
- *
- * Note that for an inheritable UPDATE, this processing is only done once,
- * using the parent relation as reference.  It must not do anything that
- * will not be correct when transposed to the child relation(s).  (Step 4
- * is incorrect by this light, since child relations might have different
- * column ordering, but the planner will fix things by re-sorting the tlist
- * for each child.)
  *
  * If values_rte is non-NULL (i.e., we are doing a multi-row INSERT using
  * values from a VALUES RTE), we populate *unused_values_attrnos with the
@@ -729,7 +708,6 @@ rewriteTargetListIU(List *targetList,
 					CmdType commandType,
 					OverridingKind override,
 					Relation target_relation,
-					int result_rti,
 					RangeTblEntry *values_rte,
 					int values_rte_index,
 					Bitmapset **unused_values_attrnos)
@@ -993,29 +971,6 @@ rewriteTargetListIU(List *targetList,
 										  false);
 		}
 
-		/*
-		 * For an UPDATE on a trigger-updatable view, provide a dummy entry
-		 * whenever there is no explicit assignment.
-		 */
-		if (new_tle == NULL && commandType == CMD_UPDATE &&
-			target_relation->rd_rel->relkind == RELKIND_VIEW &&
-			view_has_instead_trigger(target_relation, CMD_UPDATE))
-		{
-			Node	   *new_expr;
-
-			new_expr = (Node *) makeVar(result_rti,
-										attrno,
-										att_tup->atttypid,
-										att_tup->atttypmod,
-										att_tup->attcollation,
-										0);
-
-			new_tle = makeTargetEntry((Expr *) new_expr,
-									  attrno,
-									  pstrdup(NameStr(att_tup->attname)),
-									  false);
-		}
-
 		if (new_tle)
 			new_tlist = lappend(new_tlist, new_tle);
 	}
@@ -1235,25 +1190,28 @@ build_column_default(Relation rel, int attrno)
 	}
 
 	/*
-	 * Scan to see if relation has a default for this column.
+	 * If relation has a default for this column, fetch that expression.
 	 */
-	if (att_tup->atthasdef && rd_att->constr &&
-		rd_att->constr->num_defval > 0)
+	if (att_tup->atthasdef)
 	{
-		AttrDefault *defval = rd_att->constr->defval;
-		int			ndef = rd_att->constr->num_defval;
-
-		while (--ndef >= 0)
+		if (rd_att->constr && rd_att->constr->num_defval > 0)
 		{
-			if (attrno == defval[ndef].adnum)
+			AttrDefault *defval = rd_att->constr->defval;
+			int			ndef = rd_att->constr->num_defval;
+
+			while (--ndef >= 0)
 			{
-				/*
-				 * Found it, convert string representation to node tree.
-				 */
-				expr = stringToNode(defval[ndef].adbin);
-				break;
+				if (attrno == defval[ndef].adnum)
+				{
+					/* Found it, convert string representation to node tree. */
+					expr = stringToNode(defval[ndef].adbin);
+					break;
+				}
 			}
 		}
+		if (expr == NULL)
+			elog(ERROR, "default expression not found for attribute %d of relation \"%s\"",
+				 attrno, RelationGetRelationName(rel));
 	}
 
 	/*
@@ -1606,90 +1564,6 @@ rewriteValuesRTE(Query *parsetree, RangeTblEntry *rte, int rti,
 	return allReplaced;
 }
 
-
-/*
- * rewriteTargetListUD - rewrite UPDATE/DELETE targetlist as needed
- *
- * This function adds a "junk" TLE that is needed to allow the executor to
- * find the original row for the update or delete.  When the target relation
- * is a regular table, the junk TLE emits the ctid attribute of the original
- * row.  When the target relation is a foreign table, we let the FDW decide
- * what to add.
- *
- * We used to do this during RewriteQuery(), but now that inheritance trees
- * can contain a mix of regular and foreign tables, we must postpone it till
- * planning, after the inheritance tree has been expanded.  In that way we
- * can do the right thing for each child table.
- */
-void
-rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
-					Relation target_relation)
-{
-	Var		   *var = NULL;
-	const char *attrname;
-	TargetEntry *tle;
-
-	if (target_relation->rd_rel->relkind == RELKIND_RELATION ||
-		target_relation->rd_rel->relkind == RELKIND_MATVIEW ||
-		target_relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		/*
-		 * Emit CTID so that executor can find the row to update or delete.
-		 */
-		var = makeVar(parsetree->resultRelation,
-					  SelfItemPointerAttributeNumber,
-					  TIDOID,
-					  -1,
-					  InvalidOid,
-					  0);
-
-		attrname = "ctid";
-	}
-	else if (target_relation->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
-	{
-		/*
-		 * Let the foreign table's FDW add whatever junk TLEs it wants.
-		 */
-		FdwRoutine *fdwroutine;
-
-		fdwroutine = GetFdwRoutineForRelation(target_relation, false);
-
-		if (fdwroutine->AddForeignUpdateTargets != NULL)
-			fdwroutine->AddForeignUpdateTargets(parsetree, target_rte,
-												target_relation);
-
-		/*
-		 * If we have a row-level trigger corresponding to the operation, emit
-		 * a whole-row Var so that executor will have the "old" row to pass to
-		 * the trigger.  Alas, this misses system columns.
-		 */
-		if (target_relation->trigdesc &&
-			((parsetree->commandType == CMD_UPDATE &&
-			  (target_relation->trigdesc->trig_update_after_row ||
-			   target_relation->trigdesc->trig_update_before_row)) ||
-			 (parsetree->commandType == CMD_DELETE &&
-			  (target_relation->trigdesc->trig_delete_after_row ||
-			   target_relation->trigdesc->trig_delete_before_row))))
-		{
-			var = makeWholeRowVar(target_rte,
-								  parsetree->resultRelation,
-								  0,
-								  false);
-
-			attrname = "wholerow";
-		}
-	}
-
-	if (var != NULL)
-	{
-		tle = makeTargetEntry((Expr *) var,
-							  list_length(parsetree->targetList) + 1,
-							  pstrdup(attrname),
-							  true);
-
-		parsetree->targetList = lappend(parsetree->targetList, tle);
-	}
-}
 
 /*
  * Record in target_rte->extraUpdatedCols the indexes of any generated columns
@@ -2247,7 +2121,7 @@ fireRIRrules(Query *parsetree, List *activeRIRs)
 						  QTW_IGNORE_RC_SUBQUERIES);
 
 	/*
-	 * Apply any row level security policies.  We do this last because it
+	 * Apply any row-level security policies.  We do this last because it
 	 * requires special recursion detection if the new quals have sublink
 	 * subqueries, and if we did it in the loop above query_tree_walker would
 	 * then recurse into those quals a second time.
@@ -2337,7 +2211,7 @@ fireRIRrules(Query *parsetree, List *activeRIRs)
 		}
 
 		/*
-		 * Make sure the query is marked correctly if row level security
+		 * Make sure the query is marked correctly if row-level security
 		 * applies, or if the new quals had sublinks.
 		 */
 		if (hasRowSecurity)
@@ -3820,7 +3694,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 															parsetree->commandType,
 															parsetree->override,
 															rt_entry_relation,
-															parsetree->resultRelation,
 															values_rte,
 															values_rte_index,
 															&unused_values_attrnos);
@@ -3838,7 +3711,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 										parsetree->commandType,
 										parsetree->override,
 										rt_entry_relation,
-										parsetree->resultRelation,
 										NULL, 0, NULL);
 			}
 
@@ -3850,7 +3722,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 										CMD_UPDATE,
 										parsetree->override,
 										rt_entry_relation,
-										parsetree->resultRelation,
 										NULL, 0, NULL);
 			}
 		}
@@ -3861,7 +3732,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 									parsetree->commandType,
 									parsetree->override,
 									rt_entry_relation,
-									parsetree->resultRelation,
 									NULL, 0, NULL);
 
 			/* Also populate extraUpdatedCols (for generated columns) */

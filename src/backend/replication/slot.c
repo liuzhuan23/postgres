@@ -216,10 +216,17 @@ ReplicationSlotValidateName(const char *name, int elevel)
  * name: Name of the slot
  * db_specific: logical decoding is db specific; if the slot is going to
  *	   be used for that pass true, otherwise false.
+ * two_phase: Allows decoding of prepared transactions. We allow this option
+ *     to be enabled only at the slot creation time. If we allow this option
+ *     to be changed during decoding then it is quite possible that we skip
+ *     prepare first time because this option was not enabled. Now next time
+ *     during getting changes, if the two_phase  option is enabled it can skip
+ *     prepare because by that time start decoding point has been moved. So the
+ *     user will only get commit prepared.
  */
 void
 ReplicationSlotCreate(const char *name, bool db_specific,
-					  ReplicationSlotPersistency persistency)
+					  ReplicationSlotPersistency persistency, bool two_phase)
 {
 	ReplicationSlot *slot = NULL;
 	int			i;
@@ -277,6 +284,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	namestrcpy(&slot->data.name, name);
 	slot->data.database = db_specific ? MyDatabaseId : InvalidOid;
 	slot->data.persistency = persistency;
+	slot->data.two_phase = two_phase;
 
 	/* and then data only present in shared memory */
 	slot->just_dirtied = false;
@@ -320,7 +328,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	 * ReplicationSlotAllocationLock.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot(NameStr(slot->data.name), 0, 0, 0, 0, 0, 0);
+		pgstat_report_replslot_create(NameStr(slot->data.name));
 
 	/*
 	 * Now that the slot has been marked as in_use and active, it's safe to
@@ -336,17 +344,15 @@ ReplicationSlotCreate(const char *name, bool db_specific,
  * Search for the named replication slot.
  *
  * Return the replication slot if found, otherwise NULL.
- *
- * The caller must hold ReplicationSlotControlLock in shared mode.
  */
 ReplicationSlot *
-SearchNamedReplicationSlot(const char *name)
+SearchNamedReplicationSlot(const char *name, bool need_lock)
 {
 	int			i;
-	ReplicationSlot	*slot = NULL;
+	ReplicationSlot *slot = NULL;
 
-	Assert(LWLockHeldByMeInMode(ReplicationSlotControlLock,
-								LW_SHARED));
+	if (need_lock)
+		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 
 	for (i = 0; i < max_replication_slots; i++)
 	{
@@ -358,6 +364,9 @@ SearchNamedReplicationSlot(const char *name)
 			break;
 		}
 	}
+
+	if (need_lock)
+		LWLockRelease(ReplicationSlotControlLock);
 
 	return slot;
 }
@@ -403,7 +412,7 @@ retry:
 	 * Search for the slot with the specified name if the slot to acquire is
 	 * not given. If the slot is not found, we either return -1 or error out.
 	 */
-	s = slot ? slot : SearchNamedReplicationSlot(name);
+	s = slot ? slot : SearchNamedReplicationSlot(name, false);
 	if (s == NULL || !s->in_use)
 	{
 		LWLockRelease(ReplicationSlotControlLock);
@@ -700,6 +709,12 @@ ReplicationSlotDropPtr(ReplicationSlot *slot)
 	 * reduce that possibility. If the messages reached in reverse, we would
 	 * lose one statistics update message. But the next update message will
 	 * create the statistics for the replication slot.
+	 *
+	 * XXX In case, the messages for creation and drop slot of the same name
+	 * get lost and create happens before (auto)vacuum cleans up the dead
+	 * slot, the stats will be accumulated into the old slot. One can imagine
+	 * having OIDs for each slot to avoid the accumulation of stats but that
+	 * doesn't seem worth doing as in practice this won't happen frequently.
 	 */
 	if (SlotIsLogical(slot))
 		pgstat_report_replslot_drop(NameStr(slot->data.name));
@@ -1242,8 +1257,7 @@ restart:
 		ereport(LOG,
 				(errmsg("invalidating slot \"%s\" because its restart_lsn %X/%X exceeds max_slot_wal_keep_size",
 						NameStr(slotname),
-						(uint32) (restart_lsn >> 32),
-						(uint32) restart_lsn)));
+						LSN_FORMAT_ARGS(restart_lsn))));
 
 		SpinLockAcquire(&s->mutex);
 		s->data.invalidated_at = s->data.restart_lsn;

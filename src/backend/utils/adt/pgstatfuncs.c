@@ -24,6 +24,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/postmaster.h"
+#include "replication/slot.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -33,7 +34,7 @@
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
 
-#define HAS_PGSTAT_PERMISSIONS(role)	 (is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_STATS) || has_privs_of_role(GetUserId(), role))
+#define HAS_PGSTAT_PERMISSIONS(role)	 (is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || has_privs_of_role(GetUserId(), role))
 
 /* Global bgwriter statistics, from bgwriter.c */
 extern PgStat_MsgBgWriter bgwriterStats;
@@ -708,7 +709,7 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			pfree(clipped_activity);
 
 			/* leader_pid */
-			nulls[29] = true;
+			nulls[28] = true;
 
 			proc = BackendPidGetProc(beentry->st_procpid);
 
@@ -745,8 +746,8 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 				 */
 				if (leader && leader->pid != beentry->st_procpid)
 				{
-					values[29] = Int32GetDatum(leader->pid);
-					nulls[29] = false;
+					values[28] = Int32GetDatum(leader->pid);
+					nulls[28] = false;
 				}
 			}
 
@@ -875,46 +876,49 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 				values[19] = CStringGetTextDatum(beentry->st_sslstatus->ssl_version);
 				values[20] = CStringGetTextDatum(beentry->st_sslstatus->ssl_cipher);
 				values[21] = Int32GetDatum(beentry->st_sslstatus->ssl_bits);
-				values[22] = BoolGetDatum(beentry->st_sslstatus->ssl_compression);
 
 				if (beentry->st_sslstatus->ssl_client_dn[0])
-					values[23] = CStringGetTextDatum(beentry->st_sslstatus->ssl_client_dn);
+					values[22] = CStringGetTextDatum(beentry->st_sslstatus->ssl_client_dn);
 				else
-					nulls[23] = true;
+					nulls[22] = true;
 
 				if (beentry->st_sslstatus->ssl_client_serial[0])
-					values[24] = DirectFunctionCall3(numeric_in,
+					values[23] = DirectFunctionCall3(numeric_in,
 													 CStringGetDatum(beentry->st_sslstatus->ssl_client_serial),
 													 ObjectIdGetDatum(InvalidOid),
 													 Int32GetDatum(-1));
 				else
-					nulls[24] = true;
+					nulls[23] = true;
 
 				if (beentry->st_sslstatus->ssl_issuer_dn[0])
-					values[25] = CStringGetTextDatum(beentry->st_sslstatus->ssl_issuer_dn);
+					values[24] = CStringGetTextDatum(beentry->st_sslstatus->ssl_issuer_dn);
 				else
-					nulls[25] = true;
+					nulls[24] = true;
 			}
 			else
 			{
 				values[18] = BoolGetDatum(false);	/* ssl */
-				nulls[19] = nulls[20] = nulls[21] = nulls[22] = nulls[23] = nulls[24] = nulls[25] = true;
+				nulls[19] = nulls[20] = nulls[21] = nulls[22] = nulls[23] = nulls[24] = true;
 			}
 
 			/* GSSAPI information */
 			if (beentry->st_gss)
 			{
-				values[26] = BoolGetDatum(beentry->st_gssstatus->gss_auth); /* gss_auth */
-				values[27] = CStringGetTextDatum(beentry->st_gssstatus->gss_princ);
-				values[28] = BoolGetDatum(beentry->st_gssstatus->gss_enc);	/* GSS Encryption in use */
+				values[25] = BoolGetDatum(beentry->st_gssstatus->gss_auth); /* gss_auth */
+				values[26] = CStringGetTextDatum(beentry->st_gssstatus->gss_princ);
+				values[27] = BoolGetDatum(beentry->st_gssstatus->gss_enc);	/* GSS Encryption in use */
 			}
 			else
 			{
-				values[26] = BoolGetDatum(false);	/* gss_auth */
-				nulls[27] = true;	/* No GSS principal */
-				values[28] = BoolGetDatum(false);	/* GSS Encryption not in
+				values[25] = BoolGetDatum(false);	/* gss_auth */
+				nulls[26] = true;	/* No GSS principal */
+				values[27] = BoolGetDatum(false);	/* GSS Encryption not in
 													 * use */
 			}
+			if (beentry->st_query_id == 0)
+				nulls[29] = true;
+			else
+				values[29] = UInt64GetDatum(beentry->st_query_id);
 		}
 		else
 		{
@@ -1799,7 +1803,7 @@ pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_wal(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_WAL_COLS	5
+#define PG_STAT_GET_WAL_COLS	9
 	TupleDesc	tupdesc;
 	Datum		values[PG_STAT_GET_WAL_COLS];
 	bool		nulls[PG_STAT_GET_WAL_COLS];
@@ -1820,7 +1824,15 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 					   NUMERICOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "wal_buffers_full",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "stats_reset",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "wal_write",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "wal_sync",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "wal_write_time",
+					   FLOAT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "wal_sync_time",
+					   FLOAT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "stats_reset",
 					   TIMESTAMPTZOID, -1, 0);
 
 	BlessTupleDesc(tupdesc);
@@ -1840,7 +1852,14 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 									Int32GetDatum(-1));
 
 	values[3] = Int64GetDatum(wal_stats->wal_buffers_full);
-	values[4] = TimestampTzGetDatum(wal_stats->stat_reset_timestamp);
+	values[4] = Int64GetDatum(wal_stats->wal_write);
+	values[5] = Int64GetDatum(wal_stats->wal_sync);
+
+	/* Convert counters from microsec to millisec for display */
+	values[6] = Float8GetDatum(((double) wal_stats->wal_write_time) / 1000.0);
+	values[7] = Float8GetDatum(((double) wal_stats->wal_sync_time) / 1000.0);
+
+	values[8] = TimestampTzGetDatum(wal_stats->stat_reset_timestamp);
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
@@ -2189,7 +2208,32 @@ pg_stat_reset_replication_slot(PG_FUNCTION_ARGS)
 	char	   *target = NULL;
 
 	if (!PG_ARGISNULL(0))
+	{
+		ReplicationSlot *slot;
+
 		target = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+		/*
+		 * Check if the slot exists with the given name. It is possible that
+		 * by the time this message is executed the slot is dropped but at
+		 * least this check will ensure that the given name is for a valid
+		 * slot.
+		 */
+		slot = SearchNamedReplicationSlot(target, true);
+
+		if (!slot)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("replication slot \"%s\" does not exist",
+							target)));
+
+		/*
+		 * Nothing to do for physical slots as we collect stats only for
+		 * logical slots.
+		 */
+		if (SlotIsPhysical(slot))
+			PG_RETURN_VOID();
+	}
 
 	pgstat_reset_replslot_counter(target);
 
@@ -2262,71 +2306,77 @@ pg_stat_get_archiver(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
-/* Get the statistics for the replication slots */
+/*
+ * Get the statistics for the replication slot. If the slot statistics is not
+ * available, return all-zeroes stats.
+ */
 Datum
-pg_stat_get_replication_slots(PG_FUNCTION_ARGS)
+pg_stat_get_replication_slot(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_REPLICATION_SLOT_COLS 8
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+#define PG_STAT_GET_REPLICATION_SLOT_COLS 10
+	text	   *slotname_text = PG_GETARG_TEXT_P(0);
+	NameData	slotname;
 	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
-	PgStat_ReplSlotStats *slotstats;
-	int			nstats;
-	int			i;
+	Datum		values[10];
+	bool		nulls[10];
+	PgStat_StatReplSlotEntry *slotent;
+	PgStat_StatReplSlotEntry allzero;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
+	/* Initialise values and NULL flags arrays */
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, 0, sizeof(nulls));
 
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
+	/* Initialise attributes information in the tuple descriptor */
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_REPLICATION_SLOT_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "slot_name",
+					   TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "spill_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "spill_count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "spill_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "stream_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "stream_count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "stream_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "total_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "total_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "stats_reset",
+					   TIMESTAMPTZOID, -1, 0);
+	BlessTupleDesc(tupdesc);
 
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	slotstats = pgstat_fetch_replslot(&nstats);
-	for (i = 0; i < nstats; i++)
+	namestrcpy(&slotname, text_to_cstring(slotname_text));
+	slotent = pgstat_fetch_replslot(slotname);
+	if (!slotent)
 	{
-		Datum		values[PG_STAT_GET_REPLICATION_SLOT_COLS];
-		bool		nulls[PG_STAT_GET_REPLICATION_SLOT_COLS];
-		PgStat_ReplSlotStats *s = &(slotstats[i]);
-
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, 0, sizeof(nulls));
-
-		values[0] = PointerGetDatum(cstring_to_text(s->slotname));
-		values[1] = Int64GetDatum(s->spill_txns);
-		values[2] = Int64GetDatum(s->spill_count);
-		values[3] = Int64GetDatum(s->spill_bytes);
-		values[4] = Int64GetDatum(s->stream_txns);
-		values[5] = Int64GetDatum(s->stream_count);
-		values[6] = Int64GetDatum(s->stream_bytes);
-
-		if (s->stat_reset_timestamp == 0)
-			nulls[7] = true;
-		else
-			values[7] = TimestampTzGetDatum(s->stat_reset_timestamp);
-
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		/*
+		 * If the slot is not found, initialise its stats. This is possible if
+		 * the create slot message is lost.
+		 */
+		memset(&allzero, 0, sizeof(PgStat_StatReplSlotEntry));
+		slotent = &allzero;
 	}
 
-	tuplestore_donestoring(tupstore);
+	values[0] = CStringGetTextDatum(NameStr(slotname));
+	values[1] = Int64GetDatum(slotent->spill_txns);
+	values[2] = Int64GetDatum(slotent->spill_count);
+	values[3] = Int64GetDatum(slotent->spill_bytes);
+	values[4] = Int64GetDatum(slotent->stream_txns);
+	values[5] = Int64GetDatum(slotent->stream_count);
+	values[6] = Int64GetDatum(slotent->stream_bytes);
+	values[7] = Int64GetDatum(slotent->total_txns);
+	values[8] = Int64GetDatum(slotent->total_bytes);
 
-	return (Datum) 0;
+	if (slotent->stat_reset_timestamp == 0)
+		nulls[9] = true;
+	else
+		values[9] = TimestampTzGetDatum(slotent->stat_reset_timestamp);
+
+	/* Returns the record as Datum */
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

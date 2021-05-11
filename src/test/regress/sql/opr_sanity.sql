@@ -96,10 +96,13 @@ WHERE p1.prolang = 0 OR p1.prorettype = 0 OR
        provolatile NOT IN ('i', 's', 'v') OR
        proparallel NOT IN ('s', 'r', 'u');
 
--- prosrc should never be null or empty
+-- prosrc should never be null; it can be empty only if prosqlbody isn't null
 SELECT p1.oid, p1.proname
 FROM pg_proc as p1
-WHERE prosrc IS NULL OR prosrc = '' OR prosrc = '-';
+WHERE prosrc IS NULL;
+SELECT p1.oid, p1.proname
+FROM pg_proc as p1
+WHERE (prosrc = '' OR prosrc = '-') AND prosqlbody IS NULL;
 
 -- proretset should only be set for normal functions
 SELECT p1.oid, p1.proname
@@ -556,13 +559,14 @@ WHERE p1.conproc = 0 OR
 SELECT p.oid, p.proname, c.oid, c.conname
 FROM pg_proc p, pg_conversion c
 WHERE p.oid = c.conproc AND
-    (p.prorettype != 'void'::regtype OR p.proretset OR
-     p.pronargs != 5 OR
+    (p.prorettype != 'int4'::regtype OR p.proretset OR
+     p.pronargs != 6 OR
      p.proargtypes[0] != 'int4'::regtype OR
      p.proargtypes[1] != 'int4'::regtype OR
      p.proargtypes[2] != 'cstring'::regtype OR
      p.proargtypes[3] != 'internal'::regtype OR
-     p.proargtypes[4] != 'int4'::regtype);
+     p.proargtypes[4] != 'int4'::regtype OR
+     p.proargtypes[5] != 'bool'::regtype);
 
 -- Check for conprocs that don't perform the specific conversion that
 -- pg_conversion alleges they do, by trying to invoke each conversion

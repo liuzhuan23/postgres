@@ -184,10 +184,10 @@ gistRedoDeleteRecord(XLogReaderState *record)
 	 *
 	 * GiST delete records can conflict with standby queries.  You might think
 	 * that vacuum records would conflict as well, but we've handled that
-	 * already.  XLOG_HEAP2_CLEANUP_INFO records provide the highest xid
-	 * cleaned by the vacuum of the heap and so we can resolve any conflicts
-	 * just once when that arrives.  After that we know that no conflicts
-	 * exist from individual gist vacuum records on that index.
+	 * already.  XLOG_HEAP2_PRUNE records provide the highest xid cleaned by
+	 * the vacuum of the heap and so we can resolve any conflicts just once
+	 * when that arrives.  After that we know that no conflicts exist from
+	 * individual gist vacuum records on that index.
 	 */
 	if (InHotStandby)
 	{
@@ -394,28 +394,8 @@ gistRedoPageReuse(XLogReaderState *record)
 	 * same exclusion effect on primary and standby.
 	 */
 	if (InHotStandby)
-	{
-		FullTransactionId latestRemovedFullXid = xlrec->latestRemovedFullXid;
-		FullTransactionId nextXid = ReadNextFullTransactionId();
-		uint64		diff;
-
-		/*
-		 * ResolveRecoveryConflictWithSnapshot operates on 32-bit
-		 * TransactionIds, so truncate the logged FullTransactionId. If the
-		 * logged value is very old, so that XID wrap-around already happened
-		 * on it, there can't be any snapshots that still see it.
-		 */
-		diff = U64FromFullTransactionId(nextXid) -
-			U64FromFullTransactionId(latestRemovedFullXid);
-		if (diff < MaxTransactionId / 2)
-		{
-			TransactionId latestRemovedXid;
-
-			latestRemovedXid = XidFromFullTransactionId(latestRemovedFullXid);
-			ResolveRecoveryConflictWithSnapshot(latestRemovedXid,
-												xlrec->node);
-		}
-	}
+		ResolveRecoveryConflictWithSnapshotFullXid(xlrec->latestRemovedFullXid,
+												   xlrec->node);
 }
 
 void

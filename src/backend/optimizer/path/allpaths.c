@@ -134,7 +134,8 @@ static void check_output_expressions(Query *subquery,
 static void compare_tlist_datatypes(List *tlist, List *colTypes,
 									pushdown_safety_info *safetyInfo);
 static bool targetIsInAllPartitionLists(TargetEntry *tle, Query *query);
-static bool qual_is_pushdown_safe(Query *subquery, Index rti, Node *qual,
+static bool qual_is_pushdown_safe(Query *subquery, Index rti,
+								  RestrictInfo *rinfo,
 								  pushdown_safety_info *safetyInfo);
 static void subquery_push_qual(Query *subquery,
 							   RangeTblEntry *rte, Index rti, Node *qual);
@@ -1148,7 +1149,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 			Var		   *parentvar = (Var *) lfirst(parentvars);
 			Node	   *childvar = (Node *) lfirst(childvars);
 
-			if (IsA(parentvar, Var))
+			if (IsA(parentvar, Var) && parentvar->varno == parentRTindex)
 			{
 				int			pndx = parentvar->varattno - rel->min_attr;
 				int32		child_width = 0;
@@ -2140,7 +2141,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/*
 	 * If the subquery has the "security_barrier" flag, it means the subquery
-	 * originated from a view that must enforce row level security.  Then we
+	 * originated from a view that must enforce row-level security.  Then we
 	 * must not push down quals that contain leaky functions.  (Ideally this
 	 * would be checked inside subquery_is_pushdown_safe, but since we don't
 	 * currently pass the RTE to that function, we must do it here.)
@@ -2177,11 +2178,12 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		foreach(l, rel->baserestrictinfo)
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
-			Node	   *clause = (Node *) rinfo->clause;
 
 			if (!rinfo->pseudoconstant &&
-				qual_is_pushdown_safe(subquery, rti, clause, &safetyInfo))
+				qual_is_pushdown_safe(subquery, rti, rinfo, &safetyInfo))
 			{
+				Node	   *clause = (Node *) rinfo->clause;
+
 				/* Push it down */
 				subquery_push_qual(subquery, rte, rti, clause);
 			}
@@ -2695,20 +2697,19 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel,
 			EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
 
 			/*
-			 * We can only build a sort for pathkeys which contain an EC
-			 * member in the current relation's target, so ignore any suffix
-			 * of the list as soon as we find a pathkey without an EC member
-			 * in the relation.
+			 * We can only build a sort for pathkeys that contain a
+			 * safe-to-compute-early EC member computable from the current
+			 * relation's reltarget, so ignore the remainder of the list as
+			 * soon as we find a pathkey without such a member.
 			 *
-			 * By still returning the prefix of the pathkeys list that does
-			 * meet criteria of EC membership in the current relation, we
-			 * enable not just an incremental sort on the entirety of
-			 * query_pathkeys but also incremental sort below a JOIN.
+			 * It's still worthwhile to return any prefix of the pathkeys list
+			 * that meets this requirement, as we may be able to do an
+			 * incremental sort.
 			 *
-			 * If requested, ensure the expression is parallel safe too.
+			 * If requested, ensure the sort expression is parallel-safe too.
 			 */
-			if (!find_em_expr_usable_for_sorting_rel(root, pathkey_ec, rel,
-													 require_parallel_safe))
+			if (!relation_can_be_sorted_early(root, rel, pathkey_ec,
+											  require_parallel_safe))
 				break;
 
 			npathkeys++;
@@ -3019,10 +3020,11 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 		join_search_one_level(root, lev);
 
 		/*
-		 * Run generate_partitionwise_join_paths() and generate_gather_paths()
-		 * for each just-processed joinrel.  We could not do this earlier
-		 * because both regular and partial paths can get added to a
-		 * particular joinrel at multiple times within join_search_one_level.
+		 * Run generate_partitionwise_join_paths() and
+		 * generate_useful_gather_paths() for each just-processed joinrel.  We
+		 * could not do this earlier because both regular and partial paths
+		 * can get added to a particular joinrel at multiple times within
+		 * join_search_one_level.
 		 *
 		 * After that, we're done creating paths for the joinrel, so run
 		 * set_cheapest().
@@ -3389,37 +3391,39 @@ targetIsInAllPartitionLists(TargetEntry *tle, Query *query)
 }
 
 /*
- * qual_is_pushdown_safe - is a particular qual safe to push down?
+ * qual_is_pushdown_safe - is a particular rinfo safe to push down?
  *
- * qual is a restriction clause applying to the given subquery (whose RTE
+ * rinfo is a restriction clause applying to the given subquery (whose RTE
  * has index rti in the parent query).
  *
  * Conditions checked here:
  *
- * 1. The qual must not contain any SubPlans (mainly because I'm not sure
- * it will work correctly: SubLinks will already have been transformed into
- * SubPlans in the qual, but not in the subquery).  Note that SubLinks that
- * transform to initplans are safe, and will be accepted here because what
- * we'll see in the qual is just a Param referencing the initplan output.
+ * 1. rinfo's clause must not contain any SubPlans (mainly because it's
+ * unclear that it will work correctly: SubLinks will already have been
+ * transformed into SubPlans in the qual, but not in the subquery).  Note that
+ * SubLinks that transform to initplans are safe, and will be accepted here
+ * because what we'll see in the qual is just a Param referencing the initplan
+ * output.
  *
- * 2. If unsafeVolatile is set, the qual must not contain any volatile
+ * 2. If unsafeVolatile is set, rinfo's clause must not contain any volatile
  * functions.
  *
- * 3. If unsafeLeaky is set, the qual must not contain any leaky functions
- * that are passed Var nodes, and therefore might reveal values from the
- * subquery as side effects.
+ * 3. If unsafeLeaky is set, rinfo's clause must not contain any leaky
+ * functions that are passed Var nodes, and therefore might reveal values from
+ * the subquery as side effects.
  *
- * 4. The qual must not refer to the whole-row output of the subquery
+ * 4. rinfo's clause must not refer to the whole-row output of the subquery
  * (since there is no easy way to name that within the subquery itself).
  *
- * 5. The qual must not refer to any subquery output columns that were
+ * 5. rinfo's clause must not refer to any subquery output columns that were
  * found to be unsafe to reference by subquery_is_pushdown_safe().
  */
 static bool
-qual_is_pushdown_safe(Query *subquery, Index rti, Node *qual,
+qual_is_pushdown_safe(Query *subquery, Index rti, RestrictInfo *rinfo,
 					  pushdown_safety_info *safetyInfo)
 {
 	bool		safe = true;
+	Node	   *qual = (Node *) rinfo->clause;
 	List	   *vars;
 	ListCell   *vl;
 
@@ -3429,7 +3433,7 @@ qual_is_pushdown_safe(Query *subquery, Index rti, Node *qual,
 
 	/* Refuse volatile quals if we found they'd be unsafe (point 2) */
 	if (safetyInfo->unsafeVolatile &&
-		contain_volatile_functions(qual))
+		contain_volatile_functions((Node *) rinfo))
 		return false;
 
 	/* Refuse leaky quals if told to (point 3) */
@@ -4026,6 +4030,10 @@ print_path(PlannerInfo *root, Path *path, int indent)
 		case T_MaterialPath:
 			ptype = "Material";
 			subpath = ((MaterialPath *) path)->subpath;
+			break;
+		case T_ResultCachePath:
+			ptype = "ResultCache";
+			subpath = ((ResultCachePath *) path)->subpath;
 			break;
 		case T_UniquePath:
 			ptype = "Unique";

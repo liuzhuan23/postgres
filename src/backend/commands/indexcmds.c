@@ -410,7 +410,7 @@ CompareOpclassOptions(Datum *opts1, Datum *opts2, int natts)
  * GetCurrentVirtualXIDs.  If, during any iteration, a particular vxid
  * doesn't show up in the output, we know we can forget about it.
  */
-static void
+void
 WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 {
 	int			n_old_snapshots;
@@ -1085,7 +1085,7 @@ DefineIndex(Oid relationId,
 		}
 
 		ereport(DEBUG1,
-				(errmsg("%s %s will create implicit index \"%s\" for table \"%s\"",
+				(errmsg_internal("%s %s will create implicit index \"%s\" for table \"%s\"",
 						is_alter_table ? "ALTER TABLE / ADD" : "CREATE TABLE /",
 						constraint_type,
 						indexRelationName, RelationGetRelationName(rel))));
@@ -1123,7 +1123,7 @@ DefineIndex(Oid relationId,
 	 */
 	if (partitioned && stmt->relation && !stmt->relation->inh)
 	{
-		PartitionDesc pd = RelationGetPartitionDesc(rel);
+		PartitionDesc pd = RelationGetPartitionDesc(rel, true);
 
 		if (pd->nparts != 0)
 			flags |= INDEX_CREATE_INVALID;
@@ -1180,7 +1180,7 @@ DefineIndex(Oid relationId,
 		 *
 		 * If we're called internally (no stmt->relation), recurse always.
 		 */
-		partdesc = RelationGetPartitionDesc(rel);
+		partdesc = RelationGetPartitionDesc(rel, true);
 		if ((!stmt->relation || stmt->relation->inh) && partdesc->nparts > 0)
 		{
 			int			nparts = partdesc->nparts;
@@ -1457,10 +1457,21 @@ DefineIndex(Oid relationId,
 		set_indexsafe_procflags();
 
 	/*
-	 * The index is now visible, so we can report the OID.
+	 * The index is now visible, so we can report the OID.  While on it,
+	 * include the report for the beginning of phase 2.
 	 */
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_INDEX_OID,
-								 indexRelationId);
+	{
+		const int	progress_cols[] = {
+			PROGRESS_CREATEIDX_INDEX_OID,
+			PROGRESS_CREATEIDX_PHASE
+		};
+		const int64 progress_vals[] = {
+			indexRelationId,
+			PROGRESS_CREATEIDX_PHASE_WAIT_1
+		};
+
+		pgstat_progress_update_multi_param(2, progress_cols, progress_vals);
+	}
 
 	/*
 	 * Phase 2 of concurrent index build (see comments for validate_index()
@@ -1478,8 +1489,6 @@ DefineIndex(Oid relationId,
 	 * exclusive lock on our table.  The lock code will detect deadlock and
 	 * error out properly.
 	 */
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_1);
 	WaitForLockers(heaplocktag, ShareLock, true);
 
 	/*
@@ -4053,23 +4062,7 @@ IndexSetParentIndex(Relation partitionIdx, Oid parentOid)
 		}
 		else
 		{
-			Datum		values[Natts_pg_inherits];
-			bool		isnull[Natts_pg_inherits];
-
-			/*
-			 * No pg_inherits row exists, and we want a parent for this index,
-			 * so insert it.
-			 */
-			values[Anum_pg_inherits_inhrelid - 1] = ObjectIdGetDatum(partRelid);
-			values[Anum_pg_inherits_inhparent - 1] =
-				ObjectIdGetDatum(parentOid);
-			values[Anum_pg_inherits_inhseqno - 1] = Int32GetDatum(1);
-			memset(isnull, false, sizeof(isnull));
-
-			tuple = heap_form_tuple(RelationGetDescr(pg_inherits),
-									values, isnull);
-			CatalogTupleInsert(pg_inherits, tuple);
-
+			StoreSingleInheritance(partRelid, parentOid, 1);
 			fix_dependencies = true;
 		}
 	}

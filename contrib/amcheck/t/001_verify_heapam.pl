@@ -1,10 +1,14 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 use strict;
 use warnings;
 
 use PostgresNode;
 use TestLib;
 
-use Test::More tests => 79;
+use Fcntl qw(:seek);
+use Test::More tests => 80;
 
 my ($node, $result);
 
@@ -47,6 +51,9 @@ detects_heap_corruption(
 #
 fresh_test_table('test');
 $node->safe_psql('postgres', q(VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) test));
+detects_no_corruption(
+	"verify_heapam('test')",
+	"all-frozen not corrupted table");
 corrupt_first_page('test');
 detects_heap_corruption("verify_heapam('test')",
 	"all-frozen corrupted table");
@@ -92,6 +99,15 @@ sub fresh_test_table
 		ALTER TABLE $relname ALTER b SET STORAGE external;
 		INSERT INTO $relname (a, b)
 			(SELECT gs, repeat('b',gs*10) FROM generate_series(1,1000) gs);
+		BEGIN;
+		SAVEPOINT s1;
+		SELECT 1 FROM $relname WHERE a = 42 FOR UPDATE;
+		UPDATE $relname SET b = b WHERE a = 42;
+		RELEASE s1;
+		SAVEPOINT s1;
+		SELECT 1 FROM $relname WHERE a = 42 FOR UPDATE;
+		UPDATE $relname SET b = b WHERE a = 42;
+		COMMIT;
 	));
 }
 
@@ -112,7 +128,7 @@ sub corrupt_first_page
 	# Corrupt some line pointers.  The values are chosen to hit the
 	# various line-pointer-corruption checks in verify_heapam.c
 	# on both little-endian and big-endian architectures.
-	seek($fh, 32, 0)
+	seek($fh, 32, SEEK_SET)
 	  or BAIL_OUT("seek failed: $!");
 	syswrite(
 		$fh,

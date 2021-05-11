@@ -316,6 +316,7 @@ typedef struct _tableInfo
 	bool	   *attislocal;		/* true if attr has local definition */
 	char	  **attoptions;		/* per-attribute options */
 	Oid		   *attcollation;	/* per-attribute collation selection */
+	char	   *attcompression; /* per-attribute compression method */
 	char	  **attfdwoptions;	/* per-attribute fdw options */
 	char	  **attmissingval;	/* per attribute missing value */
 	bool	   *notnull;		/* NOT NULL constraints on attributes */
@@ -375,8 +376,6 @@ typedef struct _indxInfo
 	int			indnattrs;		/* total number of index attributes */
 	Oid		   *indkeys;		/* In spite of the name 'indkeys' this field
 								 * contains both key and nonkey attributes */
-	char	   *inddependcollnames; /* FQ names of depended-on collations */
-	char	   *inddependcollversions;	/* versions of the above */
 	bool		indisclustered;
 	bool		indisreplident;
 	Oid			parentidx;		/* if a partition, parent index OID */

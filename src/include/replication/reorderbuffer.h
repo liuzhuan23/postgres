@@ -617,7 +617,14 @@ struct ReorderBuffer
 	/* Statistics about transactions streamed to the decoding output plugin */
 	int64		streamTxns;		/* number of transactions streamed */
 	int64		streamCount;	/* streaming invocation counter */
-	int64		streamBytes;	/* amount of data streamed */
+	int64		streamBytes;	/* amount of data decoded */
+
+	/*
+	 * Statistics about all the transactions sent to the decoding output
+	 * plugin
+	 */
+	int64		totalTxns;		/* total number of transactions sent */
+	int64		totalBytes;		/* total amount of data decoded */
 };
 
 
@@ -643,6 +650,7 @@ void		ReorderBufferCommit(ReorderBuffer *, TransactionId,
 								TimestampTz commit_time, RepOriginId origin_id, XLogRecPtr origin_lsn);
 void		ReorderBufferFinishPrepared(ReorderBuffer *rb, TransactionId xid,
 										XLogRecPtr commit_lsn, XLogRecPtr end_lsn,
+										XLogRecPtr initial_consistent_point,
 										TimestampTz commit_time,
 										RepOriginId origin_id, XLogRecPtr origin_lsn,
 										char *gid, bool is_commit);

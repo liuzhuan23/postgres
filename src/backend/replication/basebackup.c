@@ -299,7 +299,7 @@ perform_base_backup(basebackup_options *opt)
 								 PROGRESS_BASEBACKUP_PHASE_WAIT_CHECKPOINT);
 	startptr = do_pg_start_backup(opt->label, opt->fastcheckpoint, &starttli,
 								  labelfile, &tablespaces,
-								  tblspc_map_file, opt->sendtblspcmapfile);
+								  tblspc_map_file);
 
 	/*
 	 * Once do_pg_start_backup has been called, ensure that any failure causes
@@ -1075,7 +1075,7 @@ SendXlogRecPtrResult(XLogRecPtr ptr, TimeLineID tli)
 	pq_sendint16(&buf, 2);		/* number of columns */
 
 	len = snprintf(str, sizeof(str),
-				   "%X/%X", (uint32) (ptr >> 32), (uint32) ptr);
+				   "%X/%X", LSN_FORMAT_ARGS(ptr));
 	pq_sendint32(&buf, len);
 	pq_sendbytes(&buf, str, len);
 
@@ -1684,7 +1684,7 @@ sendFile(const char *readfilename, const char *tarfilename,
 		{
 			ereport(WARNING,
 					(errmsg("could not verify checksum in file \"%s\", block "
-							"%d: read buffer size %d and page size %d "
+							"%u: read buffer size %d and page size %d "
 							"differ",
 							readfilename, blkno, (int) cnt, BLCKSZ)));
 			verify_checksum = false;
@@ -1757,7 +1757,7 @@ sendFile(const char *readfilename, const char *tarfilename,
 						if (checksum_failures <= 5)
 							ereport(WARNING,
 									(errmsg("checksum verification failed in "
-											"file \"%s\", block %d: calculated "
+											"file \"%s\", block %u: calculated "
 											"%X but expected %X",
 											readfilename, blkno, checksum,
 											phdr->pd_checksum)));
