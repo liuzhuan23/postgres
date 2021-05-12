@@ -2140,16 +2140,19 @@ log_undo_db_create(Oid db_id, Oid tablespace_id)
 	XLogRecPtr	lsn;
 	xu_dbase_create	undo_rec;
 	xl_dbase_precreate_rec	xlrec;
-	UndoNode	undo_node;
+	UndoRecData	rdata;
 
 	undo_rec.db_id = db_id;
 	undo_rec.tablespace_id = tablespace_id;
-	undo_node.rmid = RM_DBASE_ID;
-	undo_node.type = UNDO_DBASE_CREATE;
-	undo_node.data = (char *) &undo_rec;
-	undo_node.length = sizeof(undo_rec);
 
-	PrepareXactUndoData(&undo_context, RELPERSISTENCE_PERMANENT, &undo_node);
+	rdata.data = (char *) &undo_rec;
+	rdata.len = sizeof(undo_rec);
+	rdata.next = NULL;
+
+	PrepareXactUndoData(&undo_context, RELPERSISTENCE_PERMANENT,
+						GetUndoDataSize(&rdata));
+	SerializeUndoData(&undo_context.data, RM_DBASE_ID, UNDO_DBASE_CREATE,
+					  &rdata);
 
 	START_CRIT_SECTION();
 
@@ -2226,16 +2229,12 @@ dbase_redo(XLogReaderState *record)
 	{
 		xl_dbase_precreate_rec *xlrec = (xl_dbase_precreate_rec *) XLogRecGetData(record);
 		xu_dbase_create undo_rec;
-		UndoNode	undo_node;
 
 		undo_rec.db_id = xlrec->db_id;
 		undo_rec.tablespace_id = xlrec->tablespace_id;
-		undo_node.rmid = RM_DBASE_ID;
-		undo_node.type = UNDO_DBASE_CREATE;
-		undo_node.length = sizeof(undo_rec);
-		undo_node.data = (char *) &undo_rec;
 
-		XactUndoReplay(record, &undo_node);
+		XactUndoReplay(record, RM_DBASE_ID, UNDO_DBASE_CREATE, &undo_rec,
+					   sizeof(undo_rec));
 	}
 	else if (info == XLOG_DBASE_DROP)
 	{

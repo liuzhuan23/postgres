@@ -16,6 +16,8 @@
 #ifndef UNDODEFS_H
 #define UNDODEFS_H
 
+#include "access/rmgr.h"
+
 /* The type used to identify an undo log and position within it. */
 typedef uint64 UndoRecPtr;
 
@@ -63,7 +65,7 @@ typedef struct UndoNode
 	 * development, have an absolutely dumb format, for now.
 	 */
 	Size		length;
-	uint8		rmid;
+	RmgrId		rmid;
 	uint8		type;
 	char	   *data;
 } UndoNode;

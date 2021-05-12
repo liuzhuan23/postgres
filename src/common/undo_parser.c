@@ -130,9 +130,20 @@ parse_undo_page(UndoLogParserState *s, char *page, int nr, UndoSegFile *seg,
 	}
 
 	/* The current chunk must start in front of the current page. */
-	Assert(s->current_chunk <
-		   MakeUndoRecPtr(seg->logno, seg->offset + nr * BLCKSZ) ||
-		   s->current_chunk == InvalidUndoRecPtr);
+#ifdef USE_ASSERT_CHECKING
+	{
+		UndoRecPtr page_end = MakeUndoRecPtr(seg->logno, 0);
+
+		/*
+		 * Add the offset manually because MakeUndoRecPtr() does not work if
+		 * the offset is at log boundary.
+		 */
+		page_end += seg->offset + (nr + 1) * BLCKSZ;
+
+		Assert(s->current_chunk < page_end);
+	}
+#endif
+
 
 	cont = pghdr.ud_continue_chunk;
 	if (s->current_chunk != InvalidUndoRecPtr && cont != InvalidUndoRecPtr &&
@@ -612,7 +623,9 @@ process_records(UndoLogParserState *s, char *data, int size,
 			node->data = NULL;
 
 		rec_buf_off += rec_len;
-		current_rec_start += rec_len;
+		/* The record can cross page boundary. */
+		current_rec_start = UndoRecPtrPlusUsableBytes(current_rec_start,
+													  rec_len);
 	}
 
 	if (data == NULL)

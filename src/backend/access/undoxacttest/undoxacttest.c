@@ -4,6 +4,7 @@
 #include "access/undoxacttest.h"
 #include "access/xactundo.h"
 #include "access/xlogutils.h"
+#include "catalog/pg_control.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/rel.h"
@@ -15,27 +16,30 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 							 bool is_undo)
 {
 	XactUndoContext undo_context;
-	UndoNode	undo_node;
 	xu_undoxactest_mod undo_rec;
-
+	XLogRecPtr	recptr;
 	int64		oldval;
 	int64		newval;
 
 	/* build undo record */
 	if (!is_undo)
 	{
+		UndoRecData	rdata;
+
 		/* AFIXME: API needs to be changed so serialization happens at a later */
 		/* stage. */
 		undo_rec.reloid = RelationGetRelid(rel);
 		undo_rec.mod = mod;
-		undo_node.rmid = RM_UNDOXACTTEST_ID;
-		undo_node.type = UNDOXACT_TEST;
-		undo_node.length = sizeof(undo_rec);
-		undo_node.data = (char *) &undo_rec;
+
+		rdata.len = sizeof(undo_rec);
+		rdata.data = (char *) &undo_rec;
+		rdata.next = NULL;
 
 		PrepareXactUndoData(&undo_context,
 							rel->rd_rel->relpersistence,
-							&undo_node);
+							GetUndoDataSize(&rdata));
+		SerializeUndoData(&undo_context.data, RM_UNDOXACTTEST_ID,
+						  UNDOXACT_TEST, &rdata);
 	}
 
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -49,11 +53,11 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 	MarkBufferDirty(buf);
 
-	if (RelationNeedsWAL(rel))
-	{
+	if (RelationNeedsWAL(rel) || !is_undo)
 		XLogBeginInsert();
+
+	if (RelationNeedsWAL(rel))
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD | REGBUF_KEEP_DATA);
-	}
 
 	if (!is_undo)
 		InsertXactUndoData(&undo_context, 1);
@@ -64,7 +68,6 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 			.debug_mod = mod,
 			.debug_oldval = oldval,
 			.reloid = RelationGetRelid(rel)};
-		XLogRecPtr	recptr;
 		uint8		info = XLOG_UNDOXACTTEST_MOD;
 
 		XLogRegisterData((char *) &xlrec, sizeof(xlrec));
@@ -73,6 +76,18 @@ undoxacttest_log_execute_mod(Relation rel, Buffer buf, int64 *counter, int64 mod
 
 		if (!is_undo)
 			SetXactUndoPageLSNs(&undo_context, recptr);
+	}
+	else if (!is_undo)
+	{
+		char	data[1];
+
+		/*
+		 * Insert a dummy record to which we can attach the undo-record-set
+		 * metadata (e.g. adjustment of the page insertion point).
+		 */
+		XLogRegisterData(data, 1);
+		recptr = XLogInsert(RM_XLOG_ID, XLOG_NOOP);
+		SetXactUndoPageLSNs(&undo_context, recptr);
 	}
 
 	END_CRIT_SECTION();
@@ -132,18 +147,14 @@ undoxacttest_redo_mod(XLogReaderState *record)
 		UnlockReleaseBuffer(buf);
 
 	{
-		UndoNode	undo_node;
 		xu_undoxactest_mod undo_rec;
 
 		/* reconstruct undo record */
 		undo_rec.reloid = xlrec->reloid;
 		undo_rec.mod = xlrec->debug_mod;
-		undo_node.rmid = RM_UNDOXACTTEST_ID;
-		undo_node.type = UNDOXACT_TEST;
-		undo_node.data = (char *) &undo_rec;
-		undo_node.length = sizeof(undo_rec);
 
-		XactUndoReplay(record, &undo_node);
+		XactUndoReplay(record, RM_UNDOXACTTEST_ID, UNDOXACT_TEST, &undo_rec,
+					   sizeof(undo_rec));
 	}
 }
 
@@ -165,7 +176,16 @@ undoxacttest_redo(XLogReaderState *record)
 void
 undoxacttest_undo(const WrittenUndoNode *record)
 {
-	const xu_undoxactest_mod *uxt_r = (const xu_undoxactest_mod *) record->n.data;
+	const xu_undoxactest_mod *uxt_r;
+
+	/*
+	 * The end of transaction or subtransaction is not interesting for
+	 * us. Should we process the records in batches?
+	 */
+	if (record == NULL)
+		return;
+
+	uxt_r = (const xu_undoxactest_mod *) record->n.data;
 
 	elog(DEBUG1, "called for record of type %d, length %zu at %lu: %ld",
 		 record->n.type, record->n.length, record->location,

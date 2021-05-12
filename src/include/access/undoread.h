@@ -16,7 +16,6 @@
 
 #include "access/undodefs.h"
 #include "access/undorecordset.h"
-#include "access/xactundo.h"
 #include "lib/stringinfo.h"
 #include "storage/buf.h"
 
@@ -50,23 +49,24 @@ typedef struct UndoRSReaderState
 	UndoCachedBuffer cached_buffer;
 
 	int			current_chunk;
+	UndoRecPtr	last_record;
 	UndoRecPtr	next_urp;
 
 	WrittenUndoNode node;
 	StringInfoData buf;
 
 	/*
-	 * Record lenghts in varbyte format. The individual record pointers are
-	 * derived from these values, relative to end_readind.
+	 * Record distances in varbyte format. The individual record pointers are
+	 * derived from these values, relative to end_reading.
 	 */
-	StringInfoData	rec_lengths;
+	StringInfoData	rec_dists;
 
 	/* Pointer to the last processed byte of rec_lengths.data. */
 	char	*backward_cur;
 } UndoRSReaderState;
 
 extern UndoRecPtr undo_reader_read_bytes(UndoRSReaderState *r, UndoRecPtr urp,
-										 size_t nbytes);
+										 size_t nbytes, bool allow_discarded);
 extern void UndoRSReaderInit(UndoRSReaderState *r,
 							 UndoRecPtr start, UndoRecPtr end,
 							 char relpersistence, bool toplevel);

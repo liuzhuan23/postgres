@@ -11675,7 +11675,7 @@
   prokind => 'f',
   proname => 'pg_get_undo_log_chunks', proretset => 't', provolatile => 'v',
   proparallel => 'u', prorettype => 'record', proargtypes => 'text text',
-  proallargtypes => '{text,text,int4,text,text,int8,bool,text,text}',
+  proallargtypes => '{text,text,text,text,text,int8,bool,text,text}',
   proargmodes => '{i,i,o,o,o,o,o,o,o}',
   proargnames => '{from,to,logno,start,prev,size,discarded,type,type_header}',
   prosrc => 'pg_get_undo_log_chunks' },
