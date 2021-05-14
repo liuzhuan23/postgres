@@ -172,6 +172,10 @@ typedef struct
 	List	   *outer_tlist;	/* referent for OUTER_VAR Vars */
 	List	   *inner_tlist;	/* referent for INNER_VAR Vars */
 	List	   *index_tlist;	/* referent for INDEX_VAR Vars */
+	/* Special namespace representing a function signature: */
+	char	   *funcname;
+	int			numargs;
+	char	  **argnames;
 } deparse_namespace;
 
 /*
@@ -336,7 +340,8 @@ static char *pg_get_indexdef_worker(Oid indexrelid, int colno,
 									bool attrsOnly, bool keysOnly,
 									bool showTblSpc, bool inherits,
 									int prettyFlags, bool missing_ok);
-static char *pg_get_statisticsobj_worker(Oid statextid, bool missing_ok);
+static char *pg_get_statisticsobj_worker(Oid statextid, bool columns_only,
+										 bool missing_ok);
 static char *pg_get_partkeydef_worker(Oid relid, int prettyFlags,
 									  bool attrsOnly, bool missing_ok);
 static char *pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
@@ -347,6 +352,7 @@ static int	print_function_arguments(StringInfo buf, HeapTuple proctup,
 									 bool print_table_args, bool print_defaults);
 static void print_function_rettype(StringInfo buf, HeapTuple proctup);
 static void print_function_trftypes(StringInfo buf, HeapTuple proctup);
+static void print_function_sqlbody(StringInfo buf, HeapTuple proctup);
 static void set_rtable_names(deparse_namespace *dpns, List *parent_namespaces,
 							 Bitmapset *rels_used);
 static void set_deparse_for_query(deparse_namespace *dpns, Query *query,
@@ -1507,7 +1513,36 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 	Oid			statextid = PG_GETARG_OID(0);
 	char	   *res;
 
-	res = pg_get_statisticsobj_worker(statextid, true);
+	res = pg_get_statisticsobj_worker(statextid, false, true);
+
+	if (res == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(string_to_text(res));
+}
+
+/*
+ * Internal version for use by ALTER TABLE.
+ * Includes a tablespace clause in the result.
+ * Returns a palloc'd C string; no pretty-printing.
+ */
+char *
+pg_get_statisticsobjdef_string(Oid statextid)
+{
+	return pg_get_statisticsobj_worker(statextid, false, false);
+}
+
+/*
+ * pg_get_statisticsobjdef_columns
+ *		Get columns and expressions for an extended statistics object
+ */
+Datum
+pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
+{
+	Oid			statextid = PG_GETARG_OID(0);
+	char	   *res;
+
+	res = pg_get_statisticsobj_worker(statextid, true, true);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -1519,7 +1554,7 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
  * Internal workhorse to decompile an extended statistics object.
  */
 static char *
-pg_get_statisticsobj_worker(Oid statextid, bool missing_ok)
+pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 {
 	Form_pg_statistic_ext statextrec;
 	HeapTuple	statexttup;
@@ -1534,6 +1569,11 @@ pg_get_statisticsobj_worker(Oid statextid, bool missing_ok)
 	bool		dependencies_enabled;
 	bool		mcv_enabled;
 	int			i;
+	List	   *context;
+	ListCell   *lc;
+	List	   *exprs = NIL;
+	bool		has_exprs;
+	int			ncolumns;
 
 	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
 
@@ -1544,75 +1584,114 @@ pg_get_statisticsobj_worker(Oid statextid, bool missing_ok)
 		elog(ERROR, "cache lookup failed for statistics object %u", statextid);
 	}
 
+	/* has the statistics expressions? */
+	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
+
 	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
+
+	/*
+	 * Get the statistics expressions, if any.  (NOTE: we do not use the
+	 * relcache versions of the expressions, because we want to display
+	 * non-const-folded expressions.)
+	 */
+	if (has_exprs)
+	{
+		Datum		exprsDatum;
+		bool		isnull;
+		char	   *exprsString;
+
+		exprsDatum = SysCacheGetAttr(STATEXTOID, statexttup,
+									 Anum_pg_statistic_ext_stxexprs, &isnull);
+		Assert(!isnull);
+		exprsString = TextDatumGetCString(exprsDatum);
+		exprs = (List *) stringToNode(exprsString);
+		pfree(exprsString);
+	}
+	else
+		exprs = NIL;
+
+	/* count the number of columns (attributes and expressions) */
+	ncolumns = statextrec->stxkeys.dim1 + list_length(exprs);
 
 	initStringInfo(&buf);
 
-	nsp = get_namespace_name(statextrec->stxnamespace);
-	appendStringInfo(&buf, "CREATE STATISTICS %s",
-					 quote_qualified_identifier(nsp,
-												NameStr(statextrec->stxname)));
-
-	/*
-	 * Decode the stxkind column so that we know which stats types to print.
-	 */
-	datum = SysCacheGetAttr(STATEXTOID, statexttup,
-							Anum_pg_statistic_ext_stxkind, &isnull);
-	Assert(!isnull);
-	arr = DatumGetArrayTypeP(datum);
-	if (ARR_NDIM(arr) != 1 ||
-		ARR_HASNULL(arr) ||
-		ARR_ELEMTYPE(arr) != CHAROID)
-		elog(ERROR, "stxkind is not a 1-D char array");
-	enabled = (char *) ARR_DATA_PTR(arr);
-
-	ndistinct_enabled = false;
-	dependencies_enabled = false;
-	mcv_enabled = false;
-
-	for (i = 0; i < ARR_DIMS(arr)[0]; i++)
+	if (!columns_only)
 	{
-		if (enabled[i] == STATS_EXT_NDISTINCT)
-			ndistinct_enabled = true;
-		if (enabled[i] == STATS_EXT_DEPENDENCIES)
-			dependencies_enabled = true;
-		if (enabled[i] == STATS_EXT_MCV)
-			mcv_enabled = true;
-	}
+		nsp = get_namespace_name(statextrec->stxnamespace);
+		appendStringInfo(&buf, "CREATE STATISTICS %s",
+						 quote_qualified_identifier(nsp,
+													NameStr(statextrec->stxname)));
 
-	/*
-	 * If any option is disabled, then we'll need to append the types clause
-	 * to show which options are enabled.  We omit the types clause on purpose
-	 * when all options are enabled, so a pg_dump/pg_restore will create all
-	 * statistics types on a newer postgres version, if the statistics had all
-	 * options enabled on the original version.
-	 */
-	if (!ndistinct_enabled || !dependencies_enabled || !mcv_enabled)
-	{
-		bool		gotone = false;
+		/*
+		 * Decode the stxkind column so that we know which stats types to
+		 * print.
+		 */
+		datum = SysCacheGetAttr(STATEXTOID, statexttup,
+								Anum_pg_statistic_ext_stxkind, &isnull);
+		Assert(!isnull);
+		arr = DatumGetArrayTypeP(datum);
+		if (ARR_NDIM(arr) != 1 ||
+			ARR_HASNULL(arr) ||
+			ARR_ELEMTYPE(arr) != CHAROID)
+			elog(ERROR, "stxkind is not a 1-D char array");
+		enabled = (char *) ARR_DATA_PTR(arr);
 
-		appendStringInfoString(&buf, " (");
+		ndistinct_enabled = false;
+		dependencies_enabled = false;
+		mcv_enabled = false;
 
-		if (ndistinct_enabled)
+		for (i = 0; i < ARR_DIMS(arr)[0]; i++)
 		{
-			appendStringInfoString(&buf, "ndistinct");
-			gotone = true;
+			if (enabled[i] == STATS_EXT_NDISTINCT)
+				ndistinct_enabled = true;
+			else if (enabled[i] == STATS_EXT_DEPENDENCIES)
+				dependencies_enabled = true;
+			else if (enabled[i] == STATS_EXT_MCV)
+				mcv_enabled = true;
+
+			/* ignore STATS_EXT_EXPRESSIONS (it's built automatically) */
 		}
 
-		if (dependencies_enabled)
+		/*
+		 * If any option is disabled, then we'll need to append the types
+		 * clause to show which options are enabled.  We omit the types clause
+		 * on purpose when all options are enabled, so a pg_dump/pg_restore
+		 * will create all statistics types on a newer postgres version, if
+		 * the statistics had all options enabled on the original version.
+		 *
+		 * But if the statistics is defined on just a single column, it has to
+		 * be an expression statistics. In that case we don't need to specify
+		 * kinds.
+		 */
+		if ((!ndistinct_enabled || !dependencies_enabled || !mcv_enabled) &&
+			(ncolumns > 1))
 		{
-			appendStringInfo(&buf, "%sdependencies", gotone ? ", " : "");
-			gotone = true;
+			bool		gotone = false;
+
+			appendStringInfoString(&buf, " (");
+
+			if (ndistinct_enabled)
+			{
+				appendStringInfoString(&buf, "ndistinct");
+				gotone = true;
+			}
+
+			if (dependencies_enabled)
+			{
+				appendStringInfo(&buf, "%sdependencies", gotone ? ", " : "");
+				gotone = true;
+			}
+
+			if (mcv_enabled)
+				appendStringInfo(&buf, "%smcv", gotone ? ", " : "");
+
+			appendStringInfoChar(&buf, ')');
 		}
 
-		if (mcv_enabled)
-			appendStringInfo(&buf, "%smcv", gotone ? ", " : "");
-
-		appendStringInfoChar(&buf, ')');
+		appendStringInfoString(&buf, " ON ");
 	}
 
-	appendStringInfoString(&buf, " ON ");
-
+	/* decode simple column references */
 	for (colno = 0; colno < statextrec->stxkeys.dim1; colno++)
 	{
 		AttrNumber	attnum = statextrec->stxkeys.values[colno];
@@ -1626,12 +1705,107 @@ pg_get_statisticsobj_worker(Oid statextid, bool missing_ok)
 		appendStringInfoString(&buf, quote_identifier(attname));
 	}
 
-	appendStringInfo(&buf, " FROM %s",
-					 generate_relation_name(statextrec->stxrelid, NIL));
+	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+								  statextrec->stxrelid);
+
+	foreach(lc, exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		char	   *str;
+		int			prettyFlags = PRETTYFLAG_INDENT;
+
+		str = deparse_expression_pretty(expr, context, false, false,
+										prettyFlags, 0);
+
+		if (colno > 0)
+			appendStringInfoString(&buf, ", ");
+
+		/* Need parens if it's not a bare function call */
+		if (looks_like_function(expr))
+			appendStringInfoString(&buf, str);
+		else
+			appendStringInfo(&buf, "(%s)", str);
+
+		colno++;
+	}
+
+	if (!columns_only)
+		appendStringInfo(&buf, " FROM %s",
+						 generate_relation_name(statextrec->stxrelid, NIL));
 
 	ReleaseSysCache(statexttup);
 
 	return buf.data;
+}
+
+/*
+ * Generate text array of expressions for statistics object.
+ */
+Datum
+pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
+{
+	Oid			statextid = PG_GETARG_OID(0);
+	Form_pg_statistic_ext statextrec;
+	HeapTuple	statexttup;
+	Datum		datum;
+	bool		isnull;
+	List	   *context;
+	ListCell   *lc;
+	List	   *exprs = NIL;
+	bool		has_exprs;
+	char	   *tmp;
+	ArrayBuildState *astate = NULL;
+
+	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
+
+	if (!HeapTupleIsValid(statexttup))
+		PG_RETURN_NULL();
+
+	/* Does the stats object have expressions? */
+	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
+
+	/* no expressions? we're done */
+	if (!has_exprs)
+	{
+		ReleaseSysCache(statexttup);
+		PG_RETURN_NULL();
+	}
+
+	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
+
+	/*
+	 * Get the statistics expressions, and deparse them into text values.
+	 */
+	datum = SysCacheGetAttr(STATEXTOID, statexttup,
+							Anum_pg_statistic_ext_stxexprs, &isnull);
+
+	Assert(!isnull);
+	tmp = TextDatumGetCString(datum);
+	exprs = (List *) stringToNode(tmp);
+	pfree(tmp);
+
+	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+								  statextrec->stxrelid);
+
+	foreach(lc, exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		char	   *str;
+		int			prettyFlags = PRETTYFLAG_INDENT;
+
+		str = deparse_expression_pretty(expr, context, false, false,
+										prettyFlags, 0);
+
+		astate = accumArrayResult(astate,
+								  PointerGetDatum(cstring_to_text(str)),
+								  false,
+								  TEXTOID,
+								  CurrentMemoryContext);
+	}
+
+	ReleaseSysCache(statexttup);
+
+	PG_RETURN_DATUM(makeArrayResult(astate, CurrentMemoryContext));
 }
 
 /*
@@ -2799,6 +2973,13 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 	}
 
 	/* And finally the function definition ... */
+	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	if (proc->prolang == SQLlanguageId && !isnull)
+	{
+		print_function_sqlbody(&buf, proctup);
+	}
+	else
+	{
 	appendStringInfoString(&buf, "AS ");
 
 	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_probin, &isnull);
@@ -2830,6 +3011,7 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 	appendBinaryStringInfo(&buf, dq.data, dq.len);
 	appendStringInfoString(&buf, prosrc);
 	appendBinaryStringInfo(&buf, dq.data, dq.len);
+	}
 
 	appendStringInfoChar(&buf, '\n');
 
@@ -3211,6 +3393,83 @@ pg_get_function_arg_default(PG_FUNCTION_ARGS)
 	ReleaseSysCache(proctup);
 
 	PG_RETURN_TEXT_P(string_to_text(str));
+}
+
+static void
+print_function_sqlbody(StringInfo buf, HeapTuple proctup)
+{
+	int			numargs;
+	Oid		   *argtypes;
+	char	  **argnames;
+	char	   *argmodes;
+	deparse_namespace dpns = {0};
+	Datum		tmp;
+	bool		isnull;
+	Node	   *n;
+
+	dpns.funcname = pstrdup(NameStr(((Form_pg_proc) GETSTRUCT(proctup))->proname));
+	numargs = get_func_arg_info(proctup,
+								&argtypes, &argnames, &argmodes);
+	dpns.numargs = numargs;
+	dpns.argnames = argnames;
+
+	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	Assert(!isnull);
+	n = stringToNode(TextDatumGetCString(tmp));
+
+	if (IsA(n, List))
+	{
+		List	   *stmts;
+		ListCell   *lc;
+
+		stmts = linitial(castNode(List, n));
+
+		appendStringInfoString(buf, "BEGIN ATOMIC\n");
+
+		foreach(lc, stmts)
+		{
+			Query	   *query = lfirst_node(Query, lc);
+
+			get_query_def(query, buf, list_make1(&dpns), NULL, PRETTYFLAG_INDENT, WRAP_COLUMN_DEFAULT, 1);
+			appendStringInfoChar(buf, ';');
+			appendStringInfoChar(buf, '\n');
+		}
+
+		appendStringInfoString(buf, "END");
+	}
+	else
+	{
+		get_query_def(castNode(Query, n), buf, list_make1(&dpns), NULL, 0, WRAP_COLUMN_DEFAULT, 0);
+	}
+}
+
+Datum
+pg_get_function_sqlbody(PG_FUNCTION_ARGS)
+{
+	Oid			funcid = PG_GETARG_OID(0);
+	StringInfoData buf;
+	HeapTuple	proctup;
+	bool		isnull;
+
+	initStringInfo(&buf);
+
+	/* Look up the function */
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(proctup))
+		PG_RETURN_NULL();
+
+	SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	if (isnull)
+	{
+		ReleaseSysCache(proctup);
+		PG_RETURN_NULL();
+	}
+
+	print_function_sqlbody(&buf, proctup);
+
+	ReleaseSysCache(proctup);
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 
 
@@ -4572,16 +4831,12 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 	 * We special-case Append and MergeAppend to pretend that the first child
 	 * plan is the OUTER referent; we have to interpret OUTER Vars in their
 	 * tlists according to one of the children, and the first one is the most
-	 * natural choice.  Likewise special-case ModifyTable to pretend that the
-	 * first child plan is the OUTER referent; this is to support RETURNING
-	 * lists containing references to non-target relations.
+	 * natural choice.
 	 */
 	if (IsA(plan, Append))
 		dpns->outer_plan = linitial(((Append *) plan)->appendplans);
 	else if (IsA(plan, MergeAppend))
 		dpns->outer_plan = linitial(((MergeAppend *) plan)->mergeplans);
-	else if (IsA(plan, ModifyTable))
-		dpns->outer_plan = linitial(((ModifyTable *) plan)->plans);
 	else
 		dpns->outer_plan = outerPlan(plan);
 
@@ -5472,7 +5727,10 @@ get_basic_select_query(Query *query, deparse_context *context,
 	/*
 	 * Build up the query string - first we say SELECT
 	 */
-	appendStringInfoString(buf, "SELECT");
+	if (query->isReturn)
+		appendStringInfoString(buf, "RETURN");
+	else
+		appendStringInfoString(buf, "SELECT");
 
 	/* Add the DISTINCT clause if given */
 	if (query->distinctClause != NIL)
@@ -7607,6 +7865,50 @@ get_parameter(Param *param, deparse_context *context)
 	}
 
 	/*
+	 * If it's an external parameter, see if the outermost namespace provides
+	 * function argument names.
+	 */
+	if (param->paramkind == PARAM_EXTERN)
+	{
+		dpns = lfirst(list_tail(context->namespaces));
+		if (dpns->argnames)
+		{
+			char	   *argname = dpns->argnames[param->paramid - 1];
+
+			if (argname)
+			{
+				bool		should_qualify = false;
+				ListCell   *lc;
+
+				/*
+				 * Qualify the parameter name if there are any other deparse
+				 * namespaces with range tables.  This avoids qualifying in
+				 * trivial cases like "RETURN a + b", but makes it safe in all
+				 * other cases.
+				 */
+				foreach(lc, context->namespaces)
+				{
+					deparse_namespace *dpns = lfirst(lc);
+
+					if (list_length(dpns->rtable_names) > 0)
+					{
+						should_qualify = true;
+						break;
+					}
+				}
+				if (should_qualify)
+				{
+					appendStringInfoString(context->buf, quote_identifier(dpns->funcname));
+					appendStringInfoChar(context->buf, '.');
+				}
+
+				appendStringInfoString(context->buf, quote_identifier(argname));
+				return;
+			}
+		}
+	}
+
+	/*
 	 * Not PARAM_EXEC, or couldn't find referent: just print $N.
 	 */
 	appendStringInfo(context->buf, "$%d", param->paramid);
@@ -9617,6 +9919,27 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 			appendStringInfoString(buf, "))");
 			return true;
 
+		case F_EXTRACT_TEXT_DATE:
+		case F_EXTRACT_TEXT_TIME:
+		case F_EXTRACT_TEXT_TIMETZ:
+		case F_EXTRACT_TEXT_TIMESTAMP:
+		case F_EXTRACT_TEXT_TIMESTAMPTZ:
+		case F_EXTRACT_TEXT_INTERVAL:
+			/* EXTRACT (x FROM y) */
+			appendStringInfoString(buf, "EXTRACT(");
+			{
+				Const	   *con = (Const *) linitial(expr->args);
+
+				Assert(IsA(con, Const) &&
+					   con->consttype == TEXTOID &&
+					   !con->constisnull);
+				appendStringInfoString(buf, TextDatumGetCString(con->constvalue));
+			}
+			appendStringInfoString(buf, " FROM ");
+			get_rule_expr((Node *) lsecond(expr->args), context, false);
+			appendStringInfoChar(buf, ')');
+			return true;
+
 		case F_IS_NORMALIZED:
 			/* IS xxx NORMALIZED */
 			appendStringInfoString(buf, "((");
@@ -10644,6 +10967,10 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				appendStringInfoString(buf, quote_identifier(colname));
 			}
 			appendStringInfoChar(buf, ')');
+
+			if (j->join_using_alias)
+				appendStringInfo(buf, " AS %s",
+								 quote_identifier(j->join_using_alias->aliasname));
 		}
 		else if (j->quals)
 		{

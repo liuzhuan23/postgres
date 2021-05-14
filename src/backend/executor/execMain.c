@@ -58,6 +58,7 @@
 #include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
+#include "utils/backend_status.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/partcache.h"
@@ -128,6 +129,14 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
 void
 ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+	/*
+	 * In some cases (e.g. an EXECUTE statement) a query execution will skip
+	 * parse analysis, which means that the query_id won't be reported.  Note
+	 * that it's harmless to report the query_id multiple time, as the call will
+	 * be ignored if the top level query_id has already been reported.
+	 */
+	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
+
 	if (ExecutorStart_hook)
 		(*ExecutorStart_hook) (queryDesc, eflags);
 	else
@@ -149,7 +158,7 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 * planned to non-temporary tables.  EXPLAIN is considered read-only.
 	 *
 	 * Don't allow writes in parallel mode.  Supporting UPDATE and DELETE
-	 * would require (a) storing the combocid hash in shared memory, rather
+	 * would require (a) storing the combo CID hash in shared memory, rather
 	 * than synchronizing it just once at the start of parallelism, and (b) an
 	 * alternative to heap_update()'s reliance on xmax for mutual exclusion.
 	 * INSERT may have no such troubles, but we forbid it to simplify the
@@ -186,6 +195,8 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			palloc0(nParamExec * sizeof(ParamExecData));
 	}
 
+	/* We now require all callers to provide sourceText */
+	Assert(queryDesc->sourceText != NULL);
 	estate->es_sourceText = queryDesc->sourceText;
 
 	/*
@@ -547,7 +558,7 @@ ExecutorRewind(QueryDesc *queryDesc)
  * Returns true if permissions are adequate.  Otherwise, throws an appropriate
  * error if ereport_on_violation is true, or simply returns false otherwise.
  *
- * Note that this does NOT address row level security policies (aka: RLS).  If
+ * Note that this does NOT address row-level security policies (aka: RLS).  If
  * rows will be returned to the user as a result of this permission check
  * passing, then RLS also needs to be consulted (and check_enable_rls()).
  *
@@ -1217,22 +1228,34 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_FdwRoutine = NULL;
 
 	/* The following fields are set later if needed */
+	resultRelInfo->ri_RowIdAttNo = 0;
+	resultRelInfo->ri_projectNew = NULL;
+	resultRelInfo->ri_newTupleSlot = NULL;
+	resultRelInfo->ri_oldTupleSlot = NULL;
+	resultRelInfo->ri_projectNewInfoValid = false;
 	resultRelInfo->ri_FdwState = NULL;
 	resultRelInfo->ri_usesFdwDirectModify = false;
 	resultRelInfo->ri_ConstraintExprs = NULL;
 	resultRelInfo->ri_GeneratedExprs = NULL;
-	resultRelInfo->ri_junkFilter = NULL;
 	resultRelInfo->ri_projectReturning = NULL;
 	resultRelInfo->ri_onConflictArbiterIndexes = NIL;
 	resultRelInfo->ri_onConflict = NULL;
 	resultRelInfo->ri_ReturningSlot = NULL;
 	resultRelInfo->ri_TrigOldSlot = NULL;
 	resultRelInfo->ri_TrigNewSlot = NULL;
+
+	/*
+	 * Only ExecInitPartitionInfo() and ExecInitPartitionDispatchInfo() pass
+	 * non-NULL partition_root_rri.  For child relations that are part of the
+	 * initial query rather than being dynamically added by tuple routing,
+	 * this field is filled in ExecInitModifyTable().
+	 */
 	resultRelInfo->ri_RootResultRelInfo = partition_root_rri;
 	resultRelInfo->ri_RootToPartitionMap = NULL;	/* set by
 													 * ExecInitRoutingInfo */
 	resultRelInfo->ri_PartitionTupleSlot = NULL;	/* ditto */
 	resultRelInfo->ri_ChildToRootMap = NULL;
+	resultRelInfo->ri_ChildToRootMapValid = false;
 	resultRelInfo->ri_CopyMultiInsertBuffer = NULL;
 }
 
@@ -1263,7 +1286,7 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	Relation	rel;
 	MemoryContext oldcontext;
 
-	/* First, search through the query result relations */
+	/* Search through the query result relations */
 	foreach(l, estate->es_opened_result_relations)
 	{
 		rInfo = lfirst(l);
@@ -1272,8 +1295,8 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	}
 
 	/*
-	 * Third, search through the result relations that were created during
-	 * tuple routing, if any.
+	 * Search through the result relations that were created during tuple
+	 * routing, if any.
 	 */
 	foreach(l, estate->es_tuple_routing_result_relations)
 	{
@@ -1512,10 +1535,7 @@ ExecutePlan(EState *estate,
 
 	estate->es_use_parallel_mode = use_parallel_mode;
 	if (use_parallel_mode)
-	{
-		PrepareParallelModePlanExec(estate->es_plannedstmt->commandType);
 		EnterParallelMode();
-	}
 
 	/*
 	 * Loop until we've processed the proper number of tuples from the plan.
@@ -1608,6 +1628,15 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 	ExprContext *econtext;
 	MemoryContext oldContext;
 	int			i;
+
+	/*
+	 * CheckConstraintFetch let this pass with only a warning, but now we
+	 * should fail rather than possibly failing to enforce an important
+	 * constraint.
+	 */
+	if (ncheck != rel->rd_rel->relchecks)
+		elog(ERROR, "%d pg_constraint record(s) missing for relation \"%s\"",
+			 rel->rd_rel->relchecks - ncheck, RelationGetRelationName(rel));
 
 	/*
 	 * If first time through for this result relation, build expression
@@ -1862,7 +1891,7 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 		}
 	}
 
-	if (constr->num_check > 0)
+	if (rel->rd_rel->relchecks > 0)
 	{
 		const char *failed;
 
@@ -1918,7 +1947,7 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
  *
  * Note that this needs to be called multiple times to ensure that all kinds of
  * WITH CHECK OPTIONs are handled (both those from views which have the WITH
- * CHECK OPTION set and from row level security policies).  See ExecInsert()
+ * CHECK OPTION set and from row-level security policies).  See ExecInsert()
  * and ExecUpdate().
  */
 void
@@ -2416,7 +2445,8 @@ EvalPlanQualInit(EPQState *epqstate, EState *parentestate,
 /*
  * EvalPlanQualSetPlan -- set or change subplan of an EPQState.
  *
- * We need this so that ModifyTable can deal with multiple subplans.
+ * We used to need this so that ModifyTable could deal with multiple subplans.
+ * It could now be refactored out of existence.
  */
 void
 EvalPlanQualSetPlan(EPQState *epqstate, Plan *subplan, List *auxrowmarks)

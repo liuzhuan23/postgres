@@ -140,6 +140,8 @@ typedef struct Query
 	bool		hasForUpdate;	/* FOR [KEY] UPDATE/SHARE was specified */
 	bool		hasRowSecurity; /* rewriter has applied some RLS policy */
 
+	bool		isReturn;		/* is a RETURN statement */
+
 	List	   *cteList;		/* WITH list (of CommonTableExpr's) */
 
 	List	   *rtable;			/* list of range table entries */
@@ -688,14 +690,14 @@ typedef struct TableLikeClause
 typedef enum TableLikeOption
 {
 	CREATE_TABLE_LIKE_COMMENTS = 1 << 0,
-	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 1,
-	CREATE_TABLE_LIKE_DEFAULTS = 1 << 2,
-	CREATE_TABLE_LIKE_GENERATED = 1 << 3,
-	CREATE_TABLE_LIKE_IDENTITY = 1 << 4,
-	CREATE_TABLE_LIKE_INDEXES = 1 << 5,
-	CREATE_TABLE_LIKE_STATISTICS = 1 << 6,
-	CREATE_TABLE_LIKE_STORAGE = 1 << 7,
-	CREATE_TABLE_LIKE_COMPRESSION = 1 << 8,
+	CREATE_TABLE_LIKE_COMPRESSION = 1 << 1,
+	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 2,
+	CREATE_TABLE_LIKE_DEFAULTS = 1 << 3,
+	CREATE_TABLE_LIKE_GENERATED = 1 << 4,
+	CREATE_TABLE_LIKE_IDENTITY = 1 << 5,
+	CREATE_TABLE_LIKE_INDEXES = 1 << 6,
+	CREATE_TABLE_LIKE_STATISTICS = 1 << 7,
+	CREATE_TABLE_LIKE_STORAGE = 1 << 8,
 	CREATE_TABLE_LIKE_ALL = PG_INT32_MAX
 } TableLikeOption;
 
@@ -871,6 +873,7 @@ typedef struct PartitionCmd
 	NodeTag		type;
 	RangeVar   *name;			/* name of partition to attach/detach */
 	PartitionBoundSpec *bound;	/* FOR VALUES, if attaching */
+	bool		concurrent;
 } PartitionCmd;
 
 /****************************************************************************
@@ -1067,6 +1070,13 @@ typedef struct RangeTblEntry
 	List	   *joinaliasvars;	/* list of alias-var expansions */
 	List	   *joinleftcols;	/* left-side input column numbers */
 	List	   *joinrightcols;	/* right-side input column numbers */
+
+	/*
+	 * join_using_alias is an alias clause attached directly to JOIN/USING. It
+	 * is different from the alias field (below) in that it does not hide the
+	 * range variables of the tables being joined.
+	 */
+	Alias	   *join_using_alias;
 
 	/*
 	 * Fields valid for a function RTE (else NIL/zero):
@@ -1713,6 +1723,16 @@ typedef struct SetOperationStmt
 } SetOperationStmt;
 
 
+/*
+ * RETURN statement (inside SQL function body)
+ */
+typedef struct ReturnStmt
+{
+	NodeTag		type;
+	Node	   *returnval;
+} ReturnStmt;
+
+
 /* ----------------------
  *		PL/pgSQL Assignment Statement
  *
@@ -1909,10 +1929,11 @@ typedef enum AlterTableType
 	AT_GenericOptions,			/* OPTIONS (...) */
 	AT_AttachPartition,			/* ATTACH PARTITION */
 	AT_DetachPartition,			/* DETACH PARTITION */
+	AT_DetachPartitionFinalize,	/* DETACH PARTITION FINALIZE */
 	AT_AddIdentity,				/* ADD IDENTITY */
 	AT_SetIdentity,				/* SET identity column options */
 	AT_DropIdentity,			/* DROP IDENTITY */
-	AT_AlterCollationRefreshVersion /* ALTER COLLATION ... REFRESH VERSION */
+	AT_ReAddStatistics			/* internal to commands/tablecmds.c */
 } AlterTableType;
 
 typedef struct ReplicaIdentityStmt
@@ -1928,7 +1949,6 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 	AlterTableType subtype;		/* Type of table alteration to apply */
 	char	   *name;			/* column, constraint, or trigger to act on,
 								 * or tablespace */
-	List	   *object;			/* collation to act on if it's a collation */
 	int16		num;			/* attribute number for columns referenced by
 								 * number */
 	RoleSpec   *newowner;
@@ -1937,6 +1957,17 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
 	bool		missing_ok;		/* skip error if missing? */
 } AlterTableCmd;
+
+
+/* ----------------------
+ * Alter Collation
+ * ----------------------
+ */
+typedef struct AlterCollationStmt
+{
+	NodeTag		type;
+	List	   *collname;
+} AlterCollationStmt;
 
 
 /* ----------------------
@@ -2128,7 +2159,7 @@ typedef struct CreateStmt
 	RangeVar   *relation;		/* relation to create */
 	List	   *tableElts;		/* column definitions (list of ColumnDef) */
 	List	   *inhRelations;	/* relations to inherit from (list of
-								 * inhRelation) */
+								 * RangeVar) */
 	PartitionBoundSpec *partbound;	/* FOR VALUES clause */
 	PartitionSpec *partspec;	/* PARTITION BY clause */
 	TypeName   *ofTypename;		/* OF typename */
@@ -2764,12 +2795,13 @@ typedef struct SecLabelStmt
 #define CURSOR_OPT_SCROLL		0x0002	/* SCROLL explicitly given */
 #define CURSOR_OPT_NO_SCROLL	0x0004	/* NO SCROLL explicitly given */
 #define CURSOR_OPT_INSENSITIVE	0x0008	/* INSENSITIVE */
-#define CURSOR_OPT_HOLD			0x0010	/* WITH HOLD */
+#define CURSOR_OPT_ASENSITIVE	0x0010	/* ASENSITIVE */
+#define CURSOR_OPT_HOLD			0x0020	/* WITH HOLD */
 /* these planner-control flags do not correspond to any SQL grammar: */
-#define CURSOR_OPT_FAST_PLAN	0x0020	/* prefer fast-start plan */
-#define CURSOR_OPT_GENERIC_PLAN 0x0040	/* force use of generic plan */
-#define CURSOR_OPT_CUSTOM_PLAN	0x0080	/* force use of custom plan */
-#define CURSOR_OPT_PARALLEL_OK	0x0100	/* parallel mode OK */
+#define CURSOR_OPT_FAST_PLAN	0x0100	/* prefer fast-start plan */
+#define CURSOR_OPT_GENERIC_PLAN 0x0200	/* force use of generic plan */
+#define CURSOR_OPT_CUSTOM_PLAN	0x0400	/* force use of custom plan */
+#define CURSOR_OPT_PARALLEL_OK	0x0800	/* parallel mode OK */
 
 typedef struct DeclareCursorStmt
 {
@@ -2870,7 +2902,23 @@ typedef struct CreateStatsStmt
 	List	   *relations;		/* rels to build stats on (list of RangeVar) */
 	char	   *stxcomment;		/* comment to apply to stats, or NULL */
 	bool		if_not_exists;	/* do nothing if stats name already exists */
+	bool		transformed;	/* true when transformStatsStmt is finished */
 } CreateStatsStmt;
+
+/*
+ * StatsElem - statistics parameters (used in CREATE STATISTICS)
+ *
+ * For a plain attribute, 'name' is the name of the referenced table column
+ * and 'expr' is NULL.  For an expression, 'name' is NULL and 'expr' is the
+ * expression tree.
+ */
+typedef struct StatsElem
+{
+	NodeTag		type;
+	char	   *name;			/* name of attribute to index, or NULL */
+	Node	   *expr;			/* expression to index, or NULL */
+} StatsElem;
+
 
 /* ----------------------
  *		Alter Statistics Statement
@@ -2897,6 +2945,7 @@ typedef struct CreateFunctionStmt
 	List	   *parameters;		/* a list of FunctionParameter */
 	TypeName   *returnType;		/* the return type */
 	List	   *options;		/* a list of DefElem */
+	Node	   *sql_body;
 } CreateFunctionStmt;
 
 typedef enum FunctionParameterMode
@@ -3592,7 +3641,9 @@ typedef enum AlterSubscriptionType
 {
 	ALTER_SUBSCRIPTION_OPTIONS,
 	ALTER_SUBSCRIPTION_CONNECTION,
-	ALTER_SUBSCRIPTION_PUBLICATION,
+	ALTER_SUBSCRIPTION_SET_PUBLICATION,
+	ALTER_SUBSCRIPTION_ADD_PUBLICATION,
+	ALTER_SUBSCRIPTION_DROP_PUBLICATION,
 	ALTER_SUBSCRIPTION_REFRESH,
 	ALTER_SUBSCRIPTION_ENABLED
 } AlterSubscriptionType;

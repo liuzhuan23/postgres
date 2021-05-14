@@ -79,8 +79,6 @@ typedef struct PlannedStmt
 
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
-	List	   *partitionOids;	/* OIDs of partitions the plan depends on */
-
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
 
 	List	   *paramExecTypes; /* type OIDs for PARAM_EXEC Params */
@@ -130,6 +128,11 @@ typedef struct Plan
 	 */
 	bool		parallel_aware; /* engage parallel-aware logic? */
 	bool		parallel_safe;	/* OK to use as part of parallel plan? */
+
+	/*
+	 * information needed for asynchronous execution
+	 */
+	bool		async_capable; 	/* engage asynchronous-capable logic? */
 
 	/*
 	 * Common structural data for all Plan types.
@@ -198,7 +201,7 @@ typedef struct ProjectSet
 
 /* ----------------
  *	 ModifyTable node -
- *		Apply rows produced by subplan(s) to result table(s),
+ *		Apply rows produced by outer plan to result table(s),
  *		by inserting, updating, or deleting.
  *
  * If the originally named target table is a partitioned table, both
@@ -208,7 +211,7 @@ typedef struct ProjectSet
  * EXPLAIN should claim is the INSERT/UPDATE/DELETE target.
  *
  * Note that rowMarks and epqParam are presumed to be valid for all the
- * subplan(s); they can't contain any info that varies across subplans.
+ * table(s); they can't contain any info that varies across tables.
  * ----------------
  */
 typedef struct ModifyTable
@@ -218,9 +221,9 @@ typedef struct ModifyTable
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
 	Index		rootRelation;	/* Root RT index, if target is partitioned */
-	bool		partColsUpdated;	/* some part key in hierarchy updated */
+	bool		partColsUpdated;	/* some part key in hierarchy updated? */
 	List	   *resultRelations;	/* integer list of RT indexes */
-	List	   *plans;			/* plan(s) producing source data */
+	List	   *updateColnosLists;	/* per-target-table update_colnos lists */
 	List	   *withCheckOptionLists;	/* per-target-table WCO lists */
 	List	   *returningLists; /* per-target-table RETURNING tlists */
 	List	   *fdwPrivLists;	/* per-target-table FDW private data lists */
@@ -229,7 +232,8 @@ typedef struct ModifyTable
 	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
 	OnConflictAction onConflictAction;	/* ON CONFLICT action */
 	List	   *arbiterIndexes; /* List of ON CONFLICT arbiter index OIDs  */
-	List	   *onConflictSet;	/* SET for INSERT ON CONFLICT DO UPDATE */
+	List	   *onConflictSet;	/* INSERT ON CONFLICT DO UPDATE targetlist */
+	List	   *onConflictCols; /* target column numbers for onConflictSet */
 	Node	   *onConflictWhere;	/* WHERE for ON CONFLICT UPDATE */
 	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
@@ -247,6 +251,7 @@ typedef struct Append
 	Plan		plan;
 	Bitmapset  *apprelids;		/* RTIs of appendrel(s) formed by this node */
 	List	   *appendplans;
+	int			nasyncplans;	/* # of asynchronous plans */
 
 	/*
 	 * All 'appendplans' preceding this index are non-partial plans. All
@@ -776,6 +781,27 @@ typedef struct Material
 } Material;
 
 /* ----------------
+ *		result cache node
+ * ----------------
+ */
+typedef struct ResultCache
+{
+	Plan		plan;
+
+	int			numKeys;		/* size of the two arrays below */
+
+	Oid		   *hashOperators;	/* hash operators for each key */
+	Oid		   *collations;		/* cache keys */
+	List	   *param_exprs;	/* exprs containing parameters */
+	bool		singlerow;		/* true if the cache entry should be marked as
+								 * complete after we store the first tuple in
+								 * it. */
+	uint32		est_entries;	/* The maximum number of entries that the
+								 * planner expects will fit in the cache, or 0
+								 * if unknown */
+} ResultCache;
+
+/* ----------------
  *		sort node
  * ----------------
  */
@@ -1190,7 +1216,7 @@ typedef struct PartitionPruneStep
 } PartitionPruneStep;
 
 /*
- * PartitionPruneStepOp - Information to prune using a set of mutually AND'd
+ * PartitionPruneStepOp - Information to prune using a set of mutually ANDed
  *							OpExpr clauses
  *
  * This contains information extracted from up to partnatts OpExpr clauses,

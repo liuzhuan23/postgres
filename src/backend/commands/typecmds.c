@@ -1775,6 +1775,7 @@ makeRangeConstructors(const char *name, Oid namespace,
 								 F_FMGR_INTERNAL_VALIDATOR, /* language validator */
 								 prosrc[i], /* prosrc */
 								 NULL,	/* probin */
+								 NULL,	/* prosqlbody */
 								 PROKIND_FUNCTION,
 								 false, /* security_definer */
 								 false, /* leakproof */
@@ -1839,10 +1840,11 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 F_FMGR_INTERNAL_VALIDATOR,
 							 "multirange_constructor0", /* prosrc */
 							 NULL,	/* probin */
+							 NULL,	/* prosqlbody */
 							 PROKIND_FUNCTION,
 							 false, /* security_definer */
 							 false, /* leakproof */
-							 false, /* isStrict */
+							 true, /* isStrict */
 							 PROVOLATILE_IMMUTABLE, /* volatility */
 							 PROPARALLEL_SAFE,	/* parallel safety */
 							 argtypes,	/* parameterTypes */
@@ -1882,6 +1884,7 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 F_FMGR_INTERNAL_VALIDATOR,
 							 "multirange_constructor1", /* prosrc */
 							 NULL,	/* probin */
+							 NULL,	/* prosqlbody */
 							 PROKIND_FUNCTION,
 							 false, /* security_definer */
 							 false, /* leakproof */
@@ -1922,10 +1925,11 @@ makeMultirangeConstructors(const char *name, Oid namespace,
 							 F_FMGR_INTERNAL_VALIDATOR,
 							 "multirange_constructor2", /* prosrc */
 							 NULL,	/* probin */
+							 NULL,	/* prosqlbody */
 							 PROKIND_FUNCTION,
 							 false, /* security_definer */
 							 false, /* leakproof */
-							 false, /* isStrict */
+							 true, /* isStrict */
 							 PROVOLATILE_IMMUTABLE, /* volatility */
 							 PROPARALLEL_SAFE,	/* parallel safety */
 							 argtypes,	/* parameterTypes */

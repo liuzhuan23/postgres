@@ -11,6 +11,7 @@ test: int4
 test: int8
 test: oid
 test: xid
+test: mvcc
 test: float4
 test: float8
 test: bit
@@ -108,6 +109,8 @@ test: delete
 test: namespace
 test: prepared_xacts
 test: brin
+test: brin_bloom
+test: brin_multi
 test: gin
 test: gist
 test: spgist
@@ -148,7 +151,6 @@ test: stats_ext
 test: collate.linux.utf8
 test: select_parallel
 test: write_parallel
-test: insert_parallel
 test: publication
 test: subscription
 test: select_views
@@ -202,6 +204,7 @@ test: partition_info
 test: tuplesort
 test: explain
 test: compression
+test: resultcache
 test: event_trigger
 test: oidjoins
 test: fast_default

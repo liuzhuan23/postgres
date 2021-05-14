@@ -1065,32 +1065,6 @@ IsInParallelMode(void)
 }
 
 /*
- *	PrepareParallelModePlanExec
- *
- * Prepare for entering parallel mode plan execution, based on command-type.
- */
-void
-PrepareParallelModePlanExec(CmdType commandType)
-{
-	if (IsModifySupportedInParallelMode(commandType))
-	{
-		Assert(!IsInParallelMode());
-
-		/*
-		 * Prepare for entering parallel mode by assigning a TransactionId.
-		 * Failure to do this now would result in heap_insert() subsequently
-		 * attempting to assign a TransactionId whilst in parallel-mode, which
-		 * is not allowed.
-		 *
-		 * This approach has a disadvantage in that if the underlying SELECT
-		 * does not return any rows, then the TransactionId is not used,
-		 * however that shouldn't happen in practice in many cases.
-		 */
-		(void) GetCurrentTransactionId();
-	}
-}
-
-/*
  *	CommandCounterIncrement
  */
 void
@@ -1472,7 +1446,7 @@ RecordTransactionCommit(void)
 
 		TransactionTreeSetCommitTsData(xid, nchildren, children,
 									   replorigin_session_origin_timestamp,
-									   replorigin_session_origin, false);
+									   replorigin_session_origin);
 	}
 
 	/*
@@ -6183,7 +6157,7 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 
 	/* Set the transaction commit timestamp and metadata */
 	TransactionTreeSetCommitTsData(xid, parsed->nsubxacts, parsed->subxacts,
-								   commit_time, origin_id, false);
+								   commit_time, origin_id);
 
 	if (standbyState == STANDBY_DISABLED)
 	{

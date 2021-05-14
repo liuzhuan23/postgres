@@ -128,7 +128,8 @@
     <command>DELETE</command> will continue to function normally, though you
     will not be able to modify the definition of a table with commands such as
     <command>ALTER TABLE</command> while it is being vacuumed.)
-    <command>VACUUM FULL</command> requires exclusive lock on the table it is
+    <command>VACUUM FULL</command> requires an
+    <literal>ACCESS EXCLUSIVE</literal> lock on the table it is
     working on, and therefore cannot be done in parallel with other use
     of the table.  Generally, therefore,
     administrators should strive to use standard <command>VACUUM</command> and
@@ -184,7 +185,7 @@
     never issue <command>VACUUM FULL</command>.  In this approach, the idea
     is not to keep tables at their minimum size, but to maintain steady-state
     usage of disk space: each table occupies space equivalent to its
-    minimum size plus however much space gets used up between vacuumings.
+    minimum size plus however much space gets used up between vacuum runs.
     Although <command>VACUUM FULL</command> can be used to shrink a table back
     to its minimum size and return the disk space to the operating system,
     there is not much point in this if the table will just grow again in the
@@ -231,7 +232,8 @@
     or one of the table-rewriting variants of
     <link linkend="sql-altertable"><command>ALTER TABLE</command></link>.
     These commands rewrite an entire new copy of the table and build
-    new indexes for it.  All these options require exclusive lock.  Note that
+    new indexes for it.  All these options require an
+    <literal>ACCESS EXCLUSIVE</literal> lock.  Note that
     they also temporarily use extra disk space approximately equal to the size
     of the table, since the old copies of the table and indexes can't be
     released until the new ones are complete.
@@ -328,7 +330,8 @@
 
     <para>
      Also, by default there is limited information available about
-     the selectivity of functions.  However, if you create an expression
+     the selectivity of functions.  However, if you create a statistics
+     object or an expression
      index that uses a function call, useful statistics will be
      gathered about the function, which can greatly improve query
      plans that use the expression index.
@@ -717,7 +720,7 @@ HINT:  Stop the postmaster and vacuum that database in single-user mode.
     <productname>PostgreSQL</productname> has an optional but highly
     recommended feature called <firstterm>autovacuum</firstterm>,
     whose purpose is to automate the execution of
-    <command>VACUUM</command> and <command>ANALYZE </command> commands.
+    <command>VACUUM</command> and <command>ANALYZE</command> commands.
     When enabled, autovacuum checks for
     tables that have had a large number of inserted, updated or deleted
     tuples.  These checks use the statistics collection facility;

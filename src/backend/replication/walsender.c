@@ -1703,6 +1703,7 @@ static void
 ProcessRepliesIfAny(void)
 {
 	unsigned char firstchar;
+	int			maxmsglen;
 	int			r;
 	bool		received = false;
 
@@ -1732,9 +1733,28 @@ ProcessRepliesIfAny(void)
 			break;
 		}
 
+		/* Validate message type and set packet size limit */
+		switch (firstchar)
+		{
+			case 'd':
+				maxmsglen = PQ_LARGE_MESSAGE_LIMIT;
+				break;
+			case 'c':
+			case 'X':
+				maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
+				break;
+			default:
+				ereport(FATAL,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("invalid standby message type \"%c\"",
+								firstchar)));
+				maxmsglen = 0;	/* keep compiler quiet */
+				break;
+		}
+
 		/* Read the message contents */
 		resetStringInfo(&reply_message);
-		if (pq_getmessage(&reply_message, 0))
+		if (pq_getmessage(&reply_message, maxmsglen))
 		{
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
@@ -1742,7 +1762,7 @@ ProcessRepliesIfAny(void)
 			proc_exit(0);
 		}
 
-		/* Handle the very limited subset of commands expected in this phase */
+		/* ... and process it */
 		switch (firstchar)
 		{
 				/*
@@ -1775,10 +1795,7 @@ ProcessRepliesIfAny(void)
 				proc_exit(0);
 
 			default:
-				ereport(FATAL,
-						(errcode(ERRCODE_PROTOCOL_VIOLATION),
-						 errmsg("invalid standby message type \"%c\"",
-								firstchar)));
+				Assert(false);	/* NOT REACHED */
 		}
 	}
 
@@ -3355,7 +3372,7 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 		memset(nulls, 0, sizeof(nulls));
 		values[0] = Int32GetDatum(pid);
 
-		if (!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_STATS))
+		if (!is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
 		{
 			/*
 			 * Only superusers and members of pg_read_all_stats can see

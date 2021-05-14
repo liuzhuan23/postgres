@@ -661,6 +661,11 @@ PostmasterMain(int argc, char *argv[])
 	pqsignal_pm(SIGCHLD, reaper);	/* handle child termination */
 
 #ifdef SIGURG
+	/*
+	 * Ignore SIGURG for now.  Child processes may change this (see
+	 * InitializeLatchSupport), but they will not receive any such signals
+	 * until they wait on a latch.
+	 */
 	pqsignal_pm(SIGURG, SIG_IGN);	/* ignored */
 #endif
 
@@ -2298,6 +2303,18 @@ retry1:
 					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
 					 errmsg("the database system is starting up")));
 			break;
+		case CAC_NOTCONSISTENT:
+			if (EnableHotStandby)
+				ereport(FATAL,
+						(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+						 errmsg("the database system is not yet accepting connections"),
+						 errdetail("Consistent recovery state has not been yet reached.")));
+			else
+				ereport(FATAL,
+						(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+						 errmsg("the database system is not accepting connections"),
+						 errdetail("Hot standby mode is disabled.")));
+			break;
 		case CAC_SHUTDOWN:
 			ereport(FATAL,
 					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
@@ -2439,10 +2456,11 @@ canAcceptConnections(int backend_type)
 	{
 		if (Shutdown > NoShutdown)
 			return CAC_SHUTDOWN;	/* shutdown is pending */
-		else if (!FatalError &&
-				 (pmState == PM_STARTUP ||
-				  pmState == PM_RECOVERY))
+		else if (!FatalError && pmState == PM_STARTUP)
 			return CAC_STARTUP; /* normal startup */
+		else if (!FatalError && pmState == PM_RECOVERY)
+			return CAC_NOTCONSISTENT;	/* not yet at consistent recovery
+										 * state */
 		else
 			return CAC_RECOVERY;	/* else must be crash recovery */
 	}

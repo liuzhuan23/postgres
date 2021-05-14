@@ -65,7 +65,6 @@ typedef struct RelationData
 	bool		rd_indexvalid;	/* is rd_indexlist valid? (also rd_pkindex and
 								 * rd_replidindex) */
 	bool		rd_statvalid;	/* is rd_statlist valid? */
-	bool		rd_version_checked; /* has version check been done yet? */
 
 	/*----------
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
@@ -130,6 +129,19 @@ typedef struct RelationData
 	/* data managed by RelationGetPartitionDesc: */
 	PartitionDesc rd_partdesc;	/* partition descriptor, or NULL */
 	MemoryContext rd_pdcxt;		/* private context for rd_partdesc, if any */
+
+	/* Same as above, for partdescs that omit detached partitions */
+	PartitionDesc rd_partdesc_nodetached;	/* partdesc w/o detached parts */
+	MemoryContext rd_pddcxt;	/* for rd_partdesc_nodetached, if any */
+
+	/*
+	 * pg_inherits.xmin of the partition that was excluded in
+	 * rd_partdesc_nodetached.  This informs a future user of that partdesc:
+	 * if this value is not in progress for the active snapshot, then the
+	 * partdesc can be used, otherwise they have to build a new one.  (This
+	 * matches what find_inheritance_children_extended would do).
+	 */
+	TransactionId rd_partdesc_nodetached_xmin;
 
 	/* data managed by RelationGetPartitionQual: */
 	List	   *rd_partcheck;	/* partition CHECK quals */
@@ -308,8 +320,6 @@ typedef struct StdRdOptions
 	int			parallel_workers;	/* max number of parallel workers */
 	bool		vacuum_index_cleanup;	/* enables index vacuuming and cleanup */
 	bool		vacuum_truncate;	/* enables vacuum to truncate a relation */
-	bool		parallel_insert_enabled;	/* enables planner's use of
-											 * parallel insert */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -434,29 +444,6 @@ typedef struct ViewOptions
 	 (relation)->rd_options &&												\
 	 ((ViewOptions *) (relation)->rd_options)->check_option ==				\
 	  VIEW_OPTION_CHECK_OPTION_CASCADED)
-
-/*
- * PartitionedTableRdOptions
- *		Contents of rd_options for partitioned tables
- */
-typedef struct PartitionedTableRdOptions
-{
-	int32		vl_len_;		/* varlena header (do not touch directly!) */
-	bool		parallel_insert_enabled;	/* enables planner's use of
-											 * parallel insert */
-} PartitionedTableRdOptions;
-
-/*
- * RelationGetParallelInsert
- *		Returns the relation's parallel_insert_enabled reloption setting.
- *		Note multiple eval of argument!
- */
-#define RelationGetParallelInsert(relation, defaultpd) 						\
-	((relation)->rd_options ?												\
-	 (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?				\
-	 ((PartitionedTableRdOptions *) (relation)->rd_options)->parallel_insert_enabled : \
-	 ((StdRdOptions *) (relation)->rd_options)->parallel_insert_enabled) :		\
-	 (defaultpd))
 
 /*
  * RelationIsValid
@@ -672,7 +659,8 @@ typedef struct PartitionedTableRdOptions
  *		WAL stream.
  *
  * We don't log information for unlogged tables (since they don't WAL log
- * anyway) and for system tables (their content is hard to make sense of, and
+ * anyway), for foreign tables (since they don't WAL log, either),
+ * and for system tables (their content is hard to make sense of, and
  * it would complicate decoding slightly for little gain). Note that we *do*
  * log information for user defined catalog tables since they presumably are
  * interesting to the user...
@@ -680,6 +668,7 @@ typedef struct PartitionedTableRdOptions
 #define RelationIsLogicallyLogged(relation) \
 	(XLogLogicalInfoActive() && \
 	 RelationNeedsWAL(relation) && \
+	 (relation)->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&	\
 	 !IsCatalogRelation(relation))
 
 /* routines in utils/cache/relcache.c */

@@ -83,8 +83,8 @@ VACUUM [ FULL ] [ FREEZE ] [ VERBOSE ] [ ANALYZE ] [ <replaceable class="paramet
    specify parallel workers as zero.  <command>VACUUM FULL</command> rewrites
    the entire contents of the table into a new disk file with no extra space,
    allowing unused space to be returned to the operating system.  This form is
-   much slower and requires an exclusive lock on each table while it is being
-   processed.
+   much slower and requires an <literal>ACCESS EXCLUSIVE</literal> lock on
+   each table while it is being processed.
   </para>
 
   <para>
@@ -398,7 +398,7 @@ VACUUM [ FULL ] [ FREEZE ] [ VERBOSE ] [ ANALYZE ] [ <replaceable class="paramet
     <literal>FULL</literal> option will report its progress in the
     <structname>pg_stat_progress_vacuum</structname> view. Backends running
     <command>VACUUM FULL</command> will instead report their progress in the
-    <structname>pg_stat_progress_cluster</structname> view. See 
+    <structname>pg_stat_progress_cluster</structname> view. See
     <xref linkend="vacuum-progress-reporting"/> and
     <xref linkend="cluster-progress-reporting"/> for details.
    </para>

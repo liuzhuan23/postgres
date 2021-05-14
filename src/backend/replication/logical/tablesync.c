@@ -758,7 +758,7 @@ fetch_remote_table_info(char *nspname, char *relname,
 
 	if (res->status != WALRCV_OK_TUPLES)
 		ereport(ERROR,
-				(errmsg("could not fetch table info for table \"%s.%s\": %s",
+				(errmsg("could not fetch table info for table \"%s.%s\" from publisher: %s",
 						nspname, relname, res->err)));
 
 	/* We don't know the number of rows coming, so allocate enough space. */
@@ -1043,8 +1043,8 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 					  0, NULL);
 	if (res->status != WALRCV_OK_COMMAND)
 		ereport(ERROR,
-				(errmsg("table copy could not start transaction on publisher"),
-				 errdetail("The error was: %s", res->err)));
+				(errmsg("table copy could not start transaction on publisher: %s",
+						res->err)));
 	walrcv_clear_result(res);
 
 	/*
@@ -1103,8 +1103,8 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	res = walrcv_exec(wrconn, "COMMIT", 0, NULL);
 	if (res->status != WALRCV_OK_COMMAND)
 		ereport(ERROR,
-				(errmsg("table copy could not finish transaction on publisher"),
-				 errdetail("The error was: %s", res->err)));
+				(errmsg("table copy could not finish transaction on publisher: %s",
+						res->err)));
 	walrcv_clear_result(res);
 
 	table_close(rel, NoLock);

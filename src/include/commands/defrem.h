@@ -65,9 +65,11 @@ extern void interpret_function_parameter_list(ParseState *pstate,
 											  Oid languageOid,
 											  ObjectType objtype,
 											  oidvector **parameterTypes,
+											  List **parameterTypes_list,
 											  ArrayType **allParameterTypes,
 											  ArrayType **parameterModes,
 											  ArrayType **parameterNames,
+											  List **inParameterNames_list,
 											  List **parameterDefaults,
 											  Oid *variadicArgType,
 											  Oid *requiredResultType);
@@ -81,9 +83,7 @@ extern ObjectAddress AlterOperator(AlterOperatorStmt *stmt);
 extern ObjectAddress CreateStatistics(CreateStatsStmt *stmt);
 extern ObjectAddress AlterStatistics(AlterStatsStmt *stmt);
 extern void RemoveStatisticsById(Oid statsOid);
-extern void UpdateStatisticsForTypeChange(Oid statsOid,
-										  Oid relationOid, int attnum,
-										  Oid oldColumnType, Oid newColumnType);
+extern Oid StatisticsGetRelation(Oid statId, bool missing_ok);
 
 /* commands/aggregatecmds.c */
 extern ObjectAddress DefineAggregate(ParseState *pstate, List *name, List *args, bool oldstyle,
