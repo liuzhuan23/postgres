@@ -349,9 +349,9 @@ end_heap_rewrite(RewriteState state)
 			buf = encrypt_buf.data;
 		}
 
-		RelationOpenSmgr(state->rs_new_rel);
-
 		PageSetChecksumInplace(buf, state->rs_blockno);
+
+		RelationOpenSmgr(state->rs_new_rel);
 		smgrextend(state->rs_new_rel->rd_smgr, MAIN_FORKNUM, state->rs_blockno,
 				   buf, true);
 	}
@@ -364,7 +364,11 @@ end_heap_rewrite(RewriteState state)
 	 * wrote before the checkpoint.
 	 */
 	if (RelationNeedsWAL(state->rs_new_rel))
+	{
+		/* for an empty table, this could be first smgr access */
+		RelationOpenSmgr(state->rs_new_rel);
 		smgrimmedsync(state->rs_new_rel->rd_smgr, MAIN_FORKNUM);
+	}
 
 	logical_end_heap_rewrite(state);
 

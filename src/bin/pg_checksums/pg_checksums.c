@@ -234,6 +234,14 @@ scan_file(const char *fn, BlockNumber segmentno)
 		blocks++;
 
 		/*
+		 * Since the file size is counted as total_size for progress status
+		 * information, the sizes of all pages including new ones in the file
+		 * should be counted as current_size. Otherwise the progress reporting
+		 * calculated using those counters may not reach 100%.
+		 */
+		current_size += r;
+
+		/*
 		 * New pages have no checksum yet, unless it's encrypted - see
 		 * PageSetChecksumCopy() for explanation.
 		 */
@@ -241,7 +249,6 @@ scan_file(const char *fn, BlockNumber segmentno)
 			continue;
 
 		csum = pg_checksum_page(buf.data, blockno + segmentno * RELSEG_SIZE);
-		current_size += r;
 		if (mode == PG_MODE_CHECK)
 		{
 			if (csum != header->pd_checksum)

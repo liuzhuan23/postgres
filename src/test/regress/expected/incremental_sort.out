@@ -676,6 +676,21 @@ select * from (select * from t order by a) s order by a, b limit 70;
 (70 rows)
 
 -- Checks case where we hit a group boundary at the last tuple of a batch.
+-- Because the full sort state is bounded, we scan 64 tuples (the mode
+-- transition point) but only retain 5. Thus when we transition modes, all
+-- tuples in the full sort state have different prefix keys.
+explain (costs off) select * from (select * from t order by a) s order by a, b limit 5;
+           QUERY PLAN            
+---------------------------------
+ Limit
+   ->  Incremental Sort
+         Sort Key: t.a, t.b
+         Presorted Key: t.a
+         ->  Sort
+               Sort Key: t.a
+               ->  Seq Scan on t
+(7 rows)
+
 select * from (select * from t order by a) s order by a, b limit 5;
  a | b 
 ---+---
@@ -1561,6 +1576,32 @@ order by 1, 2;
                ->  Parallel Index Scan using tenk1_unique1 on tenk1
    ->  Function Scan on generate_series
 (7 rows)
+
+-- Parallel sort with an aggregate that can be safely generated in parallel,
+-- but we can't sort by partial aggregate values.
+explain (costs off) select count(*)
+from tenk1 t1
+join tenk1 t2 on t1.unique1 = t2.unique2
+join tenk1 t3 on t2.unique1 = t3.unique1
+order by count(*);
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: (count(*))
+   ->  Finalize Aggregate
+         ->  Gather
+               Workers Planned: 2
+               ->  Partial Aggregate
+                     ->  Parallel Hash Join
+                           Hash Cond: (t2.unique1 = t3.unique1)
+                           ->  Parallel Hash Join
+                                 Hash Cond: (t1.unique1 = t2.unique2)
+                                 ->  Parallel Index Only Scan using tenk1_unique1 on tenk1 t1
+                                 ->  Parallel Hash
+                                       ->  Parallel Index Scan using tenk1_unique2 on tenk1 t2
+                           ->  Parallel Hash
+                                 ->  Parallel Index Only Scan using tenk1_unique1 on tenk1 t3
+(15 rows)
 
 -- Parallel sort but with expression (correlated subquery) that
 -- is prohibited in parallel plans.
