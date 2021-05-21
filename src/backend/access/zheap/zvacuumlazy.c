@@ -1130,7 +1130,7 @@ lazy_scan_zheap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 			}
 			else
 			{
-				Assert(nindexes > 0);
+				Assert(vacrel->nindexes > 0);
 
 				/* Remove tuples from zheap and write the undo for it. */
 				tupindex = lazy_vacuum_zpage_with_undo(vacrel->rel, blkno, buf,
