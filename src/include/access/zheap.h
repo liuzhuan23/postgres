@@ -334,7 +334,7 @@ extern void process_and_execute_undo_actions_page(UndoRecPtr from_urecptr,
 
 /* in zheap/zvacuumlazy.c */
 struct VacuumParams;
-extern void lazy_vacuum_zheap_rel(Relation onerel, struct VacuumParams *params,
+extern void lazy_vacuum_zheap_rel(Relation rel, struct VacuumParams *params,
 								  BufferAccessStrategy bstrategy);
 
 /* in zheap/zundo.c */

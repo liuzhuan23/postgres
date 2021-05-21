@@ -156,7 +156,7 @@ MemoryContext ApplyContext = NULL;
 /* per stream context for streaming transactions */
 static MemoryContext LogicalStreamingContext = NULL;
 
-WalReceiverConn *wrconn = NULL;
+WalReceiverConn *LogRepWorkerWalRcvConn = NULL;
 
 Subscription *MySubscription = NULL;
 bool		MySubscriptionValid = false;
@@ -338,10 +338,13 @@ handle_streamed_transaction(LogicalRepMsgType action, StringInfo s)
  * Executor state preparation for evaluation of constraint expressions,
  * indexes and triggers.
  *
- * This is based on similar code in copy.c
+ * resultRelInfo is a ResultRelInfo for the relation to be passed to the
+ * executor routines.  The caller must open and close any indexes to be
+ * updated independently of the relation registered here.
  */
 static EState *
-create_estate_for_relation(LogicalRepRelMapEntry *rel)
+create_estate_for_relation(LogicalRepRelMapEntry *rel,
+						   ResultRelInfo **resultRelInfo)
 {
 	EState	   *estate;
 	RangeTblEntry *rte;
@@ -355,12 +358,48 @@ create_estate_for_relation(LogicalRepRelMapEntry *rel)
 	rte->rellockmode = AccessShareLock;
 	ExecInitRangeTable(estate, list_make1(rte));
 
+	*resultRelInfo = makeNode(ResultRelInfo);
+
+	/*
+	 * Use Relation opened by logicalrep_rel_open() instead of opening it
+	 * again.
+	 */
+	InitResultRelInfo(*resultRelInfo, rel->localrel, 1, NULL, 0);
+
+	/*
+	 * We put the ResultRelInfo in the es_opened_result_relations list, even
+	 * though we don't populate the es_result_relations array.  That's a bit
+	 * bogus, but it's enough to make ExecGetTriggerResultRel() find them.
+	 * Also, because we did not open the Relation ourselves here, there is no
+	 * need to worry about closing it.
+	 *
+	 * ExecOpenIndices() is not called here either, each execution path doing
+	 * an apply operation being responsible for that.
+	 */
+	estate->es_opened_result_relations =
+		lappend(estate->es_opened_result_relations, *resultRelInfo);
+
 	estate->es_output_cid = GetCurrentCommandId(true);
 
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();
 
 	return estate;
+}
+
+/*
+ * Finish any operations related to the executor state created by
+ * create_estate_for_relation().
+ */
+static void
+finish_estate(EState *estate)
+{
+	/* Handle any queued AFTER triggers. */
+	AfterTriggerEndQuery(estate);
+
+	/* Cleanup. */
+	ExecResetTupleTable(estate->es_tupleTable, false);
+	FreeExecutorState(estate);
 }
 
 /*
@@ -1168,12 +1207,10 @@ apply_handle_insert(StringInfo s)
 	}
 
 	/* Initialize the executor state. */
-	estate = create_estate_for_relation(rel);
+	estate = create_estate_for_relation(rel, &resultRelInfo);
 	remoteslot = ExecInitExtraTupleSlot(estate,
 										RelationGetDescr(rel->localrel),
 										&TTSOpsVirtual);
-	resultRelInfo = makeNode(ResultRelInfo);
-	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0);
 
 	/* Input functions may need an active snapshot, so get one */
 	PushActiveSnapshot(GetTransactionSnapshot());
@@ -1194,11 +1231,7 @@ apply_handle_insert(StringInfo s)
 
 	PopActiveSnapshot();
 
-	/* Handle queued AFTER triggers. */
-	AfterTriggerEndQuery(estate);
-
-	ExecResetTupleTable(estate->es_tupleTable, false);
-	FreeExecutorState(estate);
+	finish_estate(estate);
 
 	logicalrep_rel_close(rel, NoLock);
 
@@ -1293,12 +1326,10 @@ apply_handle_update(StringInfo s)
 	check_relation_updatable(rel);
 
 	/* Initialize the executor state. */
-	estate = create_estate_for_relation(rel);
+	estate = create_estate_for_relation(rel, &resultRelInfo);
 	remoteslot = ExecInitExtraTupleSlot(estate,
 										RelationGetDescr(rel->localrel),
 										&TTSOpsVirtual);
-	resultRelInfo = makeNode(ResultRelInfo);
-	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0);
 
 	/*
 	 * Populate updatedCols so that per-column triggers can fire, and so
@@ -1346,11 +1377,7 @@ apply_handle_update(StringInfo s)
 
 	PopActiveSnapshot();
 
-	/* Handle queued AFTER triggers. */
-	AfterTriggerEndQuery(estate);
-
-	ExecResetTupleTable(estate->es_tupleTable, false);
-	FreeExecutorState(estate);
+	finish_estate(estate);
 
 	logicalrep_rel_close(rel, NoLock);
 
@@ -1451,12 +1478,10 @@ apply_handle_delete(StringInfo s)
 	check_relation_updatable(rel);
 
 	/* Initialize the executor state. */
-	estate = create_estate_for_relation(rel);
+	estate = create_estate_for_relation(rel, &resultRelInfo);
 	remoteslot = ExecInitExtraTupleSlot(estate,
 										RelationGetDescr(rel->localrel),
 										&TTSOpsVirtual);
-	resultRelInfo = makeNode(ResultRelInfo);
-	InitResultRelInfo(resultRelInfo, rel->localrel, 1, NULL, 0);
 
 	estate->es_snapshot = GetTransactionSnapshot();
 	PushActiveSnapshot(estate->es_snapshot);
@@ -1476,11 +1501,7 @@ apply_handle_delete(StringInfo s)
 
 	PopActiveSnapshot();
 
-	/* Handle queued AFTER triggers. */
-	AfterTriggerEndQuery(estate);
-
-	ExecResetTupleTable(estate->es_tupleTable, false);
-	FreeExecutorState(estate);
+	finish_estate(estate);
 
 	logicalrep_rel_close(rel, NoLock);
 
@@ -1585,7 +1606,7 @@ apply_handle_tuple_routing(ResultRelInfo *relinfo,
 	mtstate->ps.state = estate;
 	mtstate->operation = operation;
 	mtstate->resultRelInfo = relinfo;
-	proute = ExecSetupPartitionTupleRouting(estate, mtstate, parentrel);
+	proute = ExecSetupPartitionTupleRouting(estate, parentrel);
 
 	/*
 	 * Find the partition to which the "search tuple" belongs.
@@ -1799,6 +1820,7 @@ apply_handle_truncate(StringInfo s)
 	List	   *relids = NIL;
 	List	   *relids_logged = NIL;
 	ListCell   *lc;
+	LOCKMODE    lockmode = AccessExclusiveLock;
 
 	if (handle_streamed_transaction(LOGICAL_REP_MSG_TRUNCATE, s))
 		return;
@@ -1812,14 +1834,14 @@ apply_handle_truncate(StringInfo s)
 		LogicalRepRelId relid = lfirst_oid(lc);
 		LogicalRepRelMapEntry *rel;
 
-		rel = logicalrep_rel_open(relid, RowExclusiveLock);
+		rel = logicalrep_rel_open(relid, lockmode);
 		if (!should_apply_changes_for_rel(rel))
 		{
 			/*
 			 * The relation can't become interesting in the middle of the
 			 * transaction so it's safe to unlock it.
 			 */
-			logicalrep_rel_close(rel, RowExclusiveLock);
+			logicalrep_rel_close(rel, lockmode);
 			continue;
 		}
 
@@ -1837,7 +1859,7 @@ apply_handle_truncate(StringInfo s)
 		{
 			ListCell   *child;
 			List	   *children = find_all_inheritors(rel->localreloid,
-													   RowExclusiveLock,
+													   lockmode,
 													   NULL);
 
 			foreach(child, children)
@@ -1857,7 +1879,7 @@ apply_handle_truncate(StringInfo s)
 				 */
 				if (RELATION_IS_OTHER_TEMP(childrel))
 				{
-					table_close(childrel, RowExclusiveLock);
+					table_close(childrel, lockmode);
 					continue;
 				}
 
@@ -1876,8 +1898,11 @@ apply_handle_truncate(StringInfo s)
 	 * to replaying changes without further cascading. This might be later
 	 * changeable with a user specified option.
 	 */
-	ExecuteTruncateGuts(rels, relids, relids_logged, DROP_RESTRICT, restart_seqs);
-
+	ExecuteTruncateGuts(rels,
+						relids,
+						relids_logged,
+						DROP_RESTRICT,
+						restart_seqs);
 	foreach(lc, remote_rels)
 	{
 		LogicalRepRelMapEntry *rel = lfirst(lc);
@@ -1939,6 +1964,15 @@ apply_dispatch(StringInfo s)
 
 		case LOGICAL_REP_MSG_ORIGIN:
 			apply_handle_origin(s);
+			return;
+
+		case LOGICAL_REP_MSG_MESSAGE:
+
+			/*
+			 * Logical replication does not use generic logical messages yet.
+			 * Although, it could be used by other applications that use this
+			 * output plugin.
+			 */
 			return;
 
 		case LOGICAL_REP_MSG_STREAM_START:
@@ -2095,7 +2129,7 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 
 		MemoryContextSwitchTo(ApplyMessageContext);
 
-		len = walrcv_receive(wrconn, &buf, &fd);
+		len = walrcv_receive(LogRepWorkerWalRcvConn, &buf, &fd);
 
 		if (len != 0)
 		{
@@ -2175,7 +2209,7 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 					MemoryContextReset(ApplyMessageContext);
 				}
 
-				len = walrcv_receive(wrconn, &buf, &fd);
+				len = walrcv_receive(LogRepWorkerWalRcvConn, &buf, &fd);
 			}
 		}
 
@@ -2281,7 +2315,7 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 	}
 
 	/* All done */
-	walrcv_endstreaming(wrconn, &tli);
+	walrcv_endstreaming(LogRepWorkerWalRcvConn, &tli);
 }
 
 /*
@@ -2365,7 +2399,8 @@ send_feedback(XLogRecPtr recvpos, bool force, bool requestReply)
 		 LSN_FORMAT_ARGS(writepos),
 		 LSN_FORMAT_ARGS(flushpos));
 
-	walrcv_send(wrconn, reply_message->data, reply_message->len);
+	walrcv_send(LogRepWorkerWalRcvConn,
+				reply_message->data, reply_message->len);
 
 	if (recvpos > last_recvpos)
 		last_recvpos = recvpos;
@@ -3059,9 +3094,9 @@ ApplyWorkerMain(Datum main_arg)
 		origin_startpos = replorigin_session_get_progress(false);
 		CommitTransactionCommand();
 
-		wrconn = walrcv_connect(MySubscription->conninfo, true, MySubscription->name,
-								&err);
-		if (wrconn == NULL)
+		LogRepWorkerWalRcvConn = walrcv_connect(MySubscription->conninfo, true,
+												MySubscription->name, &err);
+		if (LogRepWorkerWalRcvConn == NULL)
 			ereport(ERROR,
 					(errmsg("could not connect to the publisher: %s", err)));
 
@@ -3069,7 +3104,7 @@ ApplyWorkerMain(Datum main_arg)
 		 * We don't really use the output identify_system for anything but it
 		 * does some initializations on the upstream so let's still call it.
 		 */
-		(void) walrcv_identify_system(wrconn, &startpointTLI);
+		(void) walrcv_identify_system(LogRepWorkerWalRcvConn, &startpointTLI);
 	}
 
 	/*
@@ -3085,14 +3120,14 @@ ApplyWorkerMain(Datum main_arg)
 	options.startpoint = origin_startpos;
 	options.slotname = myslotname;
 	options.proto.logical.proto_version =
-		walrcv_server_version(wrconn) >= 140000 ?
+		walrcv_server_version(LogRepWorkerWalRcvConn) >= 140000 ?
 		LOGICALREP_PROTO_STREAM_VERSION_NUM : LOGICALREP_PROTO_VERSION_NUM;
 	options.proto.logical.publication_names = MySubscription->publications;
 	options.proto.logical.binary = MySubscription->binary;
 	options.proto.logical.streaming = MySubscription->stream;
 
 	/* Start normal logical streaming replication. */
-	walrcv_startstreaming(wrconn, &options);
+	walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
 
 	/* Run the main loop. */
 	LogicalRepApplyLoop(origin_startpos);

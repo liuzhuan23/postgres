@@ -897,8 +897,9 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	 * rejected a generic plan, it's possible to reach here with is_valid
 	 * false due to an invalidation while making the generic plan.  In theory
 	 * the invalidation must be a false positive, perhaps a consequence of an
-	 * sinval reset event or the debug_invalidate_system_caches_always code.  But for
-	 * safety, let's treat it as real and redo the RevalidateCachedQuery call.
+	 * sinval reset event or the debug_invalidate_system_caches_always code.
+	 * But for safety, let's treat it as real and redo the
+	 * RevalidateCachedQuery call.
 	 */
 	if (!plansource->is_valid)
 		qlist = RevalidateCachedQuery(plansource, queryEnv);
@@ -1735,23 +1736,6 @@ QueryListGetPrimaryStmt(List *stmts)
 	return NULL;
 }
 
-static void
-AcquireExecutorLocksOnPartitions(List *partitionOids, int lockmode,
-								 bool acquire)
-{
-	ListCell   *lc;
-
-	foreach(lc, partitionOids)
-	{
-		Oid			partOid = lfirst_oid(lc);
-
-		if (acquire)
-			LockRelationOid(partOid, lockmode);
-		else
-			UnlockRelationOid(partOid, lockmode);
-	}
-}
-
 /*
  * AcquireExecutorLocks: acquire locks needed for execution of a cached plan;
  * or release them if acquire is false.
@@ -1765,8 +1749,6 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 	{
 		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc1);
 		ListCell   *lc2;
-		Index		rti,
-					resultRelation = 0;
 
 		if (plannedstmt->commandType == CMD_UTILITY)
 		{
@@ -1784,9 +1766,6 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 			continue;
 		}
 
-		rti = 1;
-		if (plannedstmt->resultRelations)
-			resultRelation = linitial_int(plannedstmt->resultRelations);
 		foreach(lc2, plannedstmt->rtable)
 		{
 			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc2);
@@ -1804,14 +1783,6 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 				LockRelationOid(rte->relid, rte->rellockmode);
 			else
 				UnlockRelationOid(rte->relid, rte->rellockmode);
-
-			/* Lock partitions ahead of modifying them in parallel mode. */
-			if (rti == resultRelation &&
-				plannedstmt->partitionOids != NIL)
-				AcquireExecutorLocksOnPartitions(plannedstmt->partitionOids,
-												 rte->rellockmode, acquire);
-
-			rti++;
 		}
 	}
 }
@@ -2020,8 +1991,7 @@ PlanCacheRelCallback(Datum arg, Oid relid)
 				if (plannedstmt->commandType == CMD_UTILITY)
 					continue;	/* Ignore utility statements */
 				if ((relid == InvalidOid) ? plannedstmt->relationOids != NIL :
-					(list_member_oid(plannedstmt->relationOids, relid) ||
-					 list_member_oid(plannedstmt->partitionOids, relid)))
+					list_member_oid(plannedstmt->relationOids, relid))
 				{
 					/* Invalidate the generic plan only */
 					plansource->gplan->is_valid = false;

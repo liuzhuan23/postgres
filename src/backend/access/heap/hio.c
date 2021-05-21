@@ -293,9 +293,13 @@ RelationAddExtraBlocks(Relation relation, BulkInsertState bistate)
  *	happen if space is freed in that page after heap_update finds there's not
  *	enough there).  In that case, the page will be pinned and locked only once.
  *
- *	For the vmbuffer and vmbuffer_other arguments, we avoid deadlock by
- *	locking them only after locking the corresponding heap page, and taking
- *	no further lwlocks while they are locked.
+ *	We also handle the possibility that the all-visible flag will need to be
+ *	cleared on one or both pages.  If so, pin on the associated visibility map
+ *	page must be acquired before acquiring buffer lock(s), to avoid possibly
+ *	doing I/O while holding buffer locks.  The pins are passed back to the
+ *	caller using the input-output arguments vmbuffer and vmbuffer_other.
+ *	Note that in some cases the caller might have already acquired such pins,
+ *	which is indicated by these arguments not being InvalidBuffer on entry.
  *
  *	We normally use FSM to help us find free space.  However,
  *	if HEAP_INSERT_SKIP_FSM is specified, we just append a new empty page to
@@ -317,10 +321,10 @@ RelationAddExtraBlocks(Relation relation, BulkInsertState bistate)
  *	BULKWRITE buffer selection strategy object to the buffer manager.
  *	Passing NULL for bistate selects the default behavior.
  *
- *	We always try to avoid filling existing pages further than the fillfactor.
- *	This is OK since this routine is not consulted when updating a tuple and
- *	keeping it on the same page, which is the scenario fillfactor is meant
- *	to reserve space for.
+ *	We don't fill existing pages further than the fillfactor, except for large
+ *	tuples in nearly-empty pages.  This is OK since this routine is not
+ *	consulted when updating a tuple and keeping it on the same page, which is
+ *	the scenario fillfactor is meant to reserve space for.
  *
  *	ereport(ERROR) is allowed here, so this routine *must* be called
  *	before any (unlogged) changes are made in buffer pool.
@@ -334,8 +338,10 @@ RelationGetBufferForTuple(Relation relation, Size len,
 	bool		use_fsm = !(options & HEAP_INSERT_SKIP_FSM);
 	Buffer		buffer = InvalidBuffer;
 	Page		page;
-	Size		pageFreeSpace = 0,
-				saveFreeSpace = 0;
+	Size		nearlyEmptyFreeSpace,
+				pageFreeSpace = 0,
+				saveFreeSpace = 0,
+				targetFreeSpace = 0;
 	BlockNumber targetBlock,
 				otherBlock;
 	bool		needLock;
@@ -358,6 +364,19 @@ RelationGetBufferForTuple(Relation relation, Size len,
 	saveFreeSpace = RelationGetTargetPageFreeSpace(relation,
 												   HEAP_DEFAULT_FILLFACTOR);
 
+	/*
+	 * Since pages without tuples can still have line pointers, we consider
+	 * pages "empty" when the unavailable space is slight.  This threshold is
+	 * somewhat arbitrary, but it should prevent most unnecessary relation
+	 * extensions while inserting large tuples into low-fillfactor tables.
+	 */
+	nearlyEmptyFreeSpace = MaxHeapTupleSize -
+		(MaxHeapTuplesPerPage / 8 * sizeof(ItemIdData));
+	if (len + saveFreeSpace > nearlyEmptyFreeSpace)
+		targetFreeSpace = Max(len, nearlyEmptyFreeSpace);
+	else
+		targetFreeSpace = len + saveFreeSpace;
+
 	if (otherBuffer != InvalidBuffer)
 		otherBlock = BufferGetBlockNumber(otherBuffer);
 	else
@@ -376,13 +395,7 @@ RelationGetBufferForTuple(Relation relation, Size len,
 	 * When use_fsm is false, we either put the tuple onto the existing target
 	 * page or extend the relation.
 	 */
-	if (len + saveFreeSpace > MaxHeapTupleSize)
-	{
-		/* can't fit, don't bother asking FSM */
-		targetBlock = InvalidBlockNumber;
-		use_fsm = false;
-	}
-	else if (bistate && bistate->current_buf != InvalidBuffer)
+	if (bistate && bistate->current_buf != InvalidBuffer)
 		targetBlock = BufferGetBlockNumber(bistate->current_buf);
 	else
 		targetBlock = RelationGetTargetBlock(relation);
@@ -393,12 +406,12 @@ RelationGetBufferForTuple(Relation relation, Size len,
 		 * We have no cached target page, so ask the FSM for an initial
 		 * target.
 		 */
-		targetBlock = GetPageWithFreeSpace(relation, len + saveFreeSpace);
+		targetBlock = GetPageWithFreeSpace(relation, targetFreeSpace);
 	}
 
 	/*
-	 * If the FSM knows nothing of the rel, try the last page before we
-	 * give up and extend.  This avoids one-tuple-per-page syndrome during
+	 * If the FSM knows nothing of the rel, try the last page before we give
+	 * up and extend.  This avoids one-tuple-per-page syndrome during
 	 * bootstrapping or in a recently-started system.
 	 */
 	if (targetBlock == InvalidBlockNumber)
@@ -517,7 +530,7 @@ loop:
 		}
 
 		pageFreeSpace = PageGetHeapFreeSpace(page);
-		if (len + saveFreeSpace <= pageFreeSpace)
+		if (targetFreeSpace <= pageFreeSpace)
 		{
 			/* use this page as future insert target, too */
 			RelationSetTargetBlock(relation, targetBlock);
@@ -550,7 +563,7 @@ loop:
 		targetBlock = RecordAndGetPageWithFreeSpace(relation,
 													targetBlock,
 													pageFreeSpace,
-													len + saveFreeSpace);
+													targetFreeSpace);
 	}
 
 	/*
@@ -582,7 +595,7 @@ loop:
 			 * Check if some other backend has extended a block for us while
 			 * we were waiting on the lock.
 			 */
-			targetBlock = GetPageWithFreeSpace(relation, len + saveFreeSpace);
+			targetBlock = GetPageWithFreeSpace(relation, targetFreeSpace);
 
 			/*
 			 * If some other waiter has already extended the relation, we
@@ -657,6 +670,8 @@ loop:
 	if (otherBuffer != InvalidBuffer)
 	{
 		Assert(otherBuffer != buffer);
+		targetBlock = BufferGetBlockNumber(buffer);
+		Assert(targetBlock > otherBlock);
 
 		if (unlikely(!ConditionalLockBuffer(otherBuffer)))
 		{
@@ -665,10 +680,16 @@ loop:
 			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
 			/*
-			 * Because the buffer was unlocked for a while, it's possible,
-			 * although unlikely, that the page was filled. If so, just retry
-			 * from start.
+			 * Because the buffers were unlocked for a while, it's possible,
+			 * although unlikely, that an all-visible flag became set or that
+			 * somebody used up the available space in the new page.  We can
+			 * use GetVisibilityMapPins to deal with the first case.  In the
+			 * second case, just retry from start.
 			 */
+			GetVisibilityMapPins(relation, otherBuffer, buffer,
+								 otherBlock, targetBlock, vmbuffer_other,
+								 vmbuffer);
+
 			if (len > PageGetHeapFreeSpace(page))
 			{
 				LockBuffer(otherBuffer, BUFFER_LOCK_UNLOCK);

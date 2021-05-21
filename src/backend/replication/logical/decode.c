@@ -90,7 +90,8 @@ static void DecodeXLogZHeapTuple(char *data, Size len,
 								 ReorderBufferTupleBuf *tuple);
 
 /* helper functions for decoding transactions */
-static inline bool FilterPrepare(LogicalDecodingContext *ctx, const char *gid);
+static inline bool FilterPrepare(LogicalDecodingContext *ctx,
+								 TransactionId xid, const char *gid);
 static bool DecodeTXNNeedSkip(LogicalDecodingContext *ctx,
 							  XLogRecordBuffer *buf, Oid dbId,
 							  RepOriginId origin_id);
@@ -294,7 +295,8 @@ DecodeXactOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 				 * doesn't filter the transaction at prepare time.
 				 */
 				if (info == XLOG_XACT_COMMIT_PREPARED)
-					two_phase = !(FilterPrepare(ctx, parsed.twophase_gid));
+					two_phase = !(FilterPrepare(ctx, xid,
+												parsed.twophase_gid));
 
 				DecodeCommit(ctx, buf, &parsed, xid, two_phase);
 				break;
@@ -321,7 +323,8 @@ DecodeXactOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 				 * doesn't filter the transaction at prepare time.
 				 */
 				if (info == XLOG_XACT_ABORT_PREPARED)
-					two_phase = !(FilterPrepare(ctx, parsed.twophase_gid));
+					two_phase = !(FilterPrepare(ctx, xid,
+												parsed.twophase_gid));
 
 				DecodeAbort(ctx, buf, &parsed, xid, two_phase);
 				break;
@@ -378,7 +381,8 @@ DecodeXactOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 				 * manner iff output plugin supports two-phase commits and
 				 * doesn't filter the transaction at prepare time.
 				 */
-				if (FilterPrepare(ctx, parsed.twophase_gid))
+				if (FilterPrepare(ctx, parsed.twophase_xid,
+								  parsed.twophase_gid))
 				{
 					ReorderBufferProcessXid(reorder, parsed.twophase_xid,
 											buf->origptr);
@@ -503,8 +507,8 @@ DecodeHeap2Op(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			 * interested in.
 			 */
 		case XLOG_HEAP2_FREEZE_PAGE:
-		case XLOG_HEAP2_CLEAN:
-		case XLOG_HEAP2_CLEANUP_INFO:
+		case XLOG_HEAP2_PRUNE:
+		case XLOG_HEAP2_VACUUM:
 		case XLOG_HEAP2_VISIBLE:
 		case XLOG_HEAP2_LOCK_UPDATED:
 			break;
@@ -703,7 +707,8 @@ DecodeHeapOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
  * this transaction as a regular commit later.
  */
 static inline bool
-FilterPrepare(LogicalDecodingContext *ctx, const char *gid)
+FilterPrepare(LogicalDecodingContext *ctx, TransactionId xid,
+			  const char *gid)
 {
 	/*
 	 * Skip if decoding of two-phase transactions at PREPARE time is not
@@ -721,7 +726,7 @@ FilterPrepare(LogicalDecodingContext *ctx, const char *gid)
 	if (ctx->callbacks.filter_prepare_cb == NULL)
 		return false;
 
-	return filter_prepare_cb_wrapper(ctx, gid);
+	return filter_prepare_cb_wrapper(ctx, xid, gid);
 }
 
 static inline bool
@@ -863,9 +868,10 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	}
 
 	/*
-	 * Update the decoding stats at transaction prepare/commit/abort. It is
-	 * not clear that sending more or less frequently than this would be
-	 * better.
+	 * Update the decoding stats at transaction prepare/commit/abort.
+	 * Additionally we send the stats when we spill or stream the changes to
+	 * avoid losing them in case the decoding is interrupted. It is not clear
+	 * that sending more or less frequently than this would be better.
 	 */
 	UpdateDecodingStats(ctx);
 }
@@ -945,9 +951,10 @@ DecodePrepare(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 	ReorderBufferPrepare(ctx->reorder, xid, parsed->twophase_gid);
 
 	/*
-	 * Update the decoding stats at transaction prepare/commit/abort. It is
-	 * not clear that sending more or less frequently than this would be
-	 * better.
+	 * Update the decoding stats at transaction prepare/commit/abort.
+	 * Additionally we send the stats when we spill or stream the changes to
+	 * avoid losing them in case the decoding is interrupted. It is not clear
+	 * that sending more or less frequently than this would be better.
 	 */
 	UpdateDecodingStats(ctx);
 }

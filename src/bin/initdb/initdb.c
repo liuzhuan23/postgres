@@ -160,6 +160,7 @@ static char *dictionary_file;
 static char *info_schema_file;
 static char *features_file;
 static char *system_constraints_file;
+static char *system_functions_file;
 static char *system_views_file;
 static bool success = false;
 static bool made_new_pgdata = false;
@@ -1439,7 +1440,7 @@ setup_auth(FILE *cmdfd)
 		 * The authid table shouldn't be readable except through views, to
 		 * ensure passwords are not publicly visible.
 		 */
-		"REVOKE ALL on pg_authid FROM public;\n\n",
+		"REVOKE ALL ON pg_authid FROM public;\n\n",
 		NULL
 	};
 
@@ -2508,6 +2509,7 @@ setup_data_file_paths(void)
 	set_input(&info_schema_file, "information_schema.sql");
 	set_input(&features_file, "sql_features.txt");
 	set_input(&system_constraints_file, "system_constraints.sql");
+	set_input(&system_functions_file, "system_functions.sql");
 	set_input(&system_views_file, "system_views.sql");
 
 	if (show_setting || debug)
@@ -2534,6 +2536,8 @@ setup_data_file_paths(void)
 	check_input(dictionary_file);
 	check_input(info_schema_file);
 	check_input(features_file);
+	check_input(system_constraints_file);
+	check_input(system_functions_file);
 	check_input(system_views_file);
 }
 
@@ -2870,6 +2874,8 @@ initialize_data_directory(void)
 	setup_auth(cmdfd);
 
 	setup_run_file(cmdfd, system_constraints_file);
+
+	setup_run_file(cmdfd, system_functions_file);
 
 	setup_depend(cmdfd);
 

@@ -210,6 +210,13 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 		ExecInitQual(node->fdw_recheck_quals, (PlanState *) scanstate);
 
 	/*
+	 * Determine whether to scan the foreign relation asynchronously or not;
+	 * this has to be kept in sync with the code in ExecInitAppend().
+	 */
+	scanstate->ss.ps.async_capable = (((Plan *) node)->async_capable &&
+									  estate->es_epq_active == NULL);
+
+	/*
 	 * Initialize FDW-related state.
 	 */
 	scanstate->fdwroutine = fdwroutine;
@@ -390,4 +397,52 @@ ExecShutdownForeignScan(ForeignScanState *node)
 
 	if (fdwroutine->ShutdownForeignScan)
 		fdwroutine->ShutdownForeignScan(node);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecAsyncForeignScanRequest
+ *
+ *		Asynchronously request a tuple from a designed async-capable node
+ * ----------------------------------------------------------------
+ */
+void
+ExecAsyncForeignScanRequest(AsyncRequest *areq)
+{
+	ForeignScanState *node = (ForeignScanState *) areq->requestee;
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	Assert(fdwroutine->ForeignAsyncRequest != NULL);
+	fdwroutine->ForeignAsyncRequest(areq);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecAsyncForeignScanConfigureWait
+ *
+ *		In async mode, configure for a wait
+ * ----------------------------------------------------------------
+ */
+void
+ExecAsyncForeignScanConfigureWait(AsyncRequest *areq)
+{
+	ForeignScanState *node = (ForeignScanState *) areq->requestee;
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	Assert(fdwroutine->ForeignAsyncConfigureWait != NULL);
+	fdwroutine->ForeignAsyncConfigureWait(areq);
+}
+
+/* ----------------------------------------------------------------
+ *		ExecAsyncForeignScanNotify
+ *
+ *		Callback invoked when a relevant event has occurred
+ * ----------------------------------------------------------------
+ */
+void
+ExecAsyncForeignScanNotify(AsyncRequest *areq)
+{
+	ForeignScanState *node = (ForeignScanState *) areq->requestee;
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	Assert(fdwroutine->ForeignAsyncNotify != NULL);
+	fdwroutine->ForeignAsyncNotify(areq);
 }

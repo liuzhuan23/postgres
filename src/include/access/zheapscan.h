@@ -41,6 +41,12 @@ typedef struct ZHeapScanDescData
 
 	ZHeapTuple	rs_cztup;		/* current tuple in scan, if any */
 
+	/*
+	 * For parallel scans to store page allocation data.  NULL when not
+	 * performing a parallel scan.
+	 */
+	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
+
 	int			rs_cindex;		/* current tuple's index in visztuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 

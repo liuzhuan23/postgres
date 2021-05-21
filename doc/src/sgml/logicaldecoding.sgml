@@ -477,7 +477,7 @@ typedef void (*LogicalOutputPluginInit) (struct OutputPluginCallbacks *cb);
     <para>
     An output plugin may also define functions to support two-phase commits,
     which allows actions to be decoded on the <command>PREPARE TRANSACTION</command>.
-    The <function>begin_prepare_cb</function>, <function>prepare_cb</function>, 
+    The <function>begin_prepare_cb</function>, <function>prepare_cb</function>,
     <function>stream_prepare_cb</function>,
     <function>commit_prepared_cb</function> and <function>rollback_prepared_cb</function>
     callbacks are required, while <function>filter_prepare_cb</function> is optional.
@@ -545,12 +545,15 @@ CREATE TABLE another_catalog_table(data text) WITH (user_catalog_table = true);
      executed within that transaction. A transaction that is prepared for
      a two-phase commit using <command>PREPARE TRANSACTION</command> will
      also be decoded if the output plugin callbacks needed for decoding
-     them are provided. It is possible that the current transaction which
-     is being decoded is aborted concurrently via a <command>ROLLBACK PREPARED</command>
-     command. In that case, the logical decoding of this transaction will
-     be aborted too. We will skip all the changes of such a transaction once
-     the abort is detected and abort the transaction when we read WAL for
-     <command>ROLLBACK PREPARED</command>.
+     them are provided. It is possible that the current prepared transaction
+     which is being decoded is aborted concurrently via a
+     <command>ROLLBACK PREPARED</command> command. In that case, the logical
+     decoding of this transaction will be aborted too. All the changes of such
+     a transaction are skipped once the abort is detected and the
+     <function>prepare_cb</function> callback is invoked. Thus even in case of
+     a concurrent abort, enough information is provided to the output plugin
+     for it to properly deal with <command>ROLLBACK PREPARED</command> once
+     that is decoded.
     </para>
 
     <note>
@@ -794,20 +797,25 @@ typedef void (*LogicalDecodeMessageCB) (struct LogicalDecodingContext *ctx,
        <command>COMMIT PREPARED</command> time. To signal that
        decoding should be skipped, return <literal>true</literal>;
        <literal>false</literal> otherwise. When the callback is not
-       defined, <literal>false</literal> is assumed (i.e. nothing is
-       filtered).
+       defined, <literal>false</literal> is assumed (i.e. no filtering, all
+       transactions using two-phase commit are decoded in two phases as well).
 <programlisting>
 typedef bool (*LogicalDecodeFilterPrepareCB) (struct LogicalDecodingContext *ctx,
+                                              TransactionId xid,
                                               const char *gid);
 </programlisting>
-      The <parameter>ctx</parameter> parameter has the same contents as for the
-      other callbacks. The <parameter>gid</parameter> is the identifier that later
-      identifies this transaction for <command>COMMIT PREPARED</command> or
-      <command>ROLLBACK PREPARED</command>.
+       The <parameter>ctx</parameter> parameter has the same contents as for
+       the other callbacks. The parameters <parameter>xid</parameter>
+       and <parameter>gid</parameter> provide two different ways to identify
+       the transaction.  The later <command>COMMIT PREPARED</command> or
+       <command>ROLLBACK PREPARED</command> carries both identifiers,
+       providing an output plugin the choice of what to use.
      </para>
      <para>
-      The callback has to provide the same static answer for a given
-      <parameter>gid</parameter> every time it is called.
+       The callback may be invoked multiple times per transaction to decode
+       and must provide the same static answer for a given pair of
+       <parameter>xid</parameter> and <parameter>gid</parameter> every time
+       it is called.
      </para>
      </sect3>
 
@@ -822,10 +830,10 @@ typedef bool (*LogicalDecodeFilterPrepareCB) (struct LogicalDecodingContext *ctx
       check if the plugin has already received this <command>PREPARE</command>
       in which case it can either error out or skip the remaining changes of 
       the transaction.
-      <programlisting>
-       typedef void (*LogicalDecodeBeginPrepareCB) (struct LogicalDecodingContext *ctx,
-                                                    ReorderBufferTXN *txn);
-      </programlisting>
+<programlisting>
+typedef void (*LogicalDecodeBeginPrepareCB) (struct LogicalDecodingContext *ctx,
+                                             ReorderBufferTXN *txn);
+</programlisting>
      </para>
     </sect3>
 
@@ -839,11 +847,11 @@ typedef bool (*LogicalDecodeFilterPrepareCB) (struct LogicalDecodingContext *ctx
       rows will have been called before this, if there have been any modified
       rows. The <parameter>gid</parameter> field, which is part of the
       <parameter>txn</parameter> parameter, can be used in this callback.
-      <programlisting>
-       typedef void (*LogicalDecodePrepareCB) (struct LogicalDecodingContext *ctx,
-                                               ReorderBufferTXN *txn,
-                                               XLogRecPtr prepare_lsn);
-      </programlisting>
+<programlisting>
+typedef void (*LogicalDecodePrepareCB) (struct LogicalDecodingContext *ctx,
+                                        ReorderBufferTXN *txn,
+                                        XLogRecPtr prepare_lsn);
+</programlisting>
      </para>
     </sect3>
 
@@ -855,11 +863,11 @@ typedef bool (*LogicalDecodeFilterPrepareCB) (struct LogicalDecodingContext *ctx
       whenever a transaction <command>COMMIT PREPARED</command> has been decoded.
       The <parameter>gid</parameter> field, which is part of the
       <parameter>txn</parameter> parameter, can be used in this callback.
-      <programlisting>
-       typedef void (*LogicalDecodeCommitPreparedCB) (struct LogicalDecodingContext *ctx,
-                                                      ReorderBufferTXN *txn,
-                                                      XLogRecPtr commit_lsn);
-      </programlisting>
+<programlisting>
+typedef void (*LogicalDecodeCommitPreparedCB) (struct LogicalDecodingContext *ctx,
+                                               ReorderBufferTXN *txn,
+                                               XLogRecPtr commit_lsn);
+</programlisting>
      </para>
     </sect3>
 
@@ -877,12 +885,12 @@ typedef bool (*LogicalDecodeFilterPrepareCB) (struct LogicalDecodingContext *ctx
       it can apply the rollback, otherwise, it can skip the rollback operation. The
       <parameter>gid</parameter> alone is not sufficient because the downstream
       node can have a prepared transaction with same identifier.
-      <programlisting>
-       typedef void (*LogicalDecodeRollbackPreparedCB) (struct LogicalDecodingContext *ctx,
-                                                        ReorderBufferTXN *txn,
-                                                        XLogRecPtr preapre_end_lsn,
-                                                        TimestampTz prepare_time);
-      </programlisting>
+<programlisting>
+typedef void (*LogicalDecodeRollbackPreparedCB) (struct LogicalDecodingContext *ctx,
+                                                 ReorderBufferTXN *txn,
+                                                 XLogRecPtr prepare_end_lsn,
+                                                 TimestampTz prepare_time);
+</programlisting>
      </para>
     </sect3>
 
@@ -1194,7 +1202,7 @@ stream_commit_cb(...);  &lt;-- commit of the streamed transaction
     To support the streaming of two-phase commands, an output plugin needs to
     provide additional callbacks. There are multiple two-phase commit callbacks
     that are required, (<function>begin_prepare_cb</function>,
-    <function>prepare_cb</function>, <function>commit_prepared_cb</function>, 
+    <function>prepare_cb</function>, <function>commit_prepared_cb</function>,
     <function>rollback_prepared_cb</function> and
     <function>stream_prepare_cb</function>) and an optional callback
     (<function>filter_prepare_cb</function>).
@@ -1219,9 +1227,11 @@ stream_commit_cb(...);  &lt;-- commit of the streamed transaction
    </para>
 
    <para>
-    Optionally the output plugin can specify a name pattern in the
-    <function>filter_prepare_cb</function> and transactions with gid containing
-    that name pattern will not be decoded as a two-phase commit transaction.
+    Optionally the output plugin can define filtering rules via
+    <function>filter_prepare_cb</function> to decode only specific transaction
+    in two phases.  This can be achieved by pattern matching on the
+    <parameter>gid</parameter> or via lookups using the
+    <parameter>xid</parameter>.
    </para>
 
    <para>

@@ -18,6 +18,8 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "mb/pg_wchar.h"
+#include "storage/proc.h"
+#include "storage/procarray.h"
 #include "utils/builtins.h"
 
 /* ----------
@@ -32,8 +34,8 @@
  */
 static void
 PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
-								TupleDesc tupdesc, MemoryContext context,
-								const char *parent, int level)
+								 TupleDesc tupdesc, MemoryContext context,
+								 const char *parent, int level)
 {
 #define PG_GET_BACKEND_MEMORY_CONTEXTS_COLS	9
 
@@ -50,8 +52,8 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 	ident = context->ident;
 
 	/*
-	 * To be consistent with logging output, we label dynahash contexts
-	 * with just the hash table name as with MemoryContextStatsPrint().
+	 * To be consistent with logging output, we label dynahash contexts with
+	 * just the hash table name as with MemoryContextStatsPrint().
 	 */
 	if (ident && strcmp(name, "dynahash") == 0)
 	{
@@ -61,7 +63,7 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 
 	/* Examine the context itself */
 	memset(&stat, 0, sizeof(stat));
-	(*context->methods->stats) (context, NULL, (void *) &level, &stat);
+	(*context->methods->stats) (context, NULL, (void *) &level, &stat, true);
 
 	memset(values, 0, sizeof(values));
 	memset(nulls, 0, sizeof(nulls));
@@ -73,7 +75,7 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 
 	if (ident)
 	{
-		int		idlen = strlen(ident);
+		int			idlen = strlen(ident);
 		char		clipped_ident[MEMORY_CONTEXT_IDENT_DISPLAY_SIZE];
 
 		/*
@@ -106,7 +108,7 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 	for (child = context->firstchild; child != NULL; child = child->nextchild)
 	{
 		PutMemoryContextsStatsTupleStore(tupstore, tupdesc,
-								  child, name, level + 1);
+										 child, name, level + 1);
 	}
 }
 
@@ -148,10 +150,66 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 	MemoryContextSwitchTo(oldcontext);
 
 	PutMemoryContextsStatsTupleStore(tupstore, tupdesc,
-								TopMemoryContext, NULL, 0);
+									 TopMemoryContext, NULL, 0);
 
 	/* clean up and return the tuplestore */
 	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
+}
+
+/*
+ * pg_log_backend_memory_contexts
+ *		Signal a backend process to log its memory contexts.
+ *
+ * Only superusers are allowed to signal to log the memory contexts
+ * because allowing any users to issue this request at an unbounded
+ * rate would cause lots of log messages and which can lead to
+ * denial of service.
+ *
+ * On receipt of this signal, a backend sets the flag in the signal
+ * handler, which causes the next CHECK_FOR_INTERRUPTS() to log the
+ * memory contexts.
+ */
+Datum
+pg_log_backend_memory_contexts(PG_FUNCTION_ARGS)
+{
+	int			pid = PG_GETARG_INT32(0);
+	PGPROC	   *proc = BackendPidGetProc(pid);
+
+	/*
+	 * BackendPidGetProc returns NULL if the pid isn't valid; but by the time
+	 * we reach kill(), a process for which we get a valid proc here might
+	 * have terminated on its own.  There's no way to acquire a lock on an
+	 * arbitrary process to prevent that. But since this mechanism is usually
+	 * used to debug a backend running and consuming lots of memory, that it
+	 * might end on its own first and its memory contexts are not logged is
+	 * not a problem.
+	 */
+	if (proc == NULL)
+	{
+		/*
+		 * This is just a warning so a loop-through-resultset will not abort
+		 * if one backend terminated on its own during the run.
+		 */
+		ereport(WARNING,
+				(errmsg("PID %d is not a PostgreSQL server process", pid)));
+		PG_RETURN_BOOL(false);
+	}
+
+	/* Only allow superusers to log memory contexts. */
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be a superuser to log memory contexts")));
+
+	if (SendProcSignal(pid, PROCSIG_LOG_MEMORY_CONTEXT, proc->backendId) < 0)
+	{
+		/* Again, just a warning to allow loops */
+		ereport(WARNING,
+				(errmsg("could not send signal to process %d: %m", pid)));
+		PG_RETURN_BOOL(false);
+	}
+
+	PG_RETURN_BOOL(true);
 }

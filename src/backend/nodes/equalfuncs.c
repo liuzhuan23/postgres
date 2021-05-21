@@ -408,6 +408,12 @@ _equalScalarArrayOpExpr(const ScalarArrayOpExpr *a, const ScalarArrayOpExpr *b)
 		b->opfuncid != 0)
 		return false;
 
+	/* As above, hashfuncid may differ too */
+	if (a->hashfuncid != b->hashfuncid &&
+		a->hashfuncid != 0 &&
+		b->hashfuncid != 0)
+		return false;
+
 	COMPARE_SCALAR_FIELD(useOr);
 	COMPARE_SCALAR_FIELD(inputcollid);
 	COMPARE_NODE_FIELD(args);
@@ -790,6 +796,7 @@ _equalJoinExpr(const JoinExpr *a, const JoinExpr *b)
 	COMPARE_NODE_FIELD(larg);
 	COMPARE_NODE_FIELD(rarg);
 	COMPARE_NODE_FIELD(usingClause);
+	COMPARE_NODE_FIELD(join_using_alias);
 	COMPARE_NODE_FIELD(quals);
 	COMPARE_NODE_FIELD(alias);
 	COMPARE_SCALAR_FIELD(rtindex);
@@ -969,6 +976,7 @@ _equalQuery(const Query *a, const Query *b)
 	COMPARE_SCALAR_FIELD(hasModifyingCTE);
 	COMPARE_SCALAR_FIELD(hasForUpdate);
 	COMPARE_SCALAR_FIELD(hasRowSecurity);
+	COMPARE_SCALAR_FIELD(isReturn);
 	COMPARE_NODE_FIELD(cteList);
 	COMPARE_NODE_FIELD(rtable);
 	COMPARE_NODE_FIELD(jointree);
@@ -1088,6 +1096,14 @@ _equalSetOperationStmt(const SetOperationStmt *a, const SetOperationStmt *b)
 }
 
 static bool
+_equalReturnStmt(const ReturnStmt *a, const ReturnStmt *b)
+{
+	COMPARE_NODE_FIELD(returnval);
+
+	return true;
+}
+
+static bool
 _equalPLAssignStmt(const PLAssignStmt *a, const PLAssignStmt *b)
 {
 	COMPARE_STRING_FIELD(name);
@@ -1120,6 +1136,14 @@ _equalAlterTableCmd(const AlterTableCmd *a, const AlterTableCmd *b)
 	COMPARE_NODE_FIELD(def);
 	COMPARE_SCALAR_FIELD(behavior);
 	COMPARE_SCALAR_FIELD(missing_ok);
+
+	return true;
+}
+
+static bool
+_equalAlterCollationStmt(const AlterCollationStmt *a, const AlterCollationStmt *b)
+{
+	COMPARE_NODE_FIELD(collname);
 
 	return true;
 }
@@ -1405,6 +1429,7 @@ _equalCreateFunctionStmt(const CreateFunctionStmt *a, const CreateFunctionStmt *
 	COMPARE_NODE_FIELD(parameters);
 	COMPARE_NODE_FIELD(returnType);
 	COMPARE_NODE_FIELD(options);
+	COMPARE_NODE_FIELD(sql_body);
 
 	return true;
 }
@@ -2596,6 +2621,16 @@ _equalIndexElem(const IndexElem *a, const IndexElem *b)
 	return true;
 }
 
+
+static bool
+_equalStatsElem(const StatsElem *a, const StatsElem *b)
+{
+	COMPARE_STRING_FIELD(name);
+	COMPARE_NODE_FIELD(expr);
+
+	return true;
+}
+
 static bool
 _equalColumnDef(const ColumnDef *a, const ColumnDef *b)
 {
@@ -2693,6 +2728,7 @@ _equalRangeTblEntry(const RangeTblEntry *a, const RangeTblEntry *b)
 	COMPARE_NODE_FIELD(joinaliasvars);
 	COMPARE_NODE_FIELD(joinleftcols);
 	COMPARE_NODE_FIELD(joinrightcols);
+	COMPARE_NODE_FIELD(join_using_alias);
 	COMPARE_NODE_FIELD(functions);
 	COMPARE_SCALAR_FIELD(funcordinality);
 	COMPARE_NODE_FIELD(tablefunc);
@@ -2975,6 +3011,7 @@ _equalPartitionCmd(const PartitionCmd *a, const PartitionCmd *b)
 {
 	COMPARE_NODE_FIELD(name);
 	COMPARE_NODE_FIELD(bound);
+	COMPARE_SCALAR_FIELD(concurrent);
 
 	return true;
 }
@@ -3321,6 +3358,9 @@ equal(const void *a, const void *b)
 		case T_SetOperationStmt:
 			retval = _equalSetOperationStmt(a, b);
 			break;
+		case T_ReturnStmt:
+			retval = _equalReturnStmt(a, b);
+			break;
 		case T_PLAssignStmt:
 			retval = _equalPLAssignStmt(a, b);
 			break;
@@ -3329,6 +3369,9 @@ equal(const void *a, const void *b)
 			break;
 		case T_AlterTableCmd:
 			retval = _equalAlterTableCmd(a, b);
+			break;
+		case T_AlterCollationStmt:
+			retval = _equalAlterCollationStmt(a, b);
 			break;
 		case T_AlterDomainStmt:
 			retval = _equalAlterDomainStmt(a, b);
@@ -3722,6 +3765,9 @@ equal(const void *a, const void *b)
 			break;
 		case T_IndexElem:
 			retval = _equalIndexElem(a, b);
+			break;
+		case T_StatsElem:
+			retval = _equalStatsElem(a, b);
 			break;
 		case T_ColumnDef:
 			retval = _equalColumnDef(a, b);

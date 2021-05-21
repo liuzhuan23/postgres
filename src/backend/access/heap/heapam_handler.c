@@ -2482,8 +2482,8 @@ reform_and_rewrite_tuple(HeapTuple tuple,
 		else if (!isnull[i] && TupleDescAttr(newTupDesc, i)->attlen == -1)
 		{
 			struct varlena *new_value;
-			ToastCompressionId	cmid;
-			char	cmethod;
+			ToastCompressionId cmid;
+			char		cmethod;
 
 			new_value = (struct varlena *) DatumGetPointer(values[i]);
 			cmid = toast_get_compression_id(new_value);

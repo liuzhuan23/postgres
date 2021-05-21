@@ -1210,6 +1210,11 @@ ProcArrayApplyRecoveryInfo(RunningTransactions running)
 	 */
 	MaintainLatestCompletedXidRecovery(running->latestCompletedXid);
 
+	/*
+	 * NB: No need to increment ShmemVariableCache->xactCompletionCount here,
+	 * nobody can see it yet.
+	 */
+
 	LWLockRelease(ProcArrayLock);
 
 	/* ShmemVariableCache->nextXid must be beyond any observed xid. */
@@ -2051,7 +2056,7 @@ GetSnapshotDataInitOldSnapshot(Snapshot snapshot)
 static bool
 GetSnapshotDataReuse(Snapshot snapshot)
 {
-	uint64 curXactCompletionCount;
+	uint64		curXactCompletionCount;
 
 	Assert(LWLockHeldByMe(ProcArrayLock));
 
@@ -2075,8 +2080,8 @@ GetSnapshotDataReuse(Snapshot snapshot)
 	 * holding ProcArrayLock) exclusively). Thus the xactCompletionCount check
 	 * ensures we would detect if the snapshot would have changed.
 	 *
-	 * As the snapshot contents are the same as it was before, it is safe
-	 * to re-enter the snapshot's xmin into the PGPROC array. None of the rows
+	 * As the snapshot contents are the same as it was before, it is safe to
+	 * re-enter the snapshot's xmin into the PGPROC array. None of the rows
 	 * visible under the snapshot could already have been removed (that'd
 	 * require the set of running transactions to change) and it fulfills the
 	 * requirement that concurrent GetSnapshotData() calls yield the same
@@ -2126,7 +2131,7 @@ GetSnapshotDataReuse(Snapshot snapshot)
  *			older than this are known not running any more.
  *
  * And try to advance the bounds of GlobalVis{Shared,Catalog,Data,Temp}Rels
- * for the benefit of theGlobalVisTest* family of functions.
+ * for the benefit of the GlobalVisTest* family of functions.
  *
  * Note: this function should probably not be called with an argument that's
  * not statically allocated (see xip allocation below).
@@ -2254,10 +2259,10 @@ GetSnapshotData(Snapshot snapshot)
 				continue;
 
 			/*
-			 * The only way we are able to get here with a non-normal xid
-			 * is during bootstrap - with this backend using
-			 * BootstrapTransactionId. But the above test should filter
-			 * that out.
+			 * The only way we are able to get here with a non-normal xid is
+			 * during bootstrap - with this backend using
+			 * BootstrapTransactionId. But the above test should filter that
+			 * out.
 			 */
 			Assert(TransactionIdIsNormal(xid));
 
@@ -3752,7 +3757,7 @@ TerminateOtherDBBackends(Oid databaseId)
 
 				/* Users can signal backends they have role membership in. */
 				if (!has_privs_of_role(GetUserId(), proc->roleId) &&
-					!has_privs_of_role(GetUserId(), DEFAULT_ROLE_SIGNAL_BACKENDID))
+					!has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 							 errmsg("must be a member of the role whose process is being terminated or member of pg_signal_backend")));
@@ -3914,6 +3919,9 @@ XidCacheRemoveRunningXids(TransactionId xid,
 
 	/* Also advance global latestCompletedXid while holding the lock */
 	MaintainLatestCompletedXid(latestXid);
+
+	/* ... and xactCompletionCount */
+	ShmemVariableCache->xactCompletionCount++;
 
 	LWLockRelease(ProcArrayLock);
 }

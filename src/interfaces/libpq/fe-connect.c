@@ -303,6 +303,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Revocation-List-Dir", "", 64,
 	offsetof(struct pg_conn, sslcrldir)},
 
+	{"sslsni", "PGSSLSNI", "1", NULL,
+		"SSL-SNI", "", 1,
+	offsetof(struct pg_conn, sslsni)},
+
 	{"requirepeer", "PGREQUIREPEER", NULL, NULL,
 		"Require-Peer", "", 10,
 	offsetof(struct pg_conn, requirepeer)},
@@ -1859,7 +1863,8 @@ setKeepalivesIdle(PGconn *conn)
 		char		sebuf[PG_STRERROR_R_BUFLEN];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
+						  libpq_gettext("%s(%s) failed: %s\n"),
+						  "setsockopt",
 						  PG_TCP_KEEPALIVE_IDLE_STR,
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
@@ -1893,7 +1898,8 @@ setKeepalivesInterval(PGconn *conn)
 		char		sebuf[PG_STRERROR_R_BUFLEN];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
+						  libpq_gettext("%s(%s) failed: %s\n"),
+						  "setsockopt",
 						  "TCP_KEEPINTVL",
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
@@ -1928,7 +1934,8 @@ setKeepalivesCount(PGconn *conn)
 		char		sebuf[PG_STRERROR_R_BUFLEN];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
+						  libpq_gettext("%s(%s) failed: %s\n"),
+						  "setsockopt",
 						  "TCP_KEEPCNT",
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
@@ -1981,7 +1988,8 @@ setKeepalivesWin32(PGconn *conn)
 		!= 0)
 	{
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("WSAIoctl(SIO_KEEPALIVE_VALS) failed: %ui\n"),
+						  libpq_gettext("%s(%s) failed: error code %d\n"),
+						  "WSAIoctl", "SIO_KEEPALIVE_VALS",
 						  WSAGetLastError());
 		return 0;
 	}
@@ -2015,7 +2023,8 @@ setTCPUserTimeout(PGconn *conn)
 		char		sebuf[256];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
+						  libpq_gettext("%s(%s) failed: %s\n"),
+						  "setsockopt",
 						  "TCP_USER_TIMEOUT",
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
@@ -2628,7 +2637,8 @@ keep_going:						/* We will come back to here until there is
 											(char *) &on, sizeof(on)) < 0)
 						{
 							appendPQExpBuffer(&conn->errorMessage,
-											  libpq_gettext("setsockopt(%s) failed: %s\n"),
+											  libpq_gettext("%s(%s) failed: %s\n"),
+											  "setsockopt",
 											  "SO_KEEPALIVE",
 											  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 							err = 1;
@@ -3741,8 +3751,9 @@ keep_going:						/* We will come back to here until there is
 					PQclear(res);
 
 				/* Append error report to conn->errorMessage. */
-				appendPQExpBufferStr(&conn->errorMessage,
-									 libpq_gettext("\"SHOW transaction_read_only\" failed\n"));
+				appendPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("\"%s\" failed\n"),
+								  "SHOW transaction_read_only");
 
 				/* Close connection politely. */
 				conn->status = CONNECTION_OK;
@@ -3792,8 +3803,9 @@ keep_going:						/* We will come back to here until there is
 					PQclear(res);
 
 				/* Append error report to conn->errorMessage. */
-				appendPQExpBufferStr(&conn->errorMessage,
-									 libpq_gettext("\"SELECT pg_is_in_recovery()\" failed\n"));
+				appendPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("\"%s\" failed\n"),
+								  "SELECT pg_is_in_recovery()");
 
 				/* Close connection politely. */
 				conn->status = CONNECTION_OK;
@@ -3952,6 +3964,7 @@ makeEmptyPGconn(void)
 	conn->verbosity = PQERRORS_DEFAULT;
 	conn->show_context = PQSHOW_CONTEXT_ERRORS;
 	conn->sock = PGINVALID_SOCKET;
+	conn->Pfdebug = NULL;
 
 	/*
 	 * We try to send at least 8K at a time, which is the usual size of pipe
@@ -4094,6 +4107,8 @@ freePGconn(PGconn *conn)
 		free(conn->sslcrldir);
 	if (conn->sslcompression)
 		free(conn->sslcompression);
+	if (conn->sslsni)
+		free(conn->sslsni);
 	if (conn->requirepeer)
 		free(conn->requirepeer);
 	if (conn->ssl_min_protocol_version)
@@ -6857,27 +6872,6 @@ PQsetErrorContextVisibility(PGconn *conn, PGContextVisibility show_context)
 	old = conn->show_context;
 	conn->show_context = show_context;
 	return old;
-}
-
-void
-PQtrace(PGconn *conn, FILE *debug_port)
-{
-	if (conn == NULL)
-		return;
-	PQuntrace(conn);
-	conn->Pfdebug = debug_port;
-}
-
-void
-PQuntrace(PGconn *conn)
-{
-	if (conn == NULL)
-		return;
-	if (conn->Pfdebug)
-	{
-		fflush(conn->Pfdebug);
-		conn->Pfdebug = NULL;
-	}
 }
 
 PQnoticeReceiver

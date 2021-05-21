@@ -229,6 +229,15 @@ zheap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_cztup = NULL;
 
 	/*
+	 * Allocate memory to keep track of page allocation for parallel workers
+	 * when doing a parallel scan.
+	 */
+	if (parallel_scan != NULL)
+		scan->rs_parallelworkerdata = palloc(sizeof(ParallelBlockTableScanWorkerData));
+	else
+		scan->rs_parallelworkerdata = NULL;
+
+	/*
 	 * we do this here instead of in initscan() because heap_rescan also calls
 	 * initscan() and we don't want to allocate memory again
 	 */
@@ -265,6 +274,9 @@ zheap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_strategy != NULL)
 		FreeAccessStrategy(scan->rs_strategy);
+
+	if (scan->rs_parallelworkerdata != NULL)
+		pfree(scan->rs_parallelworkerdata);
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
@@ -551,7 +563,7 @@ zheapgettup_pagemode(ZHeapScanDesc scan,
 				ParallelBlockTableScanDesc pbscan =
 				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 				ParallelBlockTableScanWorker pbscanwork =
-				(ParallelBlockTableScanWorker) scan->rs_base.rs_private;
+					(ParallelBlockTableScanWorker) scan->rs_parallelworkerdata;
 
 				table_block_parallelscan_startblock_init(scan->rs_base.rs_rd,
 														 pbscanwork, pbscan);
@@ -698,7 +710,7 @@ get_next_page:
 			ParallelBlockTableScanDesc pbscan =
 			(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 			ParallelBlockTableScanWorker pbscanwork =
-				(ParallelBlockTableScanWorker) scan->rs_base.rs_private;
+				scan->rs_parallelworkerdata;
 
 			page = table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
 													 pbscanwork, pbscan);
@@ -818,7 +830,7 @@ zheapgettup(ZHeapScanDesc scan,
 				ParallelBlockTableScanDesc pbscan =
 				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 				ParallelBlockTableScanWorker pbscanwork =
-				(ParallelBlockTableScanWorker) scan->rs_base.rs_private;
+					scan->rs_parallelworkerdata;
 
 				table_block_parallelscan_startblock_init(scan->rs_base.rs_rd,
 														 pbscanwork, pbscan);
@@ -1011,7 +1023,7 @@ get_next_page:
 			ParallelBlockTableScanDesc pbscan =
 			(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 			ParallelBlockTableScanWorker pbscanwork =
-				(ParallelBlockTableScanWorker) scan->rs_base.rs_private;
+				scan->rs_parallelworkerdata;
 
 			page = table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
 													 pbscanwork, pbscan);

@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 package Solution;
 
 #
@@ -181,7 +184,7 @@ sub GenerateFiles
 		elsif (/\bAC_DEFINE\(OPENSSL_API_COMPAT, \[([0-9xL]+)\]/)
 		{
 			$ac_define_openssl_api_compat_found = 1;
-			$openssl_api_compat = $1;
+			$openssl_api_compat                 = $1;
 		}
 	}
 	close($c);
@@ -279,6 +282,8 @@ sub GenerateFiles
 		HAVE_GETTIMEOFDAY                           => undef,
 		HAVE_GSSAPI_GSSAPI_H                        => undef,
 		HAVE_GSSAPI_H                               => undef,
+		HAVE_HMAC_CTX_FREE                          => undef,
+		HAVE_HMAC_CTX_NEW                           => undef,
 		HAVE_HISTORY_H                              => undef,
 		HAVE_HISTORY_TRUNCATE_FILE                  => undef,
 		HAVE_IFADDRS_H                              => undef,
@@ -530,6 +535,12 @@ sub GenerateFiles
 		$define{HAVE_LIBXSLT} = 1;
 		$define{USE_LIBXSLT}  = 1;
 	}
+	if ($self->{options}->{lz4})
+	{
+		$define{HAVE_LIBLZ4} = 1;
+		$define{HAVE_LZ4_H}  = 1;
+		$define{USE_LZ4}     = 1;
+	}
 	if ($self->{options}->{openssl})
 	{
 		$define{USE_OPENSSL} = 1;
@@ -542,6 +553,8 @@ sub GenerateFiles
 			$define{HAVE_ASN1_STRING_GET0_DATA} = 1;
 			$define{HAVE_BIO_GET_DATA}          = 1;
 			$define{HAVE_BIO_METH_NEW}          = 1;
+			$define{HAVE_HMAC_CTX_FREE}         = 1;
+			$define{HAVE_HMAC_CTX_NEW}          = 1;
 			$define{HAVE_OPENSSL_INIT_SSL}      = 1;
 		}
 	}
@@ -1047,6 +1060,11 @@ sub AddProject
 		$proj->AddIncludeDir($self->{options}->{xslt} . '\include');
 		$proj->AddLibrary($self->{options}->{xslt} . '\lib\libxslt.lib');
 	}
+	if ($self->{options}->{lz4})
+	{
+		$proj->AddIncludeDir($self->{options}->{lz4} . '\include');
+		$proj->AddLibrary($self->{options}->{lz4} . '\lib\liblz4.lib');
+	}
 	if ($self->{options}->{uuid})
 	{
 		$proj->AddIncludeDir($self->{options}->{uuid} . '\include');
@@ -1158,6 +1176,7 @@ sub GetFakeConfigure
 	$cfg .= ' --with-uuid'          if ($self->{options}->{uuid});
 	$cfg .= ' --with-libxml'        if ($self->{options}->{xml});
 	$cfg .= ' --with-libxslt'       if ($self->{options}->{xslt});
+	$cfg .= ' --with-lz4'           if ($self->{options}->{lz4});
 	$cfg .= ' --with-gssapi'        if ($self->{options}->{gss});
 	$cfg .= ' --with-icu'           if ($self->{options}->{icu});
 	$cfg .= ' --with-tcl'           if ($self->{options}->{tcl});

@@ -69,6 +69,7 @@
 #include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procsignal.h"
 #include "utils/acl.h"
@@ -746,8 +747,8 @@ WalRcvFetchTimeLineHistoryFiles(TimeLineID first, TimeLineID last)
 			writeTimeLineHistoryFile(tli, content, len);
 
 			/*
-			 * Mark the streamed history file as ready for archiving
-			 * if archive_mode is always.
+			 * Mark the streamed history file as ready for archiving if
+			 * archive_mode is always.
 			 */
 			if (XLogArchiveMode != ARCHIVE_MODE_ALWAYS)
 				XLogArchiveForceDone(fname);
@@ -1361,7 +1362,7 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 	/* Fetch values */
 	values[0] = Int32GetDatum(pid);
 
-	if (!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_STATS))
+	if (!is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
 	{
 		/*
 		 * Only superusers and members of pg_read_all_stats can see details.

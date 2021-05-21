@@ -25,10 +25,12 @@ static void check_for_prepared_transactions(ClusterInfo *cluster);
 static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_user_defined_postfix_ops(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
+static void check_for_composite_data_type_usage(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
 static void check_for_jsonb_9_4_usage(ClusterInfo *cluster);
 static void check_for_pg_role_prefix(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(ClusterInfo *new_cluster);
+static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
 static char *get_canonical_locale_name(int category, const char *locale);
 
 
@@ -101,8 +103,18 @@ check_and_dump_old_cluster(bool live_check)
 	check_proper_datallowconn(&old_cluster);
 	check_for_undo_data(&old_cluster);
 	check_for_prepared_transactions(&old_cluster);
+	check_for_composite_data_type_usage(&old_cluster);
 	check_for_reg_data_type_usage(&old_cluster);
 	check_for_isn_and_int8_passing_mismatch(&old_cluster);
+
+	/*
+	 * PG 14 changed the function signature of encoding conversion functions.
+	 * Conversions from older versions cannot be upgraded automatically
+	 * because the user-defined functions used by the encoding conversions
+	 * need to be changed to match the new signature.
+	 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1300)
+		check_for_user_defined_encoding_conversions(&old_cluster);
 
 	/*
 	 * Pre-PG 14 allowed user defined postfix operators, which are not
@@ -593,7 +605,7 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 						PATH_SEPARATOR);
 
 			for (dbnum = 0; dbnum < old_cluster.dbarr.ndbs; dbnum++)
-				fprintf(script, RMDIR_CMD " %c%s%c%d%c\n", PATH_QUOTE,
+				fprintf(script, RMDIR_CMD " %c%s%c%u%c\n", PATH_QUOTE,
 						fix_path_separator(os_info.old_tablespaces[tblnum]),
 						PATH_SEPARATOR, old_cluster.dbarr.dbs[dbnum].db_oid,
 						PATH_QUOTE);
@@ -1077,6 +1089,63 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 
 
 /*
+ * check_for_composite_data_type_usage()
+ *	Check for system-defined composite types used in user tables.
+ *
+ *	The OIDs of rowtypes of system catalogs and information_schema views
+ *	can change across major versions; unlike user-defined types, we have
+ *	no mechanism for forcing them to be the same in the new cluster.
+ *	Hence, if any user table uses one, that's problematic for pg_upgrade.
+ */
+static void
+check_for_composite_data_type_usage(ClusterInfo *cluster)
+{
+	bool		found;
+	Oid			firstUserOid;
+	char		output_path[MAXPGPATH];
+	char	   *base_query;
+
+	prep_status("Checking for system-defined composite types in user tables");
+
+	snprintf(output_path, sizeof(output_path), "tables_using_composite.txt");
+
+	/*
+	 * Look for composite types that were made during initdb *or* belong to
+	 * information_schema; that's important in case information_schema was
+	 * dropped and reloaded.
+	 *
+	 * The cutoff OID here should match the source cluster's value of
+	 * FirstNormalObjectId.  We hardcode it rather than using that C #define
+	 * because, if that #define is ever changed, our own version's value is
+	 * NOT what to use.  Eventually we may need a test on the source cluster's
+	 * version to select the correct value.
+	 */
+	firstUserOid = 16384;
+
+	base_query = psprintf("SELECT t.oid FROM pg_catalog.pg_type t "
+						  "LEFT JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid "
+						  " WHERE typtype = 'c' AND (t.oid < %u OR nspname = 'information_schema')",
+						  firstUserOid);
+
+	found = check_for_data_types_usage(cluster, base_query, output_path);
+
+	free(base_query);
+
+	if (found)
+	{
+		pg_log(PG_REPORT, "fatal\n");
+		pg_fatal("Your installation contains system-defined composite type(s) in user tables.\n"
+				 "These type OIDs are not stable across PostgreSQL versions,\n"
+				 "so this cluster cannot currently be upgraded.  You can\n"
+				 "drop the problem columns and restart the upgrade.\n"
+				 "A list of the problem columns is in the file:\n"
+				 "    %s\n\n", output_path);
+	}
+	else
+		check_ok();
+}
+
+/*
  * check_for_reg_data_type_usage()
  *	pg_upgrade only preserves these system values:
  *		pg_class.oid
@@ -1090,88 +1159,36 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 static void
 check_for_reg_data_type_usage(ClusterInfo *cluster)
 {
-	int			dbnum;
-	FILE	   *script = NULL;
-	bool		found = false;
+	bool		found;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for reg* data types in user tables");
 
 	snprintf(output_path, sizeof(output_path), "tables_using_reg.txt");
 
-	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
-	{
-		PGresult   *res;
-		bool		db_used = false;
-		int			ntups;
-		int			rowno;
-		int			i_nspname,
-					i_relname,
-					i_attname;
-		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
-		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
-
-		/*
-		 * While several relkinds don't store any data, e.g. views, they can
-		 * be used to define data types of other columns, so we check all
-		 * relkinds.
-		 */
-		res = executeQueryOrDie(conn,
-								"SELECT n.nspname, c.relname, a.attname "
-								"FROM	pg_catalog.pg_class c, "
-								"		pg_catalog.pg_namespace n, "
-								"		pg_catalog.pg_attribute a, "
-								"		pg_catalog.pg_type t "
-								"WHERE	c.oid = a.attrelid AND "
-								"		NOT a.attisdropped AND "
-								"       a.atttypid = t.oid AND "
-								"       t.typnamespace = "
-								"           (SELECT oid FROM pg_namespace "
-								"            WHERE nspname = 'pg_catalog') AND"
-								"		t.typname IN ( "
-		/* regclass.oid is preserved, so 'regclass' is OK */
-								"           'regcollation', "
-								"           'regconfig', "
-								"           'regdictionary', "
-								"           'regnamespace', "
-								"           'regoper', "
-								"           'regoperator', "
-								"           'regproc', "
-								"           'regprocedure' "
-		/* regrole.oid is preserved, so 'regrole' is OK */
-		/* regtype.oid is preserved, so 'regtype' is OK */
-								"			) AND "
-								"		c.relnamespace = n.oid AND "
-								"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
-
-		ntups = PQntuples(res);
-		i_nspname = PQfnumber(res, "nspname");
-		i_relname = PQfnumber(res, "relname");
-		i_attname = PQfnumber(res, "attname");
-		for (rowno = 0; rowno < ntups; rowno++)
-		{
-			found = true;
-			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("could not open file \"%s\": %s\n",
-						 output_path, strerror(errno));
-			if (!db_used)
-			{
-				fprintf(script, "In database: %s\n", active_db->db_name);
-				db_used = true;
-			}
-			fprintf(script, "  %s.%s.%s\n",
-					PQgetvalue(res, rowno, i_nspname),
-					PQgetvalue(res, rowno, i_relname),
-					PQgetvalue(res, rowno, i_attname));
-		}
-
-		PQclear(res);
-
-		PQfinish(conn);
-	}
-
-	if (script)
-		fclose(script);
+	/*
+	 * Note: older servers will not have all of these reg* types, so we have
+	 * to write the query like this rather than depending on casts to regtype.
+	 */
+	found = check_for_data_types_usage(cluster,
+									   "SELECT oid FROM pg_catalog.pg_type t "
+									   "WHERE t.typnamespace = "
+									   "        (SELECT oid FROM pg_catalog.pg_namespace "
+									   "         WHERE nspname = 'pg_catalog') "
+									   "  AND t.typname IN ( "
+	/* pg_class.oid is preserved, so 'regclass' is OK */
+									   "           'regcollation', "
+									   "           'regconfig', "
+									   "           'regdictionary', "
+									   "           'regnamespace', "
+									   "           'regoper', "
+									   "           'regoperator', "
+									   "           'regproc', "
+									   "           'regprocedure' "
+	/* pg_authid.oid is preserved, so 'regrole' is OK */
+	/* pg_type.oid is (mostly) preserved, so 'regtype' is OK */
+									   "         )",
+									   output_path);
 
 	if (found)
 	{
@@ -1179,8 +1196,8 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 		pg_fatal("Your installation contains one of the reg* data types in user tables.\n"
 				 "These data types reference system OIDs that are not preserved by\n"
 				 "pg_upgrade, so this cluster cannot currently be upgraded.  You can\n"
-				 "remove the problem tables and restart the upgrade.  A list of the\n"
-				 "problem columns is in the file:\n"
+				 "drop the problem columns and restart the upgrade.\n"
+				 "A list of the problem columns is in the file:\n"
 				 "    %s\n\n", output_path);
 	}
 	else
@@ -1196,82 +1213,20 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 static void
 check_for_jsonb_9_4_usage(ClusterInfo *cluster)
 {
-	int			dbnum;
-	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for incompatible \"jsonb\" data type");
 
 	snprintf(output_path, sizeof(output_path), "tables_using_jsonb.txt");
 
-	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
-	{
-		PGresult   *res;
-		bool		db_used = false;
-		int			ntups;
-		int			rowno;
-		int			i_nspname,
-					i_relname,
-					i_attname;
-		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
-		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
-
-		/*
-		 * While several relkinds don't store any data, e.g. views, they can
-		 * be used to define data types of other columns, so we check all
-		 * relkinds.
-		 */
-		res = executeQueryOrDie(conn,
-								"SELECT n.nspname, c.relname, a.attname "
-								"FROM	pg_catalog.pg_class c, "
-								"		pg_catalog.pg_namespace n, "
-								"		pg_catalog.pg_attribute a "
-								"WHERE	c.oid = a.attrelid AND "
-								"		NOT a.attisdropped AND "
-								"		a.atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype AND "
-								"		c.relnamespace = n.oid AND "
-		/* exclude possible orphaned temp tables */
-								"		n.nspname !~ '^pg_temp_' AND "
-								"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
-
-		ntups = PQntuples(res);
-		i_nspname = PQfnumber(res, "nspname");
-		i_relname = PQfnumber(res, "relname");
-		i_attname = PQfnumber(res, "attname");
-		for (rowno = 0; rowno < ntups; rowno++)
-		{
-			found = true;
-			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("could not open file \"%s\": %s\n",
-						 output_path, strerror(errno));
-			if (!db_used)
-			{
-				fprintf(script, "In database: %s\n", active_db->db_name);
-				db_used = true;
-			}
-			fprintf(script, "  %s.%s.%s\n",
-					PQgetvalue(res, rowno, i_nspname),
-					PQgetvalue(res, rowno, i_relname),
-					PQgetvalue(res, rowno, i_attname));
-		}
-
-		PQclear(res);
-
-		PQfinish(conn);
-	}
-
-	if (script)
-		fclose(script);
-
-	if (found)
+	if (check_for_data_type_usage(cluster, "pg_catalog.jsonb", output_path))
 	{
 		pg_log(PG_REPORT, "fatal\n");
 		pg_fatal("Your installation contains the \"jsonb\" data type in user tables.\n"
 				 "The internal format of \"jsonb\" changed during 9.4 beta so this\n"
-				 "cluster cannot currently be upgraded.  You can remove the problem\n"
-				 "tables and restart the upgrade.  A list of the problem columns is\n"
-				 "in the file:\n"
+				 "cluster cannot currently be upgraded.  You can\n"
+				 "drop the problem columns and restart the upgrade.\n"
+				 "A list of the problem columns is in the file:\n"
 				 "    %s\n\n", output_path);
 	}
 	else
@@ -1309,6 +1264,91 @@ check_for_pg_role_prefix(ClusterInfo *cluster)
 	PQfinish(conn);
 
 	check_ok();
+}
+
+/*
+ * Verify that no user-defined encoding conversions exist.
+ */
+static void
+check_for_user_defined_encoding_conversions(ClusterInfo *cluster)
+{
+	int			dbnum;
+	FILE	   *script = NULL;
+	bool		found = false;
+	char		output_path[MAXPGPATH];
+
+	prep_status("Checking for user-defined encoding conversions");
+
+	snprintf(output_path, sizeof(output_path),
+			 "encoding_conversions.txt");
+
+	/* Find any user defined encoding conversions */
+	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
+	{
+		PGresult   *res;
+		bool		db_used = false;
+		int			ntups;
+		int			rowno;
+		int			i_conoid,
+					i_conname,
+					i_nspname;
+		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
+
+		/*
+		 * The query below hardcodes FirstNormalObjectId as 16384 rather than
+		 * interpolating that C #define into the query because, if that
+		 * #define is ever changed, the cutoff we want to use is the value
+		 * used by pre-version 14 servers, not that of some future version.
+		 */
+		res = executeQueryOrDie(conn,
+								"SELECT c.oid as conoid, c.conname, n.nspname "
+								"FROM pg_catalog.pg_conversion c, "
+								"     pg_catalog.pg_namespace n "
+								"WHERE c.connamespace = n.oid AND "
+								"      c.oid >= 16384");
+		ntups = PQntuples(res);
+		i_conoid = PQfnumber(res, "conoid");
+		i_conname = PQfnumber(res, "conname");
+		i_nspname = PQfnumber(res, "nspname");
+		for (rowno = 0; rowno < ntups; rowno++)
+		{
+			found = true;
+			if (script == NULL &&
+				(script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %s\n",
+						 output_path, strerror(errno));
+			if (!db_used)
+			{
+				fprintf(script, "In database: %s\n", active_db->db_name);
+				db_used = true;
+			}
+			fprintf(script, "  (oid=%s) %s.%s\n",
+					PQgetvalue(res, rowno, i_conoid),
+					PQgetvalue(res, rowno, i_nspname),
+					PQgetvalue(res, rowno, i_conname));
+		}
+
+		PQclear(res);
+
+		PQfinish(conn);
+	}
+
+	if (script)
+		fclose(script);
+
+	if (found)
+	{
+		pg_log(PG_REPORT, "fatal\n");
+		pg_fatal("Your installation contains user-defined encoding conversions.\n"
+				 "The conversion function parameters changed in PostgreSQL version 14\n"
+				 "so this cluster cannot currently be upgraded.  You can remove the\n"
+				 "encoding conversions in the old cluster and restart the upgrade.\n"
+				 "A list of user-defined encoding conversions is in the file:\n"
+				 "    %s\n\n", output_path);
+	}
+	else
+		check_ok();
 }
 
 

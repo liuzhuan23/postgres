@@ -44,6 +44,7 @@
 #include "executor/nodeProjectSet.h"
 #include "executor/nodeRecursiveunion.h"
 #include "executor/nodeResult.h"
+#include "executor/nodeResultCache.h"
 #include "executor/nodeSamplescan.h"
 #include "executor/nodeSeqscan.h"
 #include "executor/nodeSetOp.h"
@@ -254,6 +255,10 @@ ExecReScan(PlanState *node)
 			ExecReScanMaterial((MaterialState *) node);
 			break;
 
+		case T_ResultCacheState:
+			ExecReScanResultCache((ResultCacheState *) node);
+			break;
+
 		case T_SortState:
 			ExecReScanSort((SortState *) node);
 			break;
@@ -422,6 +427,7 @@ ExecSupportsMarkRestore(Path *pathnode)
 	{
 		case T_IndexScan:
 		case T_IndexOnlyScan:
+
 			/*
 			 * Not all index types support mark/restore.
 			 */
@@ -530,6 +536,10 @@ ExecSupportsBackwardScan(Plan *node)
 		case T_Append:
 			{
 				ListCell   *l;
+
+				/* With async, tuples may be interleaved, so can't back up. */
+				if (((Append *) node)->nasyncplans > 0)
+					return false;
 
 				foreach(l, ((Append *) node)->appendplans)
 				{

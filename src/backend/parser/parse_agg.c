@@ -485,6 +485,13 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 				err = _("grouping operations are not allowed in index predicates");
 
 			break;
+		case EXPR_KIND_STATS_EXPRESSION:
+			if (isAgg)
+				err = _("aggregate functions are not allowed in statistics expressions");
+			else
+				err = _("grouping operations are not allowed in statistics expressions");
+
+			break;
 		case EXPR_KIND_ALTER_COL_TRANSFORM:
 			if (isAgg)
 				err = _("aggregate functions are not allowed in transform expressions");
@@ -909,6 +916,9 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("window functions are not allowed in index expressions");
+			break;
+		case EXPR_KIND_STATS_EXPRESSION:
+			err = _("window functions are not allowed in statistics expressions");
 			break;
 		case EXPR_KIND_INDEX_PREDICATE:
 			err = _("window functions are not allowed in index predicates");
@@ -1739,19 +1749,20 @@ cmp_list_len_asc(const ListCell *a, const ListCell *b)
 static int
 cmp_list_len_contents_asc(const ListCell *a, const ListCell *b)
 {
-	int		res = cmp_list_len_asc(a, b);
+	int			res = cmp_list_len_asc(a, b);
 
 	if (res == 0)
 	{
-		List		   *la = (List *) lfirst(a);
-		List		   *lb = (List *) lfirst(b);
-		ListCell	   *lca;
-		ListCell	   *lcb;
+		List	   *la = (List *) lfirst(a);
+		List	   *lb = (List *) lfirst(b);
+		ListCell   *lca;
+		ListCell   *lcb;
 
 		forboth(lca, la, lcb, lb)
 		{
-			int		va = lfirst_int(lca);
-			int		vb = lfirst_int(lcb);
+			int			va = lfirst_int(lca);
+			int			vb = lfirst_int(lcb);
+
 			if (va > vb)
 				return 1;
 			if (va < vb)
