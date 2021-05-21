@@ -650,16 +650,16 @@ bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate)
 	 * TIDs as each other.  The goal is to ignore relatively small differences
 	 * in the total number of promising entries, so that the whole process can
 	 * give a little weight to heapam factors (like heap block locality)
-	 * instead.  This isn't a trade-off, really -- we have nothing to lose.
-	 * It would be foolish to interpret small differences in npromisingtids
+	 * instead.  This isn't a trade-off, really -- we have nothing to lose. It
+	 * would be foolish to interpret small differences in npromisingtids
 	 * values as anything more than noise.
 	 *
 	 * We tiebreak on nhtids when sorting block group subsets that have the
 	 * same npromisingtids, but this has the same issues as npromisingtids,
-	 * and so nhtids is subject to the same power-of-two bucketing scheme.
-	 * The only reason that we don't fix nhtids in the same way here too is
-	 * that we'll need accurate nhtids values after the sort.  We handle
-	 * nhtids bucketization dynamically instead (in the sort comparator).
+	 * and so nhtids is subject to the same power-of-two bucketing scheme. The
+	 * only reason that we don't fix nhtids in the same way here too is that
+	 * we'll need accurate nhtids values after the sort.  We handle nhtids
+	 * bucketization dynamically instead (in the sort comparator).
 	 *
 	 * See bottomup_nblocksfavorable() for a full explanation of when and how
 	 * heap locality/favorable blocks can significantly influence when and how
@@ -1024,8 +1024,8 @@ systable_endscan(SysScanDesc sysscan)
 		UnregisterSnapshot(sysscan->snapshot);
 
 	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See
-	 * detailed comments in xact.c where these variables are declared.
+	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
+	 * comments in xact.c where these variables are declared.
 	 */
 	if (TransactionIdIsValid(CheckXidAlive))
 		bsysscan = false;

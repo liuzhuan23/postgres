@@ -414,8 +414,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 *
 	 * Deliberately avoid telling the stats collector about LP_DEAD items that
 	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
-	 * ANALYZE will consider the remaining LP_DEAD items to be dead tuples.
-	 * It seems like a good idea to err on the side of not vacuuming again too
+	 * ANALYZE will consider the remaining LP_DEAD items to be dead tuples. It
+	 * seems like a good idea to err on the side of not vacuuming again too
 	 * soon in cases where the failsafe prevented significant amounts of heap
 	 * vacuuming.
 	 */
@@ -500,6 +500,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 (long long) VacuumPageDirty);
 			if (vacrel->rel_pages > 0)
 			{
+				BlockNumber orig_rel_pages;
+
 				if (vacrel->do_index_vacuuming)
 				{
 					msgfmt = _(" %u pages from table (%.2f%% of total) had %lld dead item identifiers removed\n");
@@ -518,9 +520,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 					else
 						appendStringInfo(&buf, _("index scan bypassed by failsafe:"));
 				}
+				orig_rel_pages = vacrel->rel_pages + vacrel->pages_removed;
 				appendStringInfo(&buf, msgfmt,
 								 vacrel->lpdead_item_pages,
-								 100.0 * vacrel->lpdead_item_pages / vacrel->rel_pages,
+								 100.0 * vacrel->lpdead_item_pages / orig_rel_pages,
 								 (long long) vacrel->lpdead_items);
 			}
 			for (int i = 0; i < vacrel->nindexes; i++)
@@ -553,9 +556,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			}
 			appendStringInfo(&buf, _("system usage: %s\n"), pg_rusage_show(&ru0));
 			appendStringInfo(&buf,
-							 _("WAL usage: %ld records, %ld full page images, %llu bytes"),
-							 walusage.wal_records,
-							 walusage.wal_fpi,
+							 _("WAL usage: %lld records, %lld full page images, %llu bytes"),
+							 (long long) walusage.wal_records,
+							 (long long) walusage.wal_fpi,
 							 (unsigned long long) walusage.wal_bytes);
 
 			ereport(LOG,
@@ -2007,7 +2010,7 @@ static void
 lazy_vacuum_heap_rel(LVRelState *vacrel)
 {
 	int			tupindex;
-	BlockNumber	vacuumed_pages;
+	BlockNumber vacuumed_pages;
 	PGRUsage	ru0;
 	Buffer		vmbuffer = InvalidBuffer;
 	LVSavedErrInfo saved_err_info;
