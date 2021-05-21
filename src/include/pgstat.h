@@ -13,12 +13,12 @@
 
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
-#include "postmaster/pgarch.h" /* for MAX_XFN_CHARS */
+#include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
 #include "utils/backend_progress.h" /* for backward compatibility */
-#include "utils/backend_status.h" /* for backward compatibility */
+#include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/hsearch.h"
 #include "utils/relcache.h"
-#include "utils/wait_event.h" /* for backward compatibility */
+#include "utils/wait_event.h"	/* for backward compatibility */
 
 
 /* ----------
@@ -379,7 +379,7 @@ typedef struct PgStat_MsgResetslrucounter
 typedef struct PgStat_MsgResetreplslotcounter
 {
 	PgStat_MsgHdr m_hdr;
-	NameData      m_slotname;
+	NameData	m_slotname;
 	bool		clearall;
 } PgStat_MsgResetreplslotcounter;
 
@@ -1091,8 +1091,7 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 
 extern void pgstat_send_archiver(const char *xlog, bool failed);
 extern void pgstat_send_bgwriter(void);
-extern void pgstat_report_wal(void);
-extern bool pgstat_send_wal(bool force);
+extern void pgstat_send_wal(bool force);
 
 /* ----------
  * Support functions for the SQL-callable functions to
