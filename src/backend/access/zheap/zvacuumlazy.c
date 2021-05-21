@@ -592,6 +592,10 @@ lazy_scan_zheap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 						get_namespace_name(RelationGetNamespace(vacrel->rel)),
 						relname)));
 
+	empty_pages = vacuumed_pages = 0;
+	next_fsm_block_to_vacuum = (BlockNumber) 0;
+	num_tuples = tups_vacuumed = nkeep = nunused = 0;
+
 	nblocks = RelationGetNumberOfBlocks(vacrel->rel);
 	next_unskippable_block = 0;
 	next_fsm_block_to_vacuum = 0;
@@ -762,6 +766,10 @@ lazy_scan_zheap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 			 * standby. This is because we have covered all the dead tuples in
 			 * the first pass itself and we don't need another pass on heap
 			 * after index.
+			 *
+			 * A.H. This comment seems confused because even zheap handles
+			 * latestRemovedXid in the *prune* phase (lazy_scan_prune()), as
+			 * opposed to the actual vacuum (lazy_vacuum()).
 			 */
 			for (i = 0; i < vacrel->nindexes; i++)
 			{
@@ -942,6 +950,11 @@ lazy_scan_zheap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 											   NULL);
 
 		/* Now scan the page to collect vacuumable items. */
+		/*
+		 * A.H. In heap, lazy_scan_prune() seems to do the following as well
+		 * as the pruning above. We should probably try to implement similar
+		 * function here.
+		 */
 		hastup = false;
 		freespace = 0;
 		maxoff = PageGetMaxOffsetNumber(page);
@@ -1091,6 +1104,10 @@ lazy_scan_zheap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 				 * Forget the now-vacuumed tuples, and press on, but be
 				 * careful not to reset latestRemovedXid since we want that
 				 * value to be valid.
+				 *
+				 * A.H. The mention of latestRemovedXid is weird - as long as
+				 * nindexes == 0, latestRemovedXid shouldn't be needed anymore
+				 * for the current page, nor after the per-page loop.
 				 */
 				vacrel->dead_tuples->num_tuples = 0;
 				tupindex = 0;
