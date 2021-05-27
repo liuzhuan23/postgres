@@ -178,6 +178,11 @@ UndoCreate(UndoRecordSetType type, char persistence, int nestingLevel,
 	UndoRecordSet *urs;
 	MemoryContext oldcontext;
 
+	if (IsInParallelMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("cannot write undo during a parallel operation")));
+
 	Assert(UndoContext != NULL);
 
 	oldcontext = MemoryContextSwitchTo(UndoContext);
@@ -566,6 +571,11 @@ UndoPrepareToInsert(UndoRecordSet *urs, size_t record_size)
 	int			chunk_number_to_close = -1;
 	UndoLogNumber min_logno = InvalidUndoLogNumber;
 
+	if (IsInParallelMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("cannot write undo during a parallel operation")));
+
 	for (;;)
 	{
 		/* Figure out the total range we need to pin. */
@@ -770,6 +780,11 @@ UndoInsert(UndoRecordSet *urs,
 	UndoRecordSetChunk *first_chunk;
 	bool		first_insert;
 	uint16		init_page_offset = 0;
+
+	if (IsInParallelMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("cannot write undo during a parallel operation")));
 
 	Assert(!InRecovery);
 	Assert(CritSectionCount > 0);

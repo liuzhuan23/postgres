@@ -12,8 +12,21 @@ where the new monitoring infrastructure should help.
 
 Regardless the future development, the following thins need more work:
 
-    * Review if the merge with the postgres master is correct. One particular
-      known issue is that zheap currently does not implement parallel VACUUM.
+    * Review if the merge with the postgres master is correct.
+
+    * Implement insertion of UNDO records by parallel workers, so that
+      parallel INSERT works (currently it raises ERROR).
+
+      Besides that, with parallel UNDO we should be able to implement parallel
+      VACUUM not only for indexes (like the master branch currently does) but
+      also for the table itself. The point is that with zheap, VACUUM creates
+      undo records when changing the item pointers to the 'unused' state. Thus
+      it's not necessary to vacuum all indexes before vacuuming the table: if
+      the VACUUM command fails, the 'unused' items pointers in the table are
+      set back to 'dead' during rollback, and there is no risk that
+      not-yet-vacuumed index entries will point to reused heap entries with
+      different key value. In short, the UNDO eliminates some dependencies
+      between the stages of VACUUM and thus makes parallel processing easier.
 
     * Implement discard worker - unlike [3], it's essential for the zheap.
 
