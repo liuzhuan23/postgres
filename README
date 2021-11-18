@@ -1,4 +1,6 @@
 PostgreSQL Database Management System
+
+[liuzhuan] 12版本的TDE支持，全库全表TDE，不支持TDE的DDL
 =====================================
 
 This directory contains the source code distribution of the PostgreSQL
